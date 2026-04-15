@@ -15,7 +15,7 @@ final class SCH_Orchestrator {
     const CRON_HOOK = 'sch_orchestrator_minute_worker';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
-    const DB_VERSION = '0.5.6';
+    const DB_VERSION = '0.5.7';
     const EXACT_MATCH_THRESHOLD_PERCENT = 30;
 
     const OPTION_OPENAI_API_KEY = 'sch_openai_api_key';
@@ -63,6 +63,8 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_save_settings', [$this, 'handle_save_settings']);
         add_action('admin_post_sch_run_now', [$this, 'handle_run_now']);
         add_action('admin_post_sch_retry_job', [$this, 'handle_retry_job']);
+        add_action('admin_post_sch_approve_publish', [$this, 'handle_approve_publish']);
+        add_action('admin_post_sch_bulk_approve_publish', [$this, 'handle_bulk_approve_publish']);
         add_action('admin_post_sch_delete_client', [$this, 'handle_delete_client']);
         add_action('admin_post_sch_delete_site', [$this, 'handle_delete_site']);
         add_action('admin_post_sch_delete_keyword', [$this, 'handle_delete_keyword']);
@@ -352,6 +354,7 @@ final class SCH_Orchestrator {
         add_submenu_page('sch-content-hub', 'Blogs', 'Blogs', 'manage_options', 'sch-sites', [$this, 'render_sites']);
         add_submenu_page('sch-content-hub', 'Keywords', 'Keywords', 'manage_options', 'sch-keywords', [$this, 'render_keywords']);
         add_submenu_page('sch-content-hub', 'Jobs', 'Jobs', 'manage_options', 'sch-jobs', [$this, 'render_jobs']);
+        add_submenu_page('sch-content-hub', 'Redactie', 'Redactie', 'manage_options', 'sch-editorial', [$this, 'render_editorial']);
         add_submenu_page('sch-content-hub', 'Rapportage', 'Rapportage', 'manage_options', 'sch-reporting', [$this, 'render_reporting']);
         add_submenu_page('sch-content-hub', 'Logs', 'Logs', 'manage_options', 'sch-logs', [$this, 'render_logs']);
         add_submenu_page('sch-content-hub', 'Instellingen', 'Instellingen', 'manage_options', 'sch-settings', [$this, 'render_settings']);
@@ -370,6 +373,7 @@ final class SCH_Orchestrator {
     public function render_dashboard(): void {
         $queued  = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('jobs')} WHERE status='queued'");
         $running = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('jobs')} WHERE status='running'");
+        $ready_for_review = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('jobs')} WHERE status='awaiting_approval'");
         $done    = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('jobs')} WHERE status='published'");
         $failed  = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('jobs')} WHERE status='failed'");
         ?>
@@ -377,7 +381,7 @@ final class SCH_Orchestrator {
             <h1>Content Hub</h1>
             <?php $this->render_admin_notice(); ?>
             <div class="sch-grid-stats">
-                <?php foreach (['Queued jobs' => $queued, 'Running jobs' => $running, 'Published jobs' => $done, 'Failed jobs' => $failed] as $label => $value) : ?>
+                <?php foreach (['Queued jobs' => $queued, 'Running jobs' => $running, 'Wachten op redactie' => $ready_for_review, 'Published jobs' => $done, 'Failed jobs' => $failed] as $label => $value) : ?>
                     <div class="sch-stat">
                         <div class="sch-stat-label"><?php echo esc_html($label); ?></div>
                         <div class="sch-stat-value"><?php echo (int) $value; ?></div>
@@ -728,13 +732,92 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                         <td><?php echo (int) $row->attempts; ?></td>
                         <td><?php echo esc_html($row->started_at ?: ''); ?></td>
                         <td><?php echo esc_html($row->finished_at ?: ''); ?></td>
-                        <td><?php if (in_array($row->status, ['failed', 'published'], true)) : ?><a href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_retry_job&id=' . (int) $row->id), 'sch_retry_job')); ?>">Retry</a><?php endif; ?></td>
+                        <td>
+                            <?php if ($row->status === 'awaiting_approval') : ?>
+                                <a href="<?php echo esc_url(admin_url('admin.php?page=sch-editorial')); ?>">Naar redactie</a>
+                            <?php elseif (in_array($row->status, ['failed', 'published'], true)) : ?>
+                                <a href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_retry_job&id=' . (int) $row->id), 'sch_retry_job')); ?>">Retry</a>
+                            <?php endif; ?>
+                        </td>
                     </tr>
                 <?php endforeach; else : ?>
                     <tr><td colspan="9">Nog geen jobs.</td></tr>
                 <?php endif; ?>
                 </tbody>
             </table>
+        </div>
+        <?php
+    }
+
+    public function render_editorial(): void {
+        $rows = $this->db->get_results("
+            SELECT
+                a.id,
+                a.title,
+                a.slug,
+                a.meta_description,
+                a.created_at,
+                a.updated_at,
+                k.main_keyword,
+                c.name AS client_name,
+                s.name AS site_name,
+                j.id AS job_id
+            FROM {$this->table('articles')} a
+            INNER JOIN {$this->table('jobs')} j ON j.id = a.job_id
+            LEFT JOIN {$this->table('keywords')} k ON k.id = a.keyword_id
+            LEFT JOIN {$this->table('clients')} c ON c.id = a.client_id
+            LEFT JOIN {$this->table('sites')} s ON s.id = a.site_id
+            WHERE j.status = 'awaiting_approval'
+            ORDER BY a.created_at ASC
+            LIMIT 500
+        ");
+        ?>
+        <div class="wrap">
+            <h1>Redactionele approval</h1>
+            <?php $this->render_admin_notice(); ?>
+            <p>Kies hieronder welke artikelen gepubliceerd mogen worden op de remote blogs.</p>
+
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <?php wp_nonce_field('sch_bulk_approve_publish'); ?>
+                <input type="hidden" name="action" value="sch_bulk_approve_publish">
+                <table class="widefat striped">
+                    <thead>
+                    <tr>
+                        <th style="width:32px;"><input type="checkbox" onclick="document.querySelectorAll('.sch-article-check').forEach((el)=>{el.checked=this.checked;});"></th>
+                        <th>Titel</th>
+                        <th>Klant</th>
+                        <th>Blog</th>
+                        <th>Keyword</th>
+                        <th>Omschrijving</th>
+                        <th>Aangemaakt</th>
+                        <th>Actie</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    <?php if ($rows) : foreach ($rows as $row) : ?>
+                        <tr>
+                            <td><input class="sch-article-check" type="checkbox" name="article_ids[]" value="<?php echo (int) $row->id; ?>"></td>
+                            <td><strong><?php echo esc_html((string) $row->title); ?></strong><br><span class="sch-muted sch-code"><?php echo esc_html((string) $row->slug); ?></span></td>
+                            <td><?php echo esc_html((string) ($row->client_name ?: '')); ?></td>
+                            <td><?php echo esc_html((string) ($row->site_name ?: '')); ?></td>
+                            <td><?php echo esc_html((string) ($row->main_keyword ?: '')); ?></td>
+                            <td><?php echo esc_html((string) $row->meta_description); ?></td>
+                            <td><?php echo esc_html((string) $row->created_at); ?></td>
+                            <td>
+                                <a class="button button-primary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_approve_publish&article_id=' . (int) $row->id), 'sch_approve_publish')); ?>">Publiceren</a>
+                            </td>
+                        </tr>
+                    <?php endforeach; else : ?>
+                        <tr><td colspan="8">Geen artikelen die op redactionele approval wachten.</td></tr>
+                    <?php endif; ?>
+                    </tbody>
+                </table>
+                <?php if ($rows) : ?>
+                    <p style="margin-top:12px;">
+                        <button class="button button-primary" type="submit">Geselecteerde artikelen publiceren</button>
+                    </p>
+                <?php endif; ?>
+            </form>
         </div>
         <?php
     }
@@ -1887,6 +1970,58 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $this->redirect_with_message('sch-jobs', 'Job opnieuw in queue gezet.');
     }
 
+    public function handle_approve_publish(): void {
+        $this->verify_admin_nonce('sch_approve_publish');
+        $article_id = (int) ($_GET['article_id'] ?? 0);
+        if ($article_id <= 0) {
+            $this->redirect_with_message('sch-editorial', 'Artikel niet gevonden.', 'error');
+        }
+
+        try {
+            $this->approve_and_publish_article($article_id);
+            $this->redirect_with_message('sch-editorial', 'Artikel gepubliceerd.');
+        } catch (Throwable $e) {
+            $this->log('error', 'editorial', 'Publiceren na redactionele approval mislukt', [
+                'article_id' => $article_id,
+                'error' => $e->getMessage(),
+            ]);
+            $this->redirect_with_message('sch-editorial', 'Publiceren mislukt. Check logs.', 'error');
+        }
+    }
+
+    public function handle_bulk_approve_publish(): void {
+        $this->verify_admin_nonce('sch_bulk_approve_publish');
+        $article_ids = array_map('intval', (array) ($_POST['article_ids'] ?? []));
+        $article_ids = array_values(array_filter($article_ids, static function (int $id): bool {
+            return $id > 0;
+        }));
+
+        if (!$article_ids) {
+            $this->redirect_with_message('sch-editorial', 'Geen artikelen geselecteerd.', 'error');
+        }
+
+        $published = 0;
+        $failed = 0;
+        foreach ($article_ids as $article_id) {
+            try {
+                $this->approve_and_publish_article($article_id);
+                $published++;
+            } catch (Throwable $e) {
+                $failed++;
+                $this->log('error', 'editorial', 'Bulk publiceren mislukt voor artikel', [
+                    'article_id' => $article_id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        if ($failed > 0) {
+            $this->redirect_with_message('sch-editorial', "Klaar. Gepubliceerd: {$published}, mislukt: {$failed}.", 'error');
+        }
+
+        $this->redirect_with_message('sch-editorial', "Klaar. Gepubliceerd: {$published}.");
+    }
+
     public function handle_delete_client(): void {
         $this->verify_admin_nonce('sch_delete_client');
         $id = (int) ($_GET['id'] ?? 0);
@@ -2164,21 +2299,82 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
 
         $article_id = $this->store_article($job, $keyword, $client, $site, $article, $featured_image);
-        $publish_result = $this->publish_to_remote_site($site, $article, $featured_image, $job, $keyword, $client, $article_id);
+
+        $this->db->update($this->table('jobs'), [
+            'status'      => 'awaiting_approval',
+            'result'      => wp_json_encode([
+                'message' => 'Artikel klaar voor redactionele approval.',
+                'article_id' => $article_id,
+            ]),
+            'finished_at' => $this->now(),
+            'updated_at'  => $this->now(),
+        ], ['id' => $job_id]);
+
+        $this->db->update($this->table('keywords'), [
+            'status'            => 'ready_for_approval',
+            'last_processed_at' => $this->now(),
+            'updated_at'        => $this->now(),
+        ], ['id' => (int) $keyword->id]);
+
+        $this->log('info', 'editorial', 'Artikel wacht op redactionele approval', [
+            'job_id' => $job_id,
+            'article_id' => $article_id,
+            'site_id' => (int) $site->id,
+        ]);
+    }
+
+    private function approve_and_publish_article(int $article_id): void {
+        $article = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('articles')} WHERE id=%d", $article_id));
+        if (!$article) {
+            throw new RuntimeException('Artikel niet gevonden.');
+        }
+
+        $job = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('jobs')} WHERE id=%d", (int) $article->job_id));
+        $keyword = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('keywords')} WHERE id=%d", (int) $article->keyword_id));
+        $client = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('clients')} WHERE id=%d", (int) $article->client_id));
+        $site = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('sites')} WHERE id=%d", (int) $article->site_id));
+
+        if (!$job || !$keyword || !$client || !$site) {
+            throw new RuntimeException('Publicatiecontext is incompleet.');
+        }
+        if ($job->status !== 'awaiting_approval') {
+            throw new RuntimeException('Job staat niet op awaiting_approval.');
+        }
+
+        $publishable_article = [
+            'title' => (string) $article->title,
+            'slug' => (string) $article->slug,
+            'content' => (string) $article->content,
+            'meta_title' => (string) $article->meta_title,
+            'meta_description' => (string) $article->meta_description,
+            'canonical_url' => (string) $article->canonical_url,
+            'article_type' => (string) $article->article_type,
+            'backlinks' => $this->decode_json_array($article->backlinks_data),
+        ];
+
+        $featured_image = null;
+        if (!empty($article->featured_image_data)) {
+            $decoded_image = json_decode((string) $article->featured_image_data, true);
+            if (is_array($decoded_image)) {
+                $featured_image = $decoded_image;
+            }
+        }
+
+        $publish_result = $this->publish_to_remote_site($site, $publishable_article, $featured_image, $job, $keyword, $client, (int) $article->id);
 
         $this->db->update($this->table('articles'), [
             'remote_post_id' => sanitize_text_field((string) ($publish_result['remote_post_id'] ?? '')),
             'remote_url'     => esc_url_raw((string) ($publish_result['remote_url'] ?? '')),
             'publish_status' => sanitize_text_field((string) ($publish_result['status'] ?? 'draft')),
             'updated_at'     => $this->now(),
-        ], ['id' => $article_id]);
+        ], ['id' => (int) $article->id]);
 
         $this->db->update($this->table('jobs'), [
             'status'      => 'published',
             'result'      => wp_json_encode($publish_result),
             'finished_at' => $this->now(),
             'updated_at'  => $this->now(),
-        ], ['id' => $job_id]);
+        ], ['id' => (int) $job->id]);
 
         $this->db->update($this->table('keywords'), [
             'status'            => 'processed',
