@@ -195,7 +195,221 @@ final class SCH_Receiver {
             }
         }
 
+        $this->apply_internal_links($post_id, $payload);
+
         return $post_id;
+    }
+
+    private function apply_internal_links(int $post_id, array $payload): void {
+        $terms = $this->extract_link_terms($payload);
+        $related_posts = $this->find_related_posts($post_id, $terms, 4);
+
+        if (count($related_posts) < 2) {
+            $fallback = get_posts([
+                'post_type' => 'post',
+                'post_status' => 'publish',
+                'post__not_in' => array_merge([$post_id], array_map(static fn(array $item): int => (int) $item['ID'], $related_posts)),
+                'posts_per_page' => 4,
+                'orderby' => 'date',
+                'order' => 'DESC',
+                'no_found_rows' => true,
+            ]);
+
+            foreach ($fallback as $post) {
+                if (count($related_posts) >= 4) {
+                    break;
+                }
+                $related_posts[] = [
+                    'ID' => (int) $post->ID,
+                    'post_title' => (string) $post->post_title,
+                    'permalink' => (string) get_permalink($post->ID),
+                ];
+            }
+        }
+
+        if (count($related_posts) < 2) {
+            delete_post_meta($post_id, '_sch_internal_links_applied');
+            return;
+        }
+
+        $link_count = max(2, min(4, count($related_posts)));
+        $related_posts = array_slice($related_posts, 0, $link_count);
+
+        $source_content = (string) ($payload['content'] ?? '');
+        $content_without_old_links = preg_replace('/<!-- sch-internal-links:start -->.*?<!-- sch-internal-links:end -->/is', '', $source_content);
+        if (!is_string($content_without_old_links)) {
+            $content_without_old_links = $source_content;
+        }
+
+        $internal_links = [];
+        $items_markup = '';
+        foreach ($related_posts as $related) {
+            $anchor = $this->build_safe_anchor((string) $related['post_title'], $terms);
+            $url = esc_url((string) $related['permalink']);
+            if ($url === '' || $anchor === '') {
+                continue;
+            }
+
+            $items_markup .= '<li><a href="' . $url . '">' . esc_html($anchor) . '</a></li>';
+            $internal_links[] = [
+                'post_id' => (int) $related['ID'],
+                'url' => esc_url_raw((string) $related['permalink']),
+                'anchor' => $anchor,
+            ];
+        }
+
+        if (count($internal_links) < 2) {
+            delete_post_meta($post_id, '_sch_internal_links_applied');
+            return;
+        }
+
+        $links_block = "\n<!-- sch-internal-links:start -->\n";
+        $links_block .= '<h2>' . esc_html__('Gerelateerde artikelen', 'sch-receiver') . "</h2>\n";
+        $links_block .= "<p>" . esc_html__('Lees ook deze aanvullende artikelen over vergelijkbare onderwerpen:', 'sch-receiver') . "</p>\n";
+        $links_block .= "<ul>\n" . $items_markup . "</ul>\n";
+        $links_block .= "<!-- sch-internal-links:end -->";
+
+        $updated_content = trim($content_without_old_links) . "\n\n" . $links_block;
+        wp_update_post([
+            'ID' => $post_id,
+            'post_content' => wp_kses_post($updated_content),
+        ]);
+
+        update_post_meta($post_id, '_sch_internal_links_applied', $internal_links);
+        update_post_meta($post_id, '_sch_internal_link_terms', $terms);
+    }
+
+    private function extract_link_terms(array $payload): array {
+        $candidate_text = implode(' ', [
+            (string) ($payload['keyword'] ?? ''),
+            (string) ($payload['title'] ?? ''),
+            (string) ($payload['category'] ?? ''),
+        ]);
+        $candidate_text = sanitize_text_field(wp_strip_all_tags($candidate_text));
+        if ($candidate_text === '') {
+            return [];
+        }
+
+        $parts = preg_split('/\s+/u', mb_strtolower($candidate_text));
+        if (!is_array($parts)) {
+            return [];
+        }
+
+        $stopwords = ['de', 'het', 'een', 'en', 'van', 'voor', 'met', 'over', 'naar', 'in', 'op', 'te', 'bij', 'aan', 'of', 'is', 'je', 'jouw', 'uw'];
+        $terms = [];
+        foreach ($parts as $part) {
+            $clean = preg_replace('/[^a-z0-9\-]+/u', '', (string) $part);
+            if (!is_string($clean) || mb_strlen($clean) < 4 || in_array($clean, $stopwords, true)) {
+                continue;
+            }
+            $terms[$clean] = true;
+            if (count($terms) >= 10) {
+                break;
+            }
+        }
+
+        return array_keys($terms);
+    }
+
+    private function find_related_posts(int $post_id, array $terms, int $limit = 4): array {
+        if (empty($terms)) {
+            return [];
+        }
+
+        $candidates = get_posts([
+            'post_type' => 'post',
+            'post_status' => 'publish',
+            'post__not_in' => [$post_id],
+            'posts_per_page' => 30,
+            'orderby' => 'date',
+            'order' => 'DESC',
+            's' => implode(' ', $terms),
+            'no_found_rows' => true,
+        ]);
+
+        if (empty($candidates)) {
+            return [];
+        }
+
+        $scored = [];
+        foreach ($candidates as $candidate) {
+            $text = mb_strtolower(wp_strip_all_tags((string) $candidate->post_title . ' ' . (string) $candidate->post_excerpt));
+            $score = 0;
+            foreach ($terms as $term) {
+                if (str_contains($text, $term)) {
+                    $score++;
+                }
+            }
+
+            if ($score < 1) {
+                continue;
+            }
+
+            $scored[] = [
+                'score' => $score,
+                'ID' => (int) $candidate->ID,
+                'post_title' => (string) $candidate->post_title,
+                'permalink' => (string) get_permalink($candidate->ID),
+            ];
+        }
+
+        usort($scored, static fn(array $a, array $b): int => $b['score'] <=> $a['score']);
+
+        $unique = [];
+        foreach ($scored as $item) {
+            if (count($unique) >= $limit) {
+                break;
+            }
+            if (empty($item['permalink'])) {
+                continue;
+            }
+            $unique[$item['ID']] = [
+                'ID' => $item['ID'],
+                'post_title' => $item['post_title'],
+                'permalink' => $item['permalink'],
+            ];
+        }
+
+        return array_values($unique);
+    }
+
+    private function build_safe_anchor(string $title, array $terms): string {
+        $normalized_title = trim(sanitize_text_field(wp_strip_all_tags($title)));
+        if ($normalized_title === '') {
+            return '';
+        }
+
+        $words = preg_split('/\s+/u', $normalized_title);
+        if (!is_array($words)) {
+            return $normalized_title;
+        }
+
+        $selected = [];
+        foreach ($words as $word) {
+            $clean = preg_replace('/[^a-z0-9\-]+/iu', '', (string) $word);
+            if (!is_string($clean) || $clean === '') {
+                continue;
+            }
+
+            $selected[] = $clean;
+            if (count($selected) >= 6) {
+                break;
+            }
+        }
+
+        if (empty($selected)) {
+            return $normalized_title;
+        }
+
+        $anchor = implode(' ', $selected);
+        $anchor_lower = mb_strtolower($anchor);
+        foreach ($terms as $term) {
+            if (str_contains($anchor_lower, $term)) {
+                return $anchor;
+            }
+        }
+
+        return $anchor;
     }
 
     private function ensure_featured_image(int $post_id, array $image): int {
