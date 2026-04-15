@@ -2931,7 +2931,27 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $category = trim((string) $site->default_category);
 
         if ($category === '') {
-            $category = $this->determine_category_for_article($article);
+            $category = $this->determine_category_for_site((string) $site->base_url, (string) $site->name);
+
+            $updated = $this->db->update(
+                $this->table('sites'),
+                [
+                    'default_category' => $category,
+                    'updated_at' => $this->now(),
+                ],
+                ['id' => (int) $site->id]
+            );
+
+            if ($updated === false) {
+                $this->log('warning', 'site_category', 'Site categorie kon niet worden opgeslagen na auto-classificatie.', [
+                    'site_id' => (int) $site->id,
+                    'base_url' => (string) $site->base_url,
+                    'category' => $category,
+                    'db_error' => $this->db->last_error,
+                ]);
+            } else {
+                $site->default_category = $category;
+            }
         }
 
         $payload = [
