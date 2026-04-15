@@ -15,7 +15,7 @@ final class SCH_Orchestrator {
     const CRON_HOOK = 'sch_orchestrator_minute_worker';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
-    const DB_VERSION = '0.5.4';
+    const DB_VERSION = '0.5.5';
 
     const OPTION_OPENAI_API_KEY = 'sch_openai_api_key';
     const OPTION_OPENAI_MODEL = 'sch_openai_model';
@@ -302,6 +302,11 @@ final class SCH_Orchestrator {
 
         $this->maybe_add_column($clients, 'research_urls', "ALTER TABLE {$clients} ADD COLUMN research_urls LONGTEXT NULL AFTER link_targets");
         $this->maybe_add_column($clients, 'max_posts_per_month', "ALTER TABLE {$clients} ADD COLUMN max_posts_per_month INT UNSIGNED NOT NULL DEFAULT 0 AFTER research_urls");
+        $this->maybe_add_column($sites, 'default_status', "ALTER TABLE {$sites} ADD COLUMN default_status VARCHAR(20) NOT NULL DEFAULT 'draft' AFTER receiver_secret");
+        $this->maybe_add_column($sites, 'default_category', "ALTER TABLE {$sites} ADD COLUMN default_category VARCHAR(191) NOT NULL DEFAULT '' AFTER default_status");
+        $this->maybe_add_column($sites, 'max_posts_per_day', "ALTER TABLE {$sites} ADD COLUMN max_posts_per_day INT UNSIGNED NOT NULL DEFAULT 3 AFTER default_category");
+        $this->maybe_add_column($sites, 'publish_priority', "ALTER TABLE {$sites} ADD COLUMN publish_priority INT NOT NULL DEFAULT 10 AFTER max_posts_per_day");
+        $this->maybe_add_column($sites, 'is_active', "ALTER TABLE {$sites} ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER publish_priority");
         $this->maybe_add_column($keywords, 'source', "ALTER TABLE {$keywords} ADD COLUMN source VARCHAR(50) NOT NULL DEFAULT 'manual' AFTER status");
         $this->maybe_add_column($keywords, 'source_context', "ALTER TABLE {$keywords} ADD COLUMN source_context LONGTEXT NULL AFTER source");
         $this->maybe_add_column($jobs, 'attempts', "ALTER TABLE {$jobs} ADD COLUMN attempts INT UNSIGNED NOT NULL DEFAULT 0 AFTER status");
