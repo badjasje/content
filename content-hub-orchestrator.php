@@ -2,7 +2,7 @@
 /*
 Plugin Name: Shortcut Content Hub Orchestrator
 Description: Centrale content orchestrator voor klanten, keyword discovery, jobs en distributie naar externe WordPress blogs via een receiver plugin. Inclusief AI schrijf- en redactieflow, website research, Unsplash featured images en bulk blog import.
-Version: 0.5.3
+Version: 0.5.4
 Author: OpenAI
 */
 
@@ -11,11 +11,11 @@ if (!defined('ABSPATH')) {
 }
 
 final class SCH_Orchestrator {
-    const VERSION = '0.5.3';
+    const VERSION = '0.5.4';
     const CRON_HOOK = 'sch_orchestrator_minute_worker';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
-    const DB_VERSION = '0.5.3';
+    const DB_VERSION = '0.5.4';
 
     const OPTION_OPENAI_API_KEY = 'sch_openai_api_key';
     const OPTION_OPENAI_MODEL = 'sch_openai_model';
@@ -279,6 +279,7 @@ final class SCH_Orchestrator {
             remote_post_id VARCHAR(100) NOT NULL DEFAULT '',
             remote_url VARCHAR(255) NOT NULL DEFAULT '',
             publish_status VARCHAR(50) NOT NULL DEFAULT 'draft',
+            backlinks_data LONGTEXT NULL,
             featured_image_data LONGTEXT NULL,
             created_at DATETIME NOT NULL,
             updated_at DATETIME NOT NULL,
@@ -304,6 +305,7 @@ final class SCH_Orchestrator {
         $this->maybe_add_column($keywords, 'source', "ALTER TABLE {$keywords} ADD COLUMN source VARCHAR(50) NOT NULL DEFAULT 'manual' AFTER status");
         $this->maybe_add_column($keywords, 'source_context', "ALTER TABLE {$keywords} ADD COLUMN source_context LONGTEXT NULL AFTER source");
         $this->maybe_add_column($jobs, 'attempts', "ALTER TABLE {$jobs} ADD COLUMN attempts INT UNSIGNED NOT NULL DEFAULT 0 AFTER status");
+        $this->maybe_add_column($articles, 'backlinks_data', "ALTER TABLE {$articles} ADD COLUMN backlinks_data LONGTEXT NULL AFTER publish_status");
         $this->maybe_add_column($articles, 'featured_image_data', "ALTER TABLE {$articles} ADD COLUMN featured_image_data LONGTEXT NULL AFTER publish_status");
 
         add_option(self::OPTION_OPENAI_MODEL, 'gpt-5.4-mini');
@@ -326,6 +328,7 @@ final class SCH_Orchestrator {
         add_submenu_page('sch-content-hub', 'Blogs', 'Blogs', 'manage_options', 'sch-sites', [$this, 'render_sites']);
         add_submenu_page('sch-content-hub', 'Keywords', 'Keywords', 'manage_options', 'sch-keywords', [$this, 'render_keywords']);
         add_submenu_page('sch-content-hub', 'Jobs', 'Jobs', 'manage_options', 'sch-jobs', [$this, 'render_jobs']);
+        add_submenu_page('sch-content-hub', 'Rapportage', 'Rapportage', 'manage_options', 'sch-reporting', [$this, 'render_reporting']);
         add_submenu_page('sch-content-hub', 'Logs', 'Logs', 'manage_options', 'sch-logs', [$this, 'render_logs']);
         add_submenu_page('sch-content-hub', 'Instellingen', 'Instellingen', 'manage_options', 'sch-settings', [$this, 'render_settings']);
     }
@@ -712,6 +715,136 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         <?php
     }
 
+    public function render_reporting(): void {
+        $selected_month = isset($_GET['month']) ? sanitize_text_field((string) wp_unslash($_GET['month'])) : gmdate('Y-m');
+        if (!preg_match('/^\d{4}\-\d{2}$/', $selected_month)) {
+            $selected_month = gmdate('Y-m');
+        }
+
+        $client_filter = isset($_GET['client_id']) ? max(0, (int) $_GET['client_id']) : 0;
+        $month_start = $selected_month . '-01 00:00:00';
+        $month_end = gmdate('Y-m-d H:i:s', strtotime($selected_month . '-01 +1 month'));
+        $clients = $this->db->get_results("SELECT id, name FROM {$this->table('clients')} ORDER BY name ASC");
+
+        $query = "
+            SELECT a.*, c.name AS client_name, s.name AS site_name, k.main_keyword
+            FROM {$this->table('articles')} a
+            LEFT JOIN {$this->table('clients')} c ON c.id = a.client_id
+            LEFT JOIN {$this->table('sites')} s ON s.id = a.site_id
+            LEFT JOIN {$this->table('keywords')} k ON k.id = a.keyword_id
+            WHERE a.created_at >= %s AND a.created_at < %s
+        ";
+        $params = [$month_start, $month_end];
+        if ($client_filter > 0) {
+            $query .= " AND a.client_id = %d";
+            $params[] = $client_filter;
+        }
+        $query .= " ORDER BY a.created_at DESC";
+
+        $articles = $this->db->get_results($this->db->prepare($query, ...$params));
+        $by_client = [];
+        $anchor_counts = [];
+        foreach ($articles as $article) {
+            $client_name = (string) ($article->client_name ?: 'Onbekende klant');
+            if (!isset($by_client[$client_name])) {
+                $by_client[$client_name] = [
+                    'count' => 0,
+                    'backlinks' => 0,
+                ];
+            }
+
+            $backlinks = $this->decode_json_array($article->backlinks_data);
+            $by_client[$client_name]['count']++;
+            $by_client[$client_name]['backlinks'] += count($backlinks);
+
+            foreach ($backlinks as $backlink) {
+                $anchor = sanitize_text_field((string) ($backlink['anchor'] ?? ''));
+                if ($anchor === '') {
+                    $anchor = '(leeg)';
+                }
+                if (!isset($anchor_counts[$anchor])) {
+                    $anchor_counts[$anchor] = 0;
+                }
+                $anchor_counts[$anchor]++;
+            }
+        }
+        arsort($anchor_counts);
+        ?>
+        <div class="wrap">
+            <h1>Rapportage</h1>
+            <?php $this->render_admin_notice(); ?>
+
+            <form method="get" style="margin-bottom:16px;">
+                <input type="hidden" name="page" value="sch-reporting">
+                <label for="sch-report-month"><strong>Maand</strong></label>
+                <input id="sch-report-month" type="month" name="month" value="<?php echo esc_attr($selected_month); ?>">
+                <label for="sch-report-client" style="margin-left:12px;"><strong>Klant</strong></label>
+                <select id="sch-report-client" name="client_id">
+                    <option value="0">Alle klanten</option>
+                    <?php foreach ($clients as $client) : ?>
+                        <option value="<?php echo (int) $client->id; ?>" <?php selected($client_filter, (int) $client->id); ?>>
+                            <?php echo esc_html($client->name); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+                <button class="button button-primary">Filter</button>
+            </form>
+
+            <h2>Overzicht per klant</h2>
+            <table class="widefat striped">
+                <thead><tr><th>Klant</th><th>Artikelen</th><th>Backlinks</th></tr></thead>
+                <tbody>
+                <?php if ($by_client) : foreach ($by_client as $client_name => $stats) : ?>
+                    <tr>
+                        <td><?php echo esc_html($client_name); ?></td>
+                        <td><?php echo (int) $stats['count']; ?></td>
+                        <td><?php echo (int) $stats['backlinks']; ?></td>
+                    </tr>
+                <?php endforeach; else : ?>
+                    <tr><td colspan="3">Geen artikelen gevonden voor deze selectie.</td></tr>
+                <?php endif; ?>
+                </tbody>
+            </table>
+
+            <h2 style="margin-top:24px;">Top gebruikte anchor teksten</h2>
+            <table class="widefat striped">
+                <thead><tr><th>Anchor tekst</th><th>Aantal keer gebruikt</th></tr></thead>
+                <tbody>
+                <?php if ($anchor_counts) : foreach ($anchor_counts as $anchor => $count) : ?>
+                    <tr>
+                        <td><?php echo esc_html($anchor); ?></td>
+                        <td><?php echo (int) $count; ?></td>
+                    </tr>
+                <?php endforeach; else : ?>
+                    <tr><td colspan="2">Geen anchors beschikbaar in deze maand.</td></tr>
+                <?php endif; ?>
+                </tbody>
+            </table>
+
+            <h2 style="margin-top:24px;">Artikelen met backlinks</h2>
+            <table class="widefat striped">
+                <thead><tr><th>Datum</th><th>Klant</th><th>Blog</th><th>Keyword</th><th>Titel</th><th>Backlinks</th></tr></thead>
+                <tbody>
+                <?php if ($articles) : foreach ($articles as $article) : ?>
+                    <?php $backlinks = $this->decode_json_array($article->backlinks_data); ?>
+                    <tr>
+                        <td><?php echo esc_html((string) $article->created_at); ?></td>
+                        <td><?php echo esc_html((string) ($article->client_name ?: '')); ?></td>
+                        <td><?php echo esc_html((string) ($article->site_name ?: '')); ?></td>
+                        <td><?php echo esc_html((string) ($article->main_keyword ?: '')); ?></td>
+                        <td><?php echo esc_html((string) $article->title); ?></td>
+                        <td><?php echo esc_html($this->implode_target_strings($backlinks)); ?></td>
+                    </tr>
+                <?php endforeach; else : ?>
+                    <tr><td colspan="6">Geen artikelen gevonden voor deze selectie.</td></tr>
+                <?php endif; ?>
+                </tbody>
+            </table>
+            <p class="description" style="margin-top:12px;">Backlinks en anchor teksten worden per artikel opgeslagen bij het aanmaken en blijven hierdoor historisch per maand beschikbaar.</p>
+        </div>
+        <?php
+    }
+
     public function render_logs(): void {
         $rows = $this->db->get_results("SELECT * FROM {$this->table('logs')} ORDER BY id DESC LIMIT 300");
         ?>
@@ -826,6 +959,43 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             }
         }
         return implode(' | ', $out);
+    }
+
+    private function extract_backlinks_from_content(string $content, array $allowed_targets): array {
+        if ($content === '' || !$allowed_targets) {
+            return [];
+        }
+
+        $allowed_by_url = [];
+        foreach ($allowed_targets as $target) {
+            $target_url = esc_url_raw((string) ($target['url'] ?? ''));
+            if ($target_url !== '') {
+                $allowed_by_url[$target_url] = true;
+            }
+        }
+
+        if (!$allowed_by_url) {
+            return [];
+        }
+
+        $matches = [];
+        preg_match_all('/<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)<\/a>/is', $content, $matches, PREG_SET_ORDER);
+
+        $backlinks = [];
+        foreach ($matches as $match) {
+            $url = esc_url_raw(html_entity_decode((string) ($match[1] ?? ''), ENT_QUOTES, 'UTF-8'));
+            if ($url === '' || !isset($allowed_by_url[$url])) {
+                continue;
+            }
+
+            $anchor = sanitize_text_field(wp_strip_all_tags((string) ($match[2] ?? '')));
+            $backlinks[] = [
+                'url' => $url,
+                'anchor' => $anchor,
+            ];
+        }
+
+        return $backlinks;
     }
 
     private function sanitize_link_targets_from_post(): string {
@@ -2699,6 +2869,9 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     }
 
     private function store_article(object $job, object $keyword, object $client, object $site, array $article, ?array $featured_image): int {
+        $sanitized_content = wp_kses_post($article['content'] ?? '');
+        $backlinks = $this->extract_backlinks_from_content($sanitized_content, $this->get_client_link_targets($client));
+
         $inserted = $this->db->insert($this->table('articles'), [
             'job_id' => (int) $job->id,
             'keyword_id' => (int) $keyword->id,
@@ -2707,12 +2880,13 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'article_type' => sanitize_text_field($article['article_type'] ?? 'pillar'),
             'title' => wp_strip_all_tags($article['title'] ?? ''),
             'slug' => sanitize_title($article['slug'] ?? ''),
-            'content' => wp_kses_post($article['content'] ?? ''),
+            'content' => $sanitized_content,
             'meta_title' => sanitize_text_field($article['meta_title'] ?? ''),
             'meta_description' => sanitize_textarea_field($article['meta_description'] ?? ''),
             'canonical_url' => esc_url_raw($article['canonical_url'] ?? ''),
             'featured_image_data' => $featured_image ? wp_json_encode($featured_image) : null,
             'publish_status' => 'queued',
+            'backlinks_data' => $backlinks ? wp_json_encode($backlinks) : null,
             'created_at' => $this->now(),
             'updated_at' => $this->now(),
         ]);
