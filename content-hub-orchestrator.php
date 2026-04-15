@@ -1398,6 +1398,10 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'updated_at' => $this->now(),
         ];
 
+        if ($data['default_category'] === '') {
+            $data['default_category'] = $this->determine_category_for_site($data['base_url'], $data['name']);
+        }
+
         $existing_id = (int) $this->db->get_var($this->db->prepare(
             "SELECT id FROM {$this->table('sites')} WHERE base_url=%s LIMIT 1",
             $blog_url
@@ -1473,6 +1477,10 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
         if (!$this->is_valid_default_status($data['default_status'])) {
             $data['default_status'] = 'draft';
+        }
+
+        if ($data['default_category'] === '') {
+            $data['default_category'] = $this->determine_category_for_site($data['base_url'], $data['name']);
         }
 
         if ($id > 0) {
@@ -1554,6 +1562,10 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'is_active'         => 1,
                 'updated_at'        => $this->now(),
             ];
+
+            if ($data['default_category'] === '') {
+                $data['default_category'] = $this->determine_category_for_site($data['base_url'], $data['name']);
+            }
 
             if ($existing) {
                 if ($update_existing) {
@@ -2911,6 +2923,11 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
     private function publish_to_remote_site(object $site, array $article, ?array $featured_image, object $job, object $keyword, object $client, int $article_id): array {
         $trusted_source_domain = $this->get_trusted_source_domain();
+        $category = trim((string) $site->default_category);
+
+        if ($category === '') {
+            $category = $this->determine_category_for_article($article);
+        }
 
         $payload = [
             'timestamp' => time(),
@@ -2923,7 +2940,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'meta_description' => (string) $article['meta_description'],
             'canonical_url' => (string) ($article['canonical_url'] ?? ''),
             'status' => (string) $site->default_status,
-            'category' => (string) $site->default_category,
+            'category' => $category,
             'external_job_id' => (int) $job->id,
             'external_article_id' => $article_id,
             'client_name' => (string) $client->name,
@@ -2978,6 +2995,118 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         ]);
 
         return $json;
+    }
+
+    private function determine_category_for_article(array $article): string {
+        $allowed_categories = $this->allowed_blog_categories();
+
+        try {
+            $result = $this->openai_json_call(
+                'blog_category_picker',
+                [
+                    'role' => 'Je bent een strikte content-classifier voor WordPress categorieën.',
+                    'goal' => 'Kies exact één categorie uit de toegestane lijst op basis van titel en content.',
+                ],
+                [
+                    'title' => (string) ($article['title'] ?? ''),
+                    'content' => wp_strip_all_tags((string) ($article['content'] ?? '')),
+                    'allowed_categories' => $allowed_categories,
+                ],
+                [
+                    'type' => 'object',
+                    'additionalProperties' => false,
+                    'properties' => [
+                        'category' => [
+                            'type' => 'string',
+                            'enum' => $allowed_categories,
+                        ],
+                    ],
+                    'required' => ['category'],
+                ]
+            );
+
+            $category = sanitize_text_field((string) ($result['category'] ?? ''));
+            if (in_array($category, $allowed_categories, true)) {
+                return $category;
+            }
+        } catch (Throwable $e) {
+            $this->log('warning', 'openai_category', 'OpenAI categorisatie mislukt, fallback categorie toegepast.', [
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        return 'Inspiratie & Tips';
+    }
+
+    private function determine_category_for_site(string $base_url, string $site_name): string {
+        $allowed_categories = $this->allowed_blog_categories();
+
+        try {
+            $page = $this->fetch_and_extract_page($base_url);
+
+            $result = $this->openai_json_call(
+                'site_category_picker',
+                [
+                    'role' => 'Je bent een strikte website-classifier voor WordPress blog categorieën.',
+                    'goal' => 'Kies exact één categorie uit de toegestane lijst op basis van website-inhoud.',
+                ],
+                [
+                    'site_name' => $site_name,
+                    'base_url' => $base_url,
+                    'page_title' => (string) ($page['title'] ?? ''),
+                    'page_text' => (string) ($page['text'] ?? ''),
+                    'allowed_categories' => $allowed_categories,
+                ],
+                [
+                    'type' => 'object',
+                    'additionalProperties' => false,
+                    'properties' => [
+                        'category' => [
+                            'type' => 'string',
+                            'enum' => $allowed_categories,
+                        ],
+                    ],
+                    'required' => ['category'],
+                ]
+            );
+
+            $category = sanitize_text_field((string) ($result['category'] ?? ''));
+            if (in_array($category, $allowed_categories, true)) {
+                return $category;
+            }
+        } catch (Throwable $e) {
+            $this->log('warning', 'openai_site_category', 'Site categorisatie mislukt, fallback categorie toegepast.', [
+                'base_url' => $base_url,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        return 'Inspiratie & Tips';
+    }
+
+    private function allowed_blog_categories(): array {
+        return [
+            'Gezondheid',
+            'Lifestyle',
+            'Wonen',
+            'Reizen',
+            'Technologie',
+            'Werk & Carrière',
+            'Ondernemen',
+            'Relaties',
+            'Persoonlijke Groei',
+            'Geld & Financieel',
+            'Voeding',
+            'Bewegen & Sport',
+            'Mindset',
+            'Gezin & Opvoeding',
+            'Beauty & Verzorging',
+            'Cultuur',
+            'Entertainment',
+            'Duurzaamheid',
+            'Vrije Tijd',
+            'Inspiratie & Tips',
+        ];
     }
 }
 
