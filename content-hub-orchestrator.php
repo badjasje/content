@@ -15,7 +15,7 @@ final class SCH_Orchestrator {
     const CRON_HOOK = 'sch_orchestrator_minute_worker';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
-    const DB_VERSION = '0.5.7';
+    const DB_VERSION = '0.5.8';
     const EXACT_MATCH_THRESHOLD_PERCENT = 30;
 
     const OPTION_OPENAI_API_KEY = 'sch_openai_api_key';
@@ -229,6 +229,7 @@ final class SCH_Orchestrator {
             main_keyword VARCHAR(191) NOT NULL,
             secondary_keywords LONGTEXT NULL,
             target_site_ids LONGTEXT NULL,
+            target_site_categories LONGTEXT NULL,
             content_type VARCHAR(50) NOT NULL DEFAULT 'pillar',
             tone_of_voice VARCHAR(100) NOT NULL DEFAULT 'deskundig maar menselijk',
             target_word_count INT UNSIGNED NOT NULL DEFAULT 1200,
@@ -330,6 +331,7 @@ final class SCH_Orchestrator {
         $this->maybe_add_column($sites, 'is_active', "ALTER TABLE {$sites} ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER publish_priority");
         $this->maybe_add_column($keywords, 'source', "ALTER TABLE {$keywords} ADD COLUMN source VARCHAR(50) NOT NULL DEFAULT 'manual' AFTER status");
         $this->maybe_add_column($keywords, 'source_context', "ALTER TABLE {$keywords} ADD COLUMN source_context LONGTEXT NULL AFTER source");
+        $this->maybe_add_column($keywords, 'target_site_categories', "ALTER TABLE {$keywords} ADD COLUMN target_site_categories LONGTEXT NULL AFTER target_site_ids");
         $this->maybe_add_column($jobs, 'attempts', "ALTER TABLE {$jobs} ADD COLUMN attempts INT UNSIGNED NOT NULL DEFAULT 0 AFTER status");
         $this->maybe_add_column($articles, 'backlinks_data', "ALTER TABLE {$articles} ADD COLUMN backlinks_data LONGTEXT NULL AFTER publish_status");
         $this->maybe_add_column($articles, 'featured_image_data', "ALTER TABLE {$articles} ADD COLUMN featured_image_data LONGTEXT NULL AFTER publish_status");
@@ -558,7 +560,17 @@ final class SCH_Orchestrator {
                         <tr><th>Naam</th><td><input type="text" name="name" class="regular-text" required value="<?php echo esc_attr($edit->name ?? ''); ?>"></td></tr>
                         <tr><th>Base URL</th><td><input type="url" name="base_url" class="regular-text" required value="<?php echo esc_attr($edit->base_url ?? ''); ?>"></td></tr>
                         <tr><th>Default status</th><td><select name="default_status"><option value="draft" <?php selected(($edit->default_status ?? ''), 'draft'); ?>>draft</option><option value="publish" <?php selected(($edit->default_status ?? ''), 'publish'); ?>>publish</option></select></td></tr>
-                        <tr><th>Default category</th><td><input type="text" name="default_category" class="regular-text" value="<?php echo esc_attr($edit->default_category ?? ''); ?>"></td></tr>
+                        <tr>
+                            <th>Default category</th>
+                            <td>
+                                <select name="default_category">
+                                    <option value="">Automatisch bepalen</option>
+                                    <?php foreach ($this->allowed_blog_categories() as $category) : ?>
+                                        <option value="<?php echo esc_attr($category); ?>" <?php selected(($edit->default_category ?? ''), $category); ?>><?php echo esc_html($category); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </td>
+                        </tr>
                         <tr><th>Max posts per dag</th><td><input type="number" name="max_posts_per_day" value="<?php echo esc_attr($edit->max_posts_per_day ?? 3); ?>" min="1"></td></tr>
                         <tr><th>Prioriteit</th><td><input type="number" name="publish_priority" value="<?php echo esc_attr($edit->publish_priority ?? 10); ?>"></td></tr>
                     </table>
@@ -596,7 +608,17 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                                 </select>
                             </td>
                         </tr>
-                        <tr><th>Fallback category</th><td><input type="text" name="bulk_default_category" class="regular-text" value=""></td></tr>
+                        <tr>
+                            <th>Fallback category</th>
+                            <td>
+                                <select name="bulk_default_category">
+                                    <option value="">Automatisch bepalen</option>
+                                    <?php foreach ($this->allowed_blog_categories() as $category) : ?>
+                                        <option value="<?php echo esc_attr($category); ?>"><?php echo esc_html($category); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </td>
+                        </tr>
                         <tr><th>Fallback max posts per dag</th><td><input type="number" name="bulk_max_posts_per_day" value="3" min="1"></td></tr>
                         <tr><th>Fallback prioriteit</th><td><input type="number" name="bulk_publish_priority" value="10"></td></tr>
                         <tr>
@@ -638,7 +660,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
     public function render_keywords(): void {
         $clients = $this->db->get_results("SELECT id, name FROM {$this->table('clients')} WHERE is_active=1 ORDER BY name ASC");
-        $sites   = $this->db->get_results("SELECT id, name FROM {$this->table('sites')} WHERE is_active=1 ORDER BY publish_priority ASC, name ASC");
+        $sites   = $this->db->get_results("SELECT id, name, default_category FROM {$this->table('sites')} WHERE is_active=1 ORDER BY publish_priority ASC, name ASC");
         $edit_id = isset($_GET['edit']) ? (int) $_GET['edit'] : 0;
         $edit = $edit_id ? $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('keywords')} WHERE id=%d", $edit_id)) : null;
         $secondary = $edit ? $this->get_secondary_keywords_list($edit) : [''];
@@ -646,6 +668,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             $secondary = [''];
         }
         $selected_site_ids = $edit ? $this->decode_json_array($edit->target_site_ids) : [];
+        $selected_site_categories = $edit ? $this->decode_json_array($edit->target_site_categories) : [];
         $rows = $this->db->get_results("SELECT k.*, c.name AS client_name FROM {$this->table('keywords')} k LEFT JOIN {$this->table('clients')} c ON c.id = k.client_id ORDER BY k.id DESC");
         ?>
         <div class="wrap">
@@ -682,7 +705,19 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <tr><th>Tone of voice</th><td><input type="text" name="tone_of_voice" value="<?php echo esc_attr($edit->tone_of_voice ?? 'deskundig maar menselijk'); ?>" class="regular-text"></td></tr>
                     <tr><th>Woordaantal</th><td><input type="number" name="target_word_count" value="<?php echo esc_attr($edit->target_word_count ?? 1200); ?>" min="300"></td></tr>
                     <tr><th>Prioriteit</th><td><input type="number" name="priority" value="<?php echo esc_attr($edit->priority ?? 10); ?>"></td></tr>
-                    <tr><th>Doelblogs</th><td><?php foreach ($sites as $site) : ?><label style="display:block;margin-bottom:6px;"><input type="checkbox" name="target_site_ids[]" value="<?php echo (int) $site->id; ?>" <?php checked(in_array((int) $site->id, array_map('intval', $selected_site_ids), true)); ?>> <?php echo esc_html($site->name); ?></label><?php endforeach; ?></td></tr>
+                    <tr>
+                        <th>Filter op blog-categorie</th>
+                        <td>
+                            <?php foreach ($this->allowed_blog_categories() as $category) : ?>
+                                <label style="display:block;margin-bottom:6px;">
+                                    <input type="checkbox" name="target_site_categories[]" value="<?php echo esc_attr($category); ?>" <?php checked(in_array($category, $selected_site_categories, true)); ?>>
+                                    <?php echo esc_html($category); ?>
+                                </label>
+                            <?php endforeach; ?>
+                            <p class="description">Optioneel: als je categorieën selecteert, worden alleen jobs aangemaakt voor blogs in deze categorieën.</p>
+                        </td>
+                    </tr>
+                    <tr><th>Doelblogs</th><td><?php foreach ($sites as $site) : ?><label style="display:block;margin-bottom:6px;"><input type="checkbox" name="target_site_ids[]" value="<?php echo (int) $site->id; ?>" <?php checked(in_array((int) $site->id, array_map('intval', $selected_site_ids), true)); ?>> <?php echo esc_html($site->name); ?> <span class="sch-muted">(<?php echo esc_html($site->default_category ?: 'onbekend'); ?>)</span></label><?php endforeach; ?></td></tr>
                 </table>
                 <p><button class="button button-primary"><?php echo $edit ? 'Keyword bijwerken' : 'Keyword opslaan'; ?></button></p>
             </form>
@@ -1466,7 +1501,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 }
 
                 if (isset($remaining[1])) {
-                    $default_category = sanitize_text_field((string) $remaining[1]);
+                    $default_category = $this->sanitize_blog_category((string) $remaining[1]);
                 }
 
                 if (isset($remaining[2])) {
@@ -1499,7 +1534,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'base_url' => $base_url,
                 'receiver_secret' => '',
                 'default_status' => $default_status,
-                'default_category' => $default_category,
+                'default_category' => $this->sanitize_blog_category((string) $default_category),
                 'max_posts_per_day' => $max_posts_per_day,
                 'publish_priority' => $publish_priority,
             ];
@@ -1591,7 +1626,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'base_url' => $blog_url,
             'receiver_secret' => '',
             'default_status' => $default_status,
-            'default_category' => sanitize_text_field((string) ($payload['default_category'] ?? '')),
+            'default_category' => $this->sanitize_blog_category((string) ($payload['default_category'] ?? '')),
             'max_posts_per_day' => max(1, (int) ($payload['max_posts_per_day'] ?? 3)),
             'publish_priority' => (int) ($payload['publish_priority'] ?? 10),
             'is_active' => 1,
@@ -1664,7 +1699,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'base_url'          => $this->normalize_site_url((string) ($_POST['base_url'] ?? '')),
             'receiver_secret'   => '',
             'default_status'    => sanitize_text_field($_POST['default_status'] ?? 'draft'),
-            'default_category'  => sanitize_text_field($_POST['default_category'] ?? ''),
+            'default_category'  => $this->sanitize_blog_category((string) ($_POST['default_category'] ?? '')),
             'max_posts_per_day' => max(1, (int) ($_POST['max_posts_per_day'] ?? 3)),
             'publish_priority'  => (int) ($_POST['publish_priority'] ?? 10),
             'is_active'         => 1,
@@ -1714,7 +1749,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
         $bulk_sites = (string) wp_unslash($_POST['bulk_sites'] ?? '');
         $fallback_status = sanitize_text_field($_POST['bulk_default_status'] ?? 'draft');
-        $fallback_category = sanitize_text_field($_POST['bulk_default_category'] ?? '');
+        $fallback_category = $this->sanitize_blog_category((string) ($_POST['bulk_default_category'] ?? ''));
         $fallback_max_posts_per_day = max(1, (int) ($_POST['bulk_max_posts_per_day'] ?? 3));
         $fallback_publish_priority = (int) ($_POST['bulk_publish_priority'] ?? 10);
         $update_existing = isset($_POST['bulk_update_existing']);
@@ -1813,6 +1848,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
         $id = (int) ($_POST['id'] ?? 0);
         $site_ids = array_values(array_unique(array_filter(array_map('intval', (array) ($_POST['target_site_ids'] ?? [])))));
+        $selected_categories = $this->sanitize_blog_categories((array) ($_POST['target_site_categories'] ?? []));
 
         if (empty($site_ids)) {
             $this->log('error', 'keyword', 'Keyword niet opgeslagen: geen doelblogs geselecteerd', [
@@ -1837,6 +1873,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'main_keyword'       => $main_keyword,
             'secondary_keywords' => $this->sanitize_secondary_keywords_from_post(),
             'target_site_ids'    => wp_json_encode($site_ids),
+            'target_site_categories' => wp_json_encode($selected_categories),
             'content_type'       => sanitize_text_field($_POST['content_type'] ?? 'pillar'),
             'tone_of_voice'      => sanitize_text_field($_POST['tone_of_voice'] ?? 'deskundig maar menselijk'),
             'target_word_count'  => max(300, (int) ($_POST['target_word_count'] ?? 1200)),
@@ -2077,6 +2114,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
         $site_ids = $this->decode_json_array($keyword->target_site_ids);
         $site_ids = array_values(array_unique(array_filter(array_map('intval', (array) $site_ids))));
+        $target_site_categories = $this->sanitize_blog_categories($this->decode_json_array($keyword->target_site_categories));
 
         if (empty($site_ids)) {
             $this->log('error', 'jobs', 'Geen jobs aangemaakt: target_site_ids is leeg', [
@@ -2121,6 +2159,24 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 continue;
             }
 
+            if (!empty($target_site_categories)) {
+                $site_category = (string) $this->db->get_var($this->db->prepare(
+                    "SELECT default_category FROM {$this->table('sites')} WHERE id=%d LIMIT 1",
+                    $site_id
+                ));
+                $site_category = $this->sanitize_blog_category($site_category);
+
+                if (!in_array($site_category, $target_site_categories, true)) {
+                    $this->vlog('jobs', 'Site overgeslagen bij job-aanmaak: valt buiten categorie-filter', [
+                        'keyword_id' => $keyword_id,
+                        'site_id' => $site_id,
+                        'site_category' => $site_category,
+                        'allowed_categories' => $target_site_categories,
+                    ]);
+                    continue;
+                }
+            }
+
             $inserted = $this->db->insert($this->table('jobs'), [
                 'keyword_id' => (int) $keyword->id,
                 'client_id'  => (int) $keyword->client_id,
@@ -2151,6 +2207,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $this->log('info', 'jobs', 'Job-aanmaak afgerond', [
             'keyword_id' => $keyword_id,
             'requested_site_ids' => $site_ids,
+            'target_site_categories' => $target_site_categories,
             'created_jobs' => $created,
             'client_max_posts_per_month' => $client_max_posts_per_month,
             'monthly_budget' => $monthly_budget,
@@ -2712,6 +2769,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'main_keyword'       => $main_keyword,
                 'secondary_keywords' => wp_json_encode($secondary),
                 'target_site_ids'    => wp_json_encode($site_ids),
+                'target_site_categories' => wp_json_encode([]),
                 'content_type'       => sanitize_text_field((string) ($idea['content_type'] ?? 'pillar')),
                 'tone_of_voice'      => 'deskundig maar menselijk',
                 'target_word_count'  => max(600, (int) ($idea['target_word_count'] ?? 1200)),
@@ -3454,7 +3512,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             ]);
         }
 
-        return 'Inspiratie & Tips';
+        return 'Inspiratie';
     }
 
     private function determine_category_for_site(string $base_url, string $site_name): string {
@@ -3500,7 +3558,43 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             ]);
         }
 
-        return 'Inspiratie & Tips';
+        return 'Inspiratie';
+    }
+
+    private function sanitize_blog_categories(array $categories): array {
+        $clean = [];
+        foreach ($categories as $category) {
+            $normalized = $this->sanitize_blog_category((string) $category);
+            if ($normalized !== '') {
+                $clean[] = $normalized;
+            }
+        }
+        return array_values(array_unique($clean));
+    }
+
+    private function sanitize_blog_category(string $category): string {
+        $category = sanitize_text_field(trim($category));
+        if ($category === '') {
+            return '';
+        }
+
+        $allowed_categories = $this->allowed_blog_categories();
+        if (in_array($category, $allowed_categories, true)) {
+            return $category;
+        }
+
+        $legacy_map = [
+            'Technologie' => 'Tech',
+            'Werk & Carrière' => 'Werk',
+            'Persoonlijke Groei' => 'Groei',
+            'Geld & Financieel' => 'Geld',
+            'Bewegen & Sport' => 'Sport',
+            'Gezin & Opvoeding' => 'Gezin',
+            'Beauty & Verzorging' => 'Beauty',
+            'Inspiratie & Tips' => 'Inspiratie',
+        ];
+
+        return $legacy_map[$category] ?? '';
     }
 
     private function allowed_blog_categories(): array {
@@ -3509,22 +3603,22 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'Lifestyle',
             'Wonen',
             'Reizen',
-            'Technologie',
-            'Werk & Carrière',
+            'Tech',
+            'Werk',
             'Ondernemen',
             'Relaties',
-            'Persoonlijke Groei',
-            'Geld & Financieel',
+            'Groei',
+            'Geld',
             'Voeding',
-            'Bewegen & Sport',
+            'Sport',
             'Mindset',
-            'Gezin & Opvoeding',
-            'Beauty & Verzorging',
+            'Gezin',
+            'Beauty',
             'Cultuur',
             'Entertainment',
             'Duurzaamheid',
             'Vrije Tijd',
-            'Inspiratie & Tips',
+            'Inspiratie',
         ];
     }
 }
