@@ -13,6 +13,7 @@ if (!defined('ABSPATH')) {
 final class SCH_Orchestrator {
     const VERSION = '0.5.2';
     const CRON_HOOK = 'sch_orchestrator_minute_worker';
+    const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
     const DB_VERSION = '0.5.2';
 
@@ -65,6 +66,8 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_delete_site', [$this, 'handle_delete_site']);
         add_action('admin_post_sch_delete_keyword', [$this, 'handle_delete_keyword']);
         add_action('admin_post_sch_discover_keywords', [$this, 'handle_discover_keywords']);
+        add_action('admin_post_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
+        add_action('admin_post_nopriv_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
 
         add_action('admin_enqueue_scripts', [$this, 'admin_assets']);
     }
@@ -911,6 +914,18 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         return untrailingslashit(esc_url_raw($url));
     }
 
+    private function normalize_host(string $url): string {
+        $host = wp_parse_url($url, PHP_URL_HOST);
+        return strtolower((string) $host);
+    }
+
+    private function json_response(array $data, int $status_code = 200): void {
+        status_header($status_code);
+        header('Content-Type: application/json; charset=' . get_bloginfo('charset'));
+        echo wp_json_encode($data);
+        exit;
+    }
+
     private function get_trusted_source_domain(): string {
         $url = $this->normalize_site_url((string) get_option(self::OPTION_TRUSTED_SOURCE_DOMAIN, 'https://shortcut.nl'));
         if ($url === '') {
@@ -1104,6 +1119,108 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
         $this->vlog('client', 'Klant opgeslagen', $data);
         $this->redirect_with_message('sch-clients', 'Klant opgeslagen.');
+    }
+
+    public function handle_register_receiver_blog(): void {
+        $raw = file_get_contents('php://input');
+        $payload = json_decode((string) $raw, true);
+        if (!is_array($payload)) {
+            $payload = array_map('wp_unslash', $_POST);
+        }
+
+        $blog_url = $this->normalize_site_url((string) ($payload['blog_url'] ?? ''));
+        if ($blog_url === '') {
+            $this->json_response([
+                'success' => false,
+                'message' => 'blog_url ontbreekt of is ongeldig.',
+            ], 400);
+        }
+
+        $source_header = $this->normalize_site_url((string) ($_SERVER['HTTP_X_SCH_SOURCE_SITE'] ?? ''));
+        if ($source_header !== '' && $this->normalize_host($source_header) !== $this->normalize_host($blog_url)) {
+            $this->log('warning', 'receiver_registration', 'Registratie afgewezen door host mismatch', [
+                'blog_url' => $blog_url,
+                'source_header' => $source_header,
+            ]);
+            $this->json_response([
+                'success' => false,
+                'message' => 'Source header komt niet overeen met blog_url.',
+            ], 403);
+        }
+
+        $default_status = sanitize_key((string) ($payload['default_status'] ?? 'draft'));
+        if (!$this->is_valid_default_status($default_status)) {
+            $default_status = 'draft';
+        }
+
+        $name = sanitize_text_field((string) ($payload['blog_name'] ?? ''));
+        if ($name === '') {
+            $name = $this->derive_site_name_from_url($blog_url);
+        }
+
+        $data = [
+            'name' => $name,
+            'base_url' => $blog_url,
+            'receiver_secret' => '',
+            'default_status' => $default_status,
+            'default_category' => sanitize_text_field((string) ($payload['default_category'] ?? '')),
+            'max_posts_per_day' => max(1, (int) ($payload['max_posts_per_day'] ?? 3)),
+            'publish_priority' => (int) ($payload['publish_priority'] ?? 10),
+            'is_active' => 1,
+            'updated_at' => $this->now(),
+        ];
+
+        $existing_id = (int) $this->db->get_var($this->db->prepare(
+            "SELECT id FROM {$this->table('sites')} WHERE base_url=%s LIMIT 1",
+            $blog_url
+        ));
+
+        $operation = 'created';
+        if ($existing_id > 0) {
+            $updated = $this->db->update($this->table('sites'), $data, ['id' => $existing_id]);
+            if ($updated === false) {
+                $this->log('error', 'receiver_registration', 'Bestaande blog updaten mislukt', [
+                    'site_id' => $existing_id,
+                    'db_error' => $this->db->last_error,
+                    'payload' => $payload,
+                ]);
+                $this->json_response([
+                    'success' => false,
+                    'message' => 'Bestaande blog kon niet worden bijgewerkt.',
+                ], 500);
+            }
+            $site_id = $existing_id;
+            $operation = 'updated';
+        } else {
+            $data['created_at'] = $this->now();
+            $inserted = $this->db->insert($this->table('sites'), $data);
+            if (!$inserted) {
+                $this->log('error', 'receiver_registration', 'Nieuwe blog registreren mislukt', [
+                    'db_error' => $this->db->last_error,
+                    'payload' => $payload,
+                ]);
+                $this->json_response([
+                    'success' => false,
+                    'message' => 'Blog kon niet worden aangemaakt.',
+                ], 500);
+            }
+            $site_id = (int) $this->db->insert_id;
+        }
+
+        $this->log('info', 'receiver_registration', 'Receiver-blog geregistreerd', [
+            'site_id' => $site_id,
+            'operation' => $operation,
+            'blog_url' => $blog_url,
+            'receiver_url' => esc_url_raw((string) ($payload['receiver_url'] ?? '')),
+            'receiver_version' => sanitize_text_field((string) ($payload['receiver_version'] ?? '')),
+        ]);
+
+        $this->json_response([
+            'success' => true,
+            'site_id' => $site_id,
+            'operation' => $operation,
+            'blog_url' => $blog_url,
+        ], 200);
     }
 
     public function handle_save_site(): void {
