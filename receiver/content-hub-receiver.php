@@ -19,6 +19,7 @@ final class SCH_Receiver {
     const OPTION_TRUSTED_SOURCE_DOMAIN = 'sch_receiver_trusted_source_domain';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const REGISTRATION_TIMEOUT = 20;
+    const DEFAULT_TRUSTED_SOURCE_DOMAIN = 'https://shortcut.nl';
 
     private static ?SCH_Receiver $instance = null;
 
@@ -73,9 +74,9 @@ final class SCH_Receiver {
             wp_die('Geen toegang.');
         }
         check_admin_referer('sch_receiver_save_settings');
-        $trusted_source_domain = $this->normalize_site_url((string) ($_POST['trusted_source_domain'] ?? 'https://shortcut.nl'));
+        $trusted_source_domain = $this->normalize_site_url((string) ($_POST['trusted_source_domain'] ?? self::DEFAULT_TRUSTED_SOURCE_DOMAIN));
         if ($trusted_source_domain === '') {
-            $trusted_source_domain = 'https://shortcut.nl';
+            $trusted_source_domain = self::DEFAULT_TRUSTED_SOURCE_DOMAIN;
         }
         update_option(self::OPTION_TRUSTED_SOURCE_DOMAIN, $trusted_source_domain);
         $this->notify_orchestrator_about_receiver();
@@ -158,10 +159,7 @@ final class SCH_Receiver {
         update_post_meta($post_id, '_sch_client_name', sanitize_text_field((string) ($payload['client_name'] ?? '')));
         update_post_meta($post_id, '_sch_keyword', sanitize_text_field((string) ($payload['keyword'] ?? '')));
         update_post_meta($post_id, '_sch_content_type', sanitize_text_field((string) ($payload['content_type'] ?? '')));
-        update_post_meta($post_id, '_yoast_wpseo_title', sanitize_text_field((string) ($payload['meta_title'] ?? '')));
-        update_post_meta($post_id, '_yoast_wpseo_metadesc', sanitize_textarea_field((string) ($payload['meta_description'] ?? '')));
-        update_post_meta($post_id, 'rank_math_title', sanitize_text_field((string) ($payload['meta_title'] ?? '')));
-        update_post_meta($post_id, 'rank_math_description', sanitize_textarea_field((string) ($payload['meta_description'] ?? '')));
+        $this->update_seo_meta($post_id, $payload);
 
         $canonical = esc_url_raw((string) ($payload['canonical_url'] ?? ''));
         if ($canonical !== '') {
@@ -176,12 +174,7 @@ final class SCH_Receiver {
                 $term = wp_insert_term($category_name, 'category');
             }
 
-            $term_id = 0;
-            if (is_array($term) && !empty($term['term_id'])) {
-                $term_id = (int) $term['term_id'];
-            } elseif (is_int($term) || ctype_digit((string) $term)) {
-                $term_id = (int) $term;
-            }
+            $term_id = $this->extract_term_id($term);
 
             if ($term_id > 0) {
                 wp_set_post_terms($post_id, [$term_id], 'category', false);
@@ -244,7 +237,7 @@ final class SCH_Receiver {
         $internal_links = [];
         $items_markup = '';
         foreach ($related_posts as $related) {
-            $anchor = $this->build_safe_anchor((string) $related['post_title'], $terms);
+            $anchor = $this->build_safe_anchor((string) $related['post_title']);
             $url = esc_url((string) $related['permalink']);
             if ($url === '' || $anchor === '') {
                 continue;
@@ -373,7 +366,7 @@ final class SCH_Receiver {
         return array_values($unique);
     }
 
-    private function build_safe_anchor(string $title, array $terms): string {
+    private function build_safe_anchor(string $title): string {
         $normalized_title = trim(sanitize_text_field(wp_strip_all_tags($title)));
         if ($normalized_title === '') {
             return '';
@@ -401,15 +394,31 @@ final class SCH_Receiver {
             return $normalized_title;
         }
 
-        $anchor = implode(' ', $selected);
-        $anchor_lower = mb_strtolower($anchor);
-        foreach ($terms as $term) {
-            if (str_contains($anchor_lower, $term)) {
-                return $anchor;
-            }
+        return implode(' ', $selected);
+    }
+
+    private function update_seo_meta(int $post_id, array $payload): void {
+        $meta_title = sanitize_text_field((string) ($payload['meta_title'] ?? ''));
+        $meta_description = sanitize_textarea_field((string) ($payload['meta_description'] ?? ''));
+
+        update_post_meta($post_id, '_yoast_wpseo_title', $meta_title);
+        update_post_meta($post_id, '_yoast_wpseo_metadesc', $meta_description);
+        update_post_meta($post_id, 'rank_math_title', $meta_title);
+        update_post_meta($post_id, 'rank_math_description', $meta_description);
+    }
+
+    /**
+     * @param array<string, mixed>|int|string $term
+     */
+    private function extract_term_id($term): int {
+        if (is_array($term) && !empty($term['term_id'])) {
+            return (int) $term['term_id'];
+        }
+        if (is_int($term) || ctype_digit((string) $term)) {
+            return (int) $term;
         }
 
-        return $anchor;
+        return 0;
     }
 
     private function ensure_featured_image(int $post_id, array $image): int {
@@ -467,9 +476,9 @@ final class SCH_Receiver {
     }
 
     private function get_trusted_source_domain(): string {
-        $saved = $this->normalize_site_url((string) get_option(self::OPTION_TRUSTED_SOURCE_DOMAIN, 'https://shortcut.nl'));
+        $saved = $this->normalize_site_url((string) get_option(self::OPTION_TRUSTED_SOURCE_DOMAIN, self::DEFAULT_TRUSTED_SOURCE_DOMAIN));
         if ($saved === '') {
-            return 'https://shortcut.nl';
+            return self::DEFAULT_TRUSTED_SOURCE_DOMAIN;
         }
         return $saved;
     }
@@ -500,20 +509,7 @@ final class SCH_Receiver {
             return false;
         }
 
-        $candidates = [];
-        $source_header = isset($_SERVER['HTTP_X_SCH_SOURCE_SITE']) ? (string) $_SERVER['HTTP_X_SCH_SOURCE_SITE'] : '';
-        $origin_header = isset($_SERVER['HTTP_ORIGIN']) ? (string) $_SERVER['HTTP_ORIGIN'] : '';
-        $referer_header = isset($_SERVER['HTTP_REFERER']) ? (string) $_SERVER['HTTP_REFERER'] : '';
-
-        if ($source_header !== '') {
-            $candidates[] = $source_header;
-        }
-        if ($origin_header !== '') {
-            $candidates[] = $origin_header;
-        }
-        if ($referer_header !== '') {
-            $candidates[] = $referer_header;
-        }
+        $candidates = $this->request_source_candidates();
 
         foreach ($candidates as $candidate) {
             if ($this->normalize_host($candidate) === $trusted_host) {
@@ -522,6 +518,19 @@ final class SCH_Receiver {
         }
 
         return false;
+    }
+
+    /**
+     * @return string[]
+     */
+    private function request_source_candidates(): array {
+        $headers = [
+            isset($_SERVER['HTTP_X_SCH_SOURCE_SITE']) ? (string) $_SERVER['HTTP_X_SCH_SOURCE_SITE'] : '',
+            isset($_SERVER['HTTP_ORIGIN']) ? (string) $_SERVER['HTTP_ORIGIN'] : '',
+            isset($_SERVER['HTTP_REFERER']) ? (string) $_SERVER['HTTP_REFERER'] : '',
+        ];
+
+        return array_values(array_filter($headers, static fn(string $header): bool => $header !== ''));
     }
 
     private function json_response(array $data, int $status_code): void {
