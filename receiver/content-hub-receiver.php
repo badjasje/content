@@ -175,8 +175,16 @@ final class SCH_Receiver {
             if (!$term) {
                 $term = wp_insert_term($category_name, 'category');
             }
+
+            $term_id = 0;
             if (is_array($term) && !empty($term['term_id'])) {
-                wp_set_post_terms($post_id, [(int) $term['term_id']], 'category', false);
+                $term_id = (int) $term['term_id'];
+            } elseif (is_int($term) || ctype_digit((string) $term)) {
+                $term_id = (int) $term;
+            }
+
+            if ($term_id > 0) {
+                wp_set_post_terms($post_id, [$term_id], 'category', false);
             }
         }
 
