@@ -1,0 +1,2614 @@
+<?php
+/*
+Plugin Name: Shortcut Content Hub Orchestrator
+Description: Centrale content orchestrator voor klanten, keyword discovery, jobs en distributie naar externe WordPress blogs via een receiver plugin. Inclusief AI schrijf- en redactieflow, website research, Unsplash featured images en bulk blog import.
+Version: 0.5.2
+Author: OpenAI
+*/
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+final class SCH_Orchestrator {
+    const VERSION = '0.5.2';
+    const CRON_HOOK = 'sch_orchestrator_minute_worker';
+    const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
+    const DB_VERSION = '0.5.2';
+
+    const OPTION_OPENAI_API_KEY = 'sch_openai_api_key';
+    const OPTION_OPENAI_MODEL = 'sch_openai_model';
+    const OPTION_OPENAI_TEMPERATURE = 'sch_openai_temperature';
+    const OPTION_UNSPLASH_ACCESS_KEY = 'sch_unsplash_access_key';
+    const OPTION_ENABLE_FEATURED_IMAGES = 'sch_enable_featured_images';
+    const OPTION_ENABLE_SUPPORTING = 'sch_enable_supporting';
+    const OPTION_ENABLE_AUTO_DISCOVERY = 'sch_enable_auto_discovery';
+    const OPTION_MAX_RESEARCH_PAGES = 'sch_max_research_pages';
+    const OPTION_MAX_DISCOVERY_KEYWORDS = 'sch_max_discovery_keywords';
+    const OPTION_ENABLE_VERBOSE_LOGS = 'sch_enable_verbose_logs';
+    const OPTION_TRUSTED_SOURCE_DOMAIN = 'sch_trusted_source_domain';
+
+    private static ?SCH_Orchestrator $instance = null;
+    private wpdb $db;
+
+    public static function instance(): self {
+        if (!self::$instance) {
+            self::$instance = new self();
+        }
+        return self::$instance;
+    }
+
+    private function __construct() {
+        global $wpdb;
+        $this->db = $wpdb;
+
+        $current_db_version = (string) get_option(self::OPTION_DB_VERSION, '');
+        if ($current_db_version !== self::DB_VERSION) {
+            $this->create_tables();
+        }
+
+        register_activation_hook(__FILE__, [$this, 'activate']);
+        register_deactivation_hook(__FILE__, [$this, 'deactivate']);
+
+        add_filter('cron_schedules', [$this, 'add_cron_schedule']);
+        add_action(self::CRON_HOOK, [$this, 'run_worker']);
+
+        add_action('admin_menu', [$this, 'admin_menu']);
+        add_action('admin_post_sch_save_client', [$this, 'handle_save_client']);
+        add_action('admin_post_sch_save_site', [$this, 'handle_save_site']);
+        add_action('admin_post_sch_bulk_save_sites', [$this, 'handle_bulk_save_sites']);
+        add_action('admin_post_sch_save_keyword', [$this, 'handle_save_keyword']);
+        add_action('admin_post_sch_save_settings', [$this, 'handle_save_settings']);
+        add_action('admin_post_sch_run_now', [$this, 'handle_run_now']);
+        add_action('admin_post_sch_retry_job', [$this, 'handle_retry_job']);
+        add_action('admin_post_sch_delete_client', [$this, 'handle_delete_client']);
+        add_action('admin_post_sch_delete_site', [$this, 'handle_delete_site']);
+        add_action('admin_post_sch_delete_keyword', [$this, 'handle_delete_keyword']);
+        add_action('admin_post_sch_discover_keywords', [$this, 'handle_discover_keywords']);
+
+        add_action('admin_enqueue_scripts', [$this, 'admin_assets']);
+    }
+
+    public function activate(): void {
+        $this->create_tables();
+        $this->schedule_cron();
+    }
+
+    public function deactivate(): void {
+        wp_clear_scheduled_hook(self::CRON_HOOK);
+    }
+
+    public function add_cron_schedule(array $schedules): array {
+        if (!isset($schedules['every_minute'])) {
+            $schedules['every_minute'] = [
+                'interval' => 60,
+                'display'  => 'Every Minute',
+            ];
+        }
+        return $schedules;
+    }
+
+    public function admin_assets(string $hook): void {
+        if (strpos($hook, 'sch-') === false && strpos($hook, 'sch_content_hub') === false) {
+            return;
+        }
+
+        $css = '
+        .sch-card{background:#fff;border:1px solid #dcdcde;padding:20px;max-width:1240px}
+        .sch-repeater{display:grid;gap:12px;margin-top:8px}
+        .sch-repeater-row{display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:center;padding:12px;background:#f6f7f7;border:1px solid #dcdcde}
+        .sch-repeater-row.single{grid-template-columns:1fr auto}
+        .sch-grid-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;max-width:1000px}
+        .sch-stat{background:#fff;border:1px solid #ddd;padding:18px}
+        .sch-stat-label{font-size:14px;color:#666}
+        .sch-stat-value{font-size:28px;font-weight:700}
+        .sch-actions a{margin-right:8px}
+        .sch-log-payload{max-width:560px;white-space:pre-wrap;word-break:break-word;font-family:monospace;font-size:12px}
+        .sch-notice{margin:12px 0;padding:10px 12px;background:#fff;border-left:4px solid #72aee6}
+        .sch-two-col{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start}
+        .sch-inline-form{display:inline}
+        .sch-muted{color:#646970}
+        .sch-code{font-family:monospace}
+        @media (max-width:1100px){.sch-two-col{grid-template-columns:1fr}.sch-grid-stats{grid-template-columns:1fr 1fr}}
+        ';
+        wp_register_style('sch-admin-inline', false);
+        wp_enqueue_style('sch-admin-inline');
+        wp_add_inline_style('sch-admin-inline', $css);
+
+        $js = '
+        document.addEventListener("click",function(e){
+            const addBtn=e.target.closest("[data-sch-add-row]");
+            const removeBtn=e.target.closest("[data-sch-remove-row]");
+            if(addBtn){
+                e.preventDefault();
+                const target=document.querySelector(addBtn.getAttribute("data-sch-add-row"));
+                if(!target)return;
+                const template=target.querySelector("template");
+                if(!template)return;
+                target.querySelector(".sch-repeater-rows").appendChild(template.content.cloneNode(true));
+                return;
+            }
+            if(removeBtn){
+                e.preventDefault();
+                const row=removeBtn.closest(".sch-repeater-row");
+                if(row)row.remove();
+            }
+        });
+        ';
+        wp_register_script('sch-admin-inline', '', [], false, true);
+        wp_enqueue_script('sch-admin-inline');
+        wp_add_inline_script('sch-admin-inline', $js);
+    }
+
+    private function schedule_cron(): void {
+        if (!wp_next_scheduled(self::CRON_HOOK)) {
+            wp_schedule_event(time() + 60, 'every_minute', self::CRON_HOOK);
+        }
+    }
+
+    private function table(string $name): string {
+        return $this->db->prefix . 'sch_' . $name;
+    }
+
+    private function maybe_add_column(string $table, string $column, string $sql): void {
+        $exists = $this->db->get_var($this->db->prepare(
+            "SHOW COLUMNS FROM {$table} LIKE %s",
+            $column
+        ));
+
+        if (!$exists) {
+            $result = $this->db->query($sql);
+
+            if ($result === false) {
+                $this->log('error', 'migration', 'Kolom toevoegen mislukt', [
+                    'table' => $table,
+                    'column' => $column,
+                    'sql' => $sql,
+                    'db_error' => $this->db->last_error,
+                ]);
+            } else {
+                $this->log('info', 'migration', 'Kolom toegevoegd', [
+                    'table' => $table,
+                    'column' => $column,
+                ]);
+            }
+        }
+    }
+
+    private function create_tables(): void {
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+
+        $charset  = $this->db->get_charset_collate();
+        $clients  = $this->table('clients');
+        $sites    = $this->table('sites');
+        $keywords = $this->table('keywords');
+        $jobs     = $this->table('jobs');
+        $articles = $this->table('articles');
+        $logs     = $this->table('logs');
+
+        dbDelta("CREATE TABLE {$clients} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            name VARCHAR(191) NOT NULL,
+            website_url VARCHAR(255) NOT NULL DEFAULT '',
+            default_anchor VARCHAR(191) NOT NULL DEFAULT '',
+            link_targets LONGTEXT NULL,
+            research_urls LONGTEXT NULL,
+            is_active TINYINT(1) NOT NULL DEFAULT 1,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$sites} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            name VARCHAR(191) NOT NULL,
+            base_url VARCHAR(255) NOT NULL,
+            receiver_secret VARCHAR(255) NOT NULL DEFAULT '',
+            default_status VARCHAR(20) NOT NULL DEFAULT 'draft',
+            default_category VARCHAR(191) NOT NULL DEFAULT '',
+            max_posts_per_day INT UNSIGNED NOT NULL DEFAULT 3,
+            publish_priority INT NOT NULL DEFAULT 10,
+            is_active TINYINT(1) NOT NULL DEFAULT 1,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY base_url (base_url(191))
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$keywords} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            main_keyword VARCHAR(191) NOT NULL,
+            secondary_keywords LONGTEXT NULL,
+            target_site_ids LONGTEXT NULL,
+            content_type VARCHAR(50) NOT NULL DEFAULT 'pillar',
+            tone_of_voice VARCHAR(100) NOT NULL DEFAULT 'deskundig maar menselijk',
+            target_word_count INT UNSIGNED NOT NULL DEFAULT 1200,
+            priority INT NOT NULL DEFAULT 10,
+            status VARCHAR(50) NOT NULL DEFAULT 'queued',
+            source VARCHAR(50) NOT NULL DEFAULT 'manual',
+            source_context LONGTEXT NULL,
+            last_processed_at DATETIME NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY client_id (client_id),
+            KEY status (status),
+            KEY source (source)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$jobs} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            keyword_id BIGINT UNSIGNED NOT NULL,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NULL,
+            job_type VARCHAR(50) NOT NULL DEFAULT 'write_publish',
+            status VARCHAR(50) NOT NULL DEFAULT 'queued',
+            attempts INT UNSIGNED NOT NULL DEFAULT 0,
+            payload LONGTEXT NULL,
+            result LONGTEXT NULL,
+            locked_at DATETIME NULL,
+            started_at DATETIME NULL,
+            finished_at DATETIME NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY keyword_id (keyword_id),
+            KEY status (status),
+            KEY site_id (site_id)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$articles} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            job_id BIGINT UNSIGNED NOT NULL,
+            keyword_id BIGINT UNSIGNED NOT NULL,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NULL,
+            article_type VARCHAR(50) NOT NULL DEFAULT 'pillar',
+            title VARCHAR(255) NOT NULL,
+            slug VARCHAR(255) NOT NULL DEFAULT '',
+            content LONGTEXT NOT NULL,
+            meta_title VARCHAR(255) NOT NULL DEFAULT '',
+            meta_description TEXT NULL,
+            canonical_url VARCHAR(255) NOT NULL DEFAULT '',
+            source_article_id BIGINT UNSIGNED NULL,
+            remote_post_id VARCHAR(100) NOT NULL DEFAULT '',
+            remote_url VARCHAR(255) NOT NULL DEFAULT '',
+            publish_status VARCHAR(50) NOT NULL DEFAULT 'draft',
+            featured_image_data LONGTEXT NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY keyword_id (keyword_id),
+            KEY site_id (site_id)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$logs} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            level VARCHAR(20) NOT NULL DEFAULT 'info',
+            context VARCHAR(100) NOT NULL DEFAULT '',
+            message TEXT NOT NULL,
+            payload LONGTEXT NULL,
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY level (level),
+            KEY context (context)
+        ) {$charset};");
+
+        $this->maybe_add_column($clients, 'research_urls', "ALTER TABLE {$clients} ADD COLUMN research_urls LONGTEXT NULL AFTER link_targets");
+        $this->maybe_add_column($keywords, 'source', "ALTER TABLE {$keywords} ADD COLUMN source VARCHAR(50) NOT NULL DEFAULT 'manual' AFTER status");
+        $this->maybe_add_column($keywords, 'source_context', "ALTER TABLE {$keywords} ADD COLUMN source_context LONGTEXT NULL AFTER source");
+        $this->maybe_add_column($jobs, 'attempts', "ALTER TABLE {$jobs} ADD COLUMN attempts INT UNSIGNED NOT NULL DEFAULT 0 AFTER status");
+        $this->maybe_add_column($articles, 'featured_image_data', "ALTER TABLE {$articles} ADD COLUMN featured_image_data LONGTEXT NULL AFTER publish_status");
+
+        add_option(self::OPTION_OPENAI_MODEL, 'gpt-5.4-mini');
+        add_option(self::OPTION_OPENAI_TEMPERATURE, '0.6');
+        add_option(self::OPTION_ENABLE_FEATURED_IMAGES, '1');
+        add_option(self::OPTION_ENABLE_SUPPORTING, '1');
+        add_option(self::OPTION_ENABLE_AUTO_DISCOVERY, '0');
+        add_option(self::OPTION_MAX_RESEARCH_PAGES, '5');
+        add_option(self::OPTION_MAX_DISCOVERY_KEYWORDS, '10');
+        add_option(self::OPTION_ENABLE_VERBOSE_LOGS, '1');
+        add_option(self::OPTION_TRUSTED_SOURCE_DOMAIN, 'https://shortcut.nl');
+
+        update_option(self::OPTION_DB_VERSION, self::DB_VERSION);
+    }
+
+    public function admin_menu(): void {
+        add_menu_page('Content Hub', 'Content Hub', 'manage_options', 'sch-content-hub', [$this, 'render_dashboard'], 'dashicons-admin-site-alt3', 56);
+        add_submenu_page('sch-content-hub', 'Dashboard', 'Dashboard', 'manage_options', 'sch-content-hub', [$this, 'render_dashboard']);
+        add_submenu_page('sch-content-hub', 'Klanten', 'Klanten', 'manage_options', 'sch-clients', [$this, 'render_clients']);
+        add_submenu_page('sch-content-hub', 'Blogs', 'Blogs', 'manage_options', 'sch-sites', [$this, 'render_sites']);
+        add_submenu_page('sch-content-hub', 'Keywords', 'Keywords', 'manage_options', 'sch-keywords', [$this, 'render_keywords']);
+        add_submenu_page('sch-content-hub', 'Jobs', 'Jobs', 'manage_options', 'sch-jobs', [$this, 'render_jobs']);
+        add_submenu_page('sch-content-hub', 'Logs', 'Logs', 'manage_options', 'sch-logs', [$this, 'render_logs']);
+        add_submenu_page('sch-content-hub', 'Instellingen', 'Instellingen', 'manage_options', 'sch-settings', [$this, 'render_settings']);
+    }
+
+    private function render_admin_notice(): void {
+        $message = isset($_GET['sch_message']) ? sanitize_text_field(wp_unslash($_GET['sch_message'])) : '';
+        $message_type = isset($_GET['sch_message_type']) ? sanitize_key(wp_unslash($_GET['sch_message_type'])) : 'success';
+        $notice_class = $message_type === 'error' ? 'notice notice-error' : 'notice notice-success';
+
+        if ($message !== '') {
+            echo '<div class="' . esc_attr($notice_class) . '"><p>' . esc_html($message) . '</p></div>';
+        }
+    }
+
+    public function render_dashboard(): void {
+        $queued  = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('jobs')} WHERE status='queued'");
+        $running = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('jobs')} WHERE status='running'");
+        $done    = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('jobs')} WHERE status='published'");
+        $failed  = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('jobs')} WHERE status='failed'");
+        ?>
+        <div class="wrap">
+            <h1>Content Hub</h1>
+            <?php $this->render_admin_notice(); ?>
+            <div class="sch-grid-stats">
+                <?php foreach (['Queued jobs' => $queued, 'Running jobs' => $running, 'Published jobs' => $done, 'Failed jobs' => $failed] as $label => $value) : ?>
+                    <div class="sch-stat">
+                        <div class="sch-stat-label"><?php echo esc_html($label); ?></div>
+                        <div class="sch-stat-value"><?php echo (int) $value; ?></div>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-top:20px;">
+                <?php wp_nonce_field('sch_run_now'); ?>
+                <input type="hidden" name="action" value="sch_run_now">
+                <button class="button button-primary">Worker nu draaien</button>
+            </form>
+            <p style="margin-top:20px;">Gebruik daarnaast een echte server cron die iedere minuut wp-cron.php aanroept.</p>
+        </div>
+        <?php
+    }
+
+    public function render_clients(): void {
+        $edit_id = isset($_GET['edit']) ? (int) $_GET['edit'] : 0;
+        $edit = $edit_id ? $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('clients')} WHERE id=%d", $edit_id)) : null;
+        $targets = $edit ? $this->get_client_link_targets($edit) : [];
+        $research_urls = $edit ? $this->get_client_research_urls($edit) : [];
+        if (!$targets) {
+            $targets = [['url' => '', 'anchor' => '']];
+        }
+        if (!$research_urls) {
+            $research_urls = [['url' => '']];
+        }
+        $rows = $this->db->get_results("SELECT * FROM {$this->table('clients')} ORDER BY id DESC");
+        ?>
+        <div class="wrap">
+            <h1>Klanten</h1>
+            <?php $this->render_admin_notice(); ?>
+
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-card">
+                <?php wp_nonce_field('sch_save_client'); ?>
+                <input type="hidden" name="action" value="sch_save_client">
+                <input type="hidden" name="id" value="<?php echo (int) ($edit->id ?? 0); ?>">
+
+                <table class="form-table">
+                    <tr><th>Naam</th><td><input type="text" name="name" class="regular-text" required value="<?php echo esc_attr($edit->name ?? ''); ?>"></td></tr>
+                    <tr><th>Website URL</th><td><input type="url" name="website_url" class="regular-text" value="<?php echo esc_attr($edit->website_url ?? ''); ?>"></td></tr>
+                    <tr><th>Default anchor</th><td><input type="text" name="default_anchor" class="regular-text" value="<?php echo esc_attr($edit->default_anchor ?? ''); ?>"></td></tr>
+
+                    <tr>
+                        <th>Link targets</th>
+                        <td>
+                            <div id="sch-link-targets" class="sch-repeater">
+                                <div class="sch-repeater-rows">
+                                    <?php foreach ($targets as $target) : ?>
+                                        <div class="sch-repeater-row">
+                                            <input type="url" name="link_target_url[]" placeholder="https://klantsite.nl/pagina" value="<?php echo esc_attr($target['url'] ?? ''); ?>">
+                                            <input type="text" name="link_target_anchor[]" placeholder="Anchor tekst" value="<?php echo esc_attr($target['anchor'] ?? ''); ?>">
+                                            <button class="button" type="button" data-sch-remove-row>Verwijderen</button>
+                                        </div>
+                                    <?php endforeach; ?>
+                                </div>
+                                <template>
+                                    <div class="sch-repeater-row">
+                                        <input type="url" name="link_target_url[]" placeholder="https://klantsite.nl/pagina">
+                                        <input type="text" name="link_target_anchor[]" placeholder="Anchor tekst">
+                                        <button class="button" type="button" data-sch-remove-row>Verwijderen</button>
+                                    </div>
+                                </template>
+                            </div>
+                            <p><button class="button" type="button" data-sch-add-row="#sch-link-targets">Link target toevoegen</button></p>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th>Research URLs</th>
+                        <td>
+                            <div id="sch-research-urls" class="sch-repeater">
+                                <div class="sch-repeater-rows">
+                                    <?php foreach ($research_urls as $research) : ?>
+                                        <div class="sch-repeater-row single">
+                                            <input type="url" name="research_url[]" placeholder="https://klantsite.nl/diensten" value="<?php echo esc_attr($research['url'] ?? ''); ?>">
+                                            <button class="button" type="button" data-sch-remove-row>Verwijderen</button>
+                                        </div>
+                                    <?php endforeach; ?>
+                                </div>
+                                <template>
+                                    <div class="sch-repeater-row single">
+                                        <input type="url" name="research_url[]" placeholder="https://klantsite.nl/diensten">
+                                        <button class="button" type="button" data-sch-remove-row>Verwijderen</button>
+                                    </div>
+                                </template>
+                            </div>
+                            <p><button class="button" type="button" data-sch-add-row="#sch-research-urls">Research URL toevoegen</button></p>
+                            <p class="sch-muted">Deze pagina’s worden via GET opgehaald voor keyword discovery en diepere contentaansturing.</p>
+                        </td>
+                    </tr>
+                </table>
+
+                <p><button class="button button-primary"><?php echo $edit ? 'Klant bijwerken' : 'Klant opslaan'; ?></button></p>
+            </form>
+
+            <h2 style="margin-top:30px;">Bestaande klanten</h2>
+            <table class="widefat striped">
+                <thead><tr><th>ID</th><th>Naam</th><th>Website</th><th>Research URLs</th><th>Links</th><th>Acties</th></tr></thead>
+                <tbody>
+                <?php if ($rows) : foreach ($rows as $row) : ?>
+                    <?php $client_research = $this->get_client_research_urls($row); ?>
+                    <tr>
+                        <td><?php echo (int) $row->id; ?></td>
+                        <td><?php echo esc_html($row->name); ?></td>
+                        <td><?php echo esc_html($row->website_url); ?></td>
+                        <td><?php echo esc_html(implode(' | ', array_map(static function ($v) { return (string) ($v['url'] ?? ''); }, $client_research))); ?></td>
+                        <td><?php echo esc_html($this->implode_target_strings($this->get_client_link_targets($row))); ?></td>
+                        <td class="sch-actions">
+                            <a href="<?php echo esc_url(admin_url('admin.php?page=sch-clients&edit=' . (int) $row->id)); ?>">Bewerken</a>
+                            <a href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_delete_client&id=' . (int) $row->id), 'sch_delete_client')); ?>" onclick="return confirm('Zeker weten?');">Verwijderen</a>
+
+                            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
+                                <?php wp_nonce_field('sch_discover_keywords'); ?>
+                                <input type="hidden" name="action" value="sch_discover_keywords">
+                                <input type="hidden" name="client_id" value="<?php echo (int) $row->id; ?>">
+                                <button class="button button-secondary" type="submit">Keywords ontdekken</button>
+                            </form>
+                        </td>
+                    </tr>
+                <?php endforeach; else : ?>
+                    <tr><td colspan="6">Nog geen klanten.</td></tr>
+                <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+
+    public function render_sites(): void {
+        $edit_id = isset($_GET['edit']) ? (int) $_GET['edit'] : 0;
+        $edit = $edit_id ? $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('sites')} WHERE id=%d", $edit_id)) : null;
+        $rows = $this->db->get_results("SELECT * FROM {$this->table('sites')} ORDER BY publish_priority ASC, id DESC");
+        $bulk_result = get_transient('sch_bulk_sites_result_' . get_current_user_id());
+        if ($bulk_result) {
+            delete_transient('sch_bulk_sites_result_' . get_current_user_id());
+        }
+        ?>
+        <div class="wrap">
+            <h1>Blogs</h1>
+            <?php $this->render_admin_notice(); ?>
+
+            <?php if (!empty($bulk_result)) : ?>
+                <div class="sch-notice">
+                    <strong>Bulk import afgerond.</strong><br>
+                    Toegevoegd: <?php echo (int) ($bulk_result['created'] ?? 0); ?> |
+                    Bijgewerkt: <?php echo (int) ($bulk_result['updated'] ?? 0); ?> |
+                    Overgeslagen: <?php echo (int) ($bulk_result['skipped'] ?? 0); ?>
+                    <?php if (!empty($bulk_result['messages'])) : ?>
+                        <div style="margin-top:8px;">
+                            <?php foreach ((array) $bulk_result['messages'] as $message) : ?>
+                                <div><?php echo esc_html($message); ?></div>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
+                </div>
+            <?php endif; ?>
+
+            <div class="sch-two-col">
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-card">
+                    <h2 style="margin-top:0;"><?php echo $edit ? 'Blog bewerken' : 'Enkele blog toevoegen'; ?></h2>
+                    <?php wp_nonce_field('sch_save_site'); ?>
+                    <input type="hidden" name="action" value="sch_save_site">
+                    <input type="hidden" name="id" value="<?php echo (int) ($edit->id ?? 0); ?>">
+                    <table class="form-table">
+                        <tr><th>Naam</th><td><input type="text" name="name" class="regular-text" required value="<?php echo esc_attr($edit->name ?? ''); ?>"></td></tr>
+                        <tr><th>Base URL</th><td><input type="url" name="base_url" class="regular-text" required value="<?php echo esc_attr($edit->base_url ?? ''); ?>"></td></tr>
+                        <tr><th>Default status</th><td><select name="default_status"><option value="draft" <?php selected(($edit->default_status ?? ''), 'draft'); ?>>draft</option><option value="publish" <?php selected(($edit->default_status ?? ''), 'publish'); ?>>publish</option></select></td></tr>
+                        <tr><th>Default category</th><td><input type="text" name="default_category" class="regular-text" value="<?php echo esc_attr($edit->default_category ?? ''); ?>"></td></tr>
+                        <tr><th>Max posts per dag</th><td><input type="number" name="max_posts_per_day" value="<?php echo esc_attr($edit->max_posts_per_day ?? 3); ?>" min="1"></td></tr>
+                        <tr><th>Prioriteit</th><td><input type="number" name="publish_priority" value="<?php echo esc_attr($edit->publish_priority ?? 10); ?>"></td></tr>
+                    </table>
+                    <p class="sch-muted">Authenticatie loopt via het trusted source domein uit de instellingen. Per blog hoeft geen secret meer ingesteld te worden.</p>
+                    <p><button class="button button-primary"><?php echo $edit ? 'Blog bijwerken' : 'Blog opslaan'; ?></button></p>
+                </form>
+
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-card">
+                    <h2 style="margin-top:0;">Bulk blogs toevoegen</h2>
+                    <?php wp_nonce_field('sch_bulk_save_sites'); ?>
+                    <input type="hidden" name="action" value="sch_bulk_save_sites">
+
+                    <p>Plak per regel een blog. Ondersteunde formaten:</p>
+                    <pre style="white-space:pre-wrap;">Naam | https://site.nl
+Naam | https://site.nl | publish | nieuws | 3 | 10
+Naam,https://site.nl,publish,nieuws,3,10
+https://site.nl
+https://site.nl | publish | nieuws | 3 | 10
+
+Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat veld wordt genegeerd.</pre>
+
+                    <table class="form-table">
+                        <tr>
+                            <th>Bulk invoer</th>
+                            <td>
+                                <textarea name="bulk_sites" rows="14" class="large-text code" placeholder="Blog A | https://bloga.nl&#10;Blog B | https://blogb.nl | publish | nieuws | 5 | 20"></textarea>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th>Fallback status</th>
+                            <td>
+                                <select name="bulk_default_status">
+                                    <option value="draft">draft</option>
+                                    <option value="publish">publish</option>
+                                </select>
+                            </td>
+                        </tr>
+                        <tr><th>Fallback category</th><td><input type="text" name="bulk_default_category" class="regular-text" value=""></td></tr>
+                        <tr><th>Fallback max posts per dag</th><td><input type="number" name="bulk_max_posts_per_day" value="3" min="1"></td></tr>
+                        <tr><th>Fallback prioriteit</th><td><input type="number" name="bulk_publish_priority" value="10"></td></tr>
+                        <tr>
+                            <th>Bestaande URL</th>
+                            <td><label><input type="checkbox" name="bulk_update_existing" value="1" checked> Bestaande blog bijwerken als URL al bestaat</label></td>
+                        </tr>
+                    </table>
+
+                    <p><button class="button button-primary">Bulk blogs verwerken</button></p>
+                </form>
+            </div>
+
+            <h2 style="margin-top:30px;">Bestaande blogs</h2>
+            <table class="widefat striped">
+                <thead><tr><th>ID</th><th>Naam</th><th>URL</th><th>Status</th><th>Categorie</th><th>Max/dag</th><th>Prio</th><th>Acties</th></tr></thead>
+                <tbody>
+                <?php if ($rows) : foreach ($rows as $row) : ?>
+                    <tr>
+                        <td><?php echo (int) $row->id; ?></td>
+                        <td><?php echo esc_html($row->name); ?></td>
+                        <td><?php echo esc_html($row->base_url); ?></td>
+                        <td><?php echo esc_html($row->default_status); ?></td>
+                        <td><?php echo esc_html($row->default_category); ?></td>
+                        <td><?php echo (int) $row->max_posts_per_day; ?></td>
+                        <td><?php echo (int) $row->publish_priority; ?></td>
+                        <td class="sch-actions">
+                            <a href="<?php echo esc_url(admin_url('admin.php?page=sch-sites&edit=' . (int) $row->id)); ?>">Bewerken</a>
+                            <a href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_delete_site&id=' . (int) $row->id), 'sch_delete_site')); ?>" onclick="return confirm('Zeker weten?');">Verwijderen</a>
+                        </td>
+                    </tr>
+                <?php endforeach; else : ?>
+                    <tr><td colspan="8">Nog geen blogs.</td></tr>
+                <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+
+    public function render_keywords(): void {
+        $clients = $this->db->get_results("SELECT id, name FROM {$this->table('clients')} WHERE is_active=1 ORDER BY name ASC");
+        $sites   = $this->db->get_results("SELECT id, name FROM {$this->table('sites')} WHERE is_active=1 ORDER BY publish_priority ASC, name ASC");
+        $edit_id = isset($_GET['edit']) ? (int) $_GET['edit'] : 0;
+        $edit = $edit_id ? $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('keywords')} WHERE id=%d", $edit_id)) : null;
+        $secondary = $edit ? $this->get_secondary_keywords_list($edit) : [''];
+        if (!$secondary) {
+            $secondary = [''];
+        }
+        $selected_site_ids = $edit ? $this->decode_json_array($edit->target_site_ids) : [];
+        $rows = $this->db->get_results("SELECT k.*, c.name AS client_name FROM {$this->table('keywords')} k LEFT JOIN {$this->table('clients')} c ON c.id = k.client_id ORDER BY k.id DESC");
+        ?>
+        <div class="wrap">
+            <h1>Keywords</h1>
+            <?php $this->render_admin_notice(); ?>
+
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-card">
+                <?php wp_nonce_field('sch_save_keyword'); ?>
+                <input type="hidden" name="action" value="sch_save_keyword">
+                <input type="hidden" name="id" value="<?php echo (int) ($edit->id ?? 0); ?>">
+                <table class="form-table">
+                    <tr><th>Klant</th><td><select name="client_id" required><option value="">Kies klant</option><?php foreach ($clients as $client) : ?><option value="<?php echo (int) $client->id; ?>" <?php selected((int) ($edit->client_id ?? 0), (int) $client->id); ?>><?php echo esc_html($client->name); ?></option><?php endforeach; ?></select></td></tr>
+                    <tr><th>Hoofdkeyword</th><td><input type="text" name="main_keyword" class="regular-text" required value="<?php echo esc_attr($edit->main_keyword ?? ''); ?>"></td></tr>
+                    <tr><th>Secondary keywords</th><td>
+                        <div id="sch-secondary-keywords" class="sch-repeater">
+                            <div class="sch-repeater-rows">
+                                <?php foreach ($secondary as $item) : ?>
+                                    <div class="sch-repeater-row single">
+                                        <input type="text" name="secondary_keywords[]" value="<?php echo esc_attr(is_array($item) ? ($item['keyword'] ?? '') : $item); ?>" placeholder="Bijvoorbeeld: kunststof kozijnen prijs">
+                                        <button class="button" type="button" data-sch-remove-row>Verwijderen</button>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+                            <template>
+                                <div class="sch-repeater-row single">
+                                    <input type="text" name="secondary_keywords[]" placeholder="Bijvoorbeeld: kunststof kozijnen prijs">
+                                    <button class="button" type="button" data-sch-remove-row>Verwijderen</button>
+                                </div>
+                            </template>
+                        </div>
+                        <p><button class="button" type="button" data-sch-add-row="#sch-secondary-keywords">Secondary keyword toevoegen</button></p>
+                    </td></tr>
+                    <tr><th>Type</th><td><select name="content_type"><option value="pillar" <?php selected(($edit->content_type ?? ''), 'pillar'); ?>>pillar</option><option value="supporting" <?php selected(($edit->content_type ?? ''), 'supporting'); ?>>supporting</option></select></td></tr>
+                    <tr><th>Tone of voice</th><td><input type="text" name="tone_of_voice" value="<?php echo esc_attr($edit->tone_of_voice ?? 'deskundig maar menselijk'); ?>" class="regular-text"></td></tr>
+                    <tr><th>Woordaantal</th><td><input type="number" name="target_word_count" value="<?php echo esc_attr($edit->target_word_count ?? 1200); ?>" min="300"></td></tr>
+                    <tr><th>Prioriteit</th><td><input type="number" name="priority" value="<?php echo esc_attr($edit->priority ?? 10); ?>"></td></tr>
+                    <tr><th>Doelblogs</th><td><?php foreach ($sites as $site) : ?><label style="display:block;margin-bottom:6px;"><input type="checkbox" name="target_site_ids[]" value="<?php echo (int) $site->id; ?>" <?php checked(in_array((int) $site->id, array_map('intval', $selected_site_ids), true)); ?>> <?php echo esc_html($site->name); ?></label><?php endforeach; ?></td></tr>
+                </table>
+                <p><button class="button button-primary"><?php echo $edit ? 'Keyword bijwerken' : 'Keyword opslaan'; ?></button></p>
+            </form>
+
+            <h2 style="margin-top:30px;">Bestaande keywords</h2>
+            <table class="widefat striped">
+                <thead><tr><th>ID</th><th>Klant</th><th>Keyword</th><th>Type</th><th>Bron</th><th>Status</th><th>Acties</th></tr></thead>
+                <tbody>
+                <?php if ($rows) : foreach ($rows as $row) : ?>
+                    <tr>
+                        <td><?php echo (int) $row->id; ?></td>
+                        <td><?php echo esc_html($row->client_name ?: ''); ?></td>
+                        <td><?php echo esc_html($row->main_keyword); ?></td>
+                        <td><?php echo esc_html($row->content_type); ?></td>
+                        <td><?php echo esc_html($row->source ?: 'manual'); ?></td>
+                        <td><?php echo esc_html($row->status); ?></td>
+                        <td class="sch-actions">
+                            <a href="<?php echo esc_url(admin_url('admin.php?page=sch-keywords&edit=' . (int) $row->id)); ?>">Bewerken</a>
+                            <a href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_delete_keyword&id=' . (int) $row->id), 'sch_delete_keyword')); ?>" onclick="return confirm('Zeker weten?');">Verwijderen</a>
+                        </td>
+                    </tr>
+                <?php endforeach; else : ?>
+                    <tr><td colspan="7">Nog geen keywords.</td></tr>
+                <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+
+    public function render_jobs(): void {
+        $rows = $this->db->get_results("SELECT j.*, k.main_keyword, s.name AS site_name FROM {$this->table('jobs')} j LEFT JOIN {$this->table('keywords')} k ON k.id = j.keyword_id LEFT JOIN {$this->table('sites')} s ON s.id = j.site_id ORDER BY j.id DESC LIMIT 200");
+        ?>
+        <div class="wrap">
+            <h1>Jobs</h1>
+            <?php $this->render_admin_notice(); ?>
+            <table class="widefat striped">
+                <thead><tr><th>ID</th><th>Keyword</th><th>Blog</th><th>Type</th><th>Status</th><th>Pogingen</th><th>Gestart</th><th>Klaar</th><th>Actie</th></tr></thead>
+                <tbody>
+                <?php if ($rows) : foreach ($rows as $row) : ?>
+                    <tr>
+                        <td><?php echo (int) $row->id; ?></td>
+                        <td><?php echo esc_html($row->main_keyword ?: ''); ?></td>
+                        <td><?php echo esc_html($row->site_name ?: ''); ?></td>
+                        <td><?php echo esc_html($row->job_type); ?></td>
+                        <td><?php echo esc_html($row->status); ?></td>
+                        <td><?php echo (int) $row->attempts; ?></td>
+                        <td><?php echo esc_html($row->started_at ?: ''); ?></td>
+                        <td><?php echo esc_html($row->finished_at ?: ''); ?></td>
+                        <td><?php if (in_array($row->status, ['failed', 'published'], true)) : ?><a href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_retry_job&id=' . (int) $row->id), 'sch_retry_job')); ?>">Retry</a><?php endif; ?></td>
+                    </tr>
+                <?php endforeach; else : ?>
+                    <tr><td colspan="9">Nog geen jobs.</td></tr>
+                <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+
+    public function render_logs(): void {
+        $rows = $this->db->get_results("SELECT * FROM {$this->table('logs')} ORDER BY id DESC LIMIT 300");
+        ?>
+        <div class="wrap">
+            <h1>Logs</h1>
+            <?php $this->render_admin_notice(); ?>
+            <table class="widefat striped">
+                <thead><tr><th>Tijd</th><th>Level</th><th>Context</th><th>Bericht</th><th>Payload</th></tr></thead>
+                <tbody>
+                <?php if ($rows) : foreach ($rows as $row) : ?>
+                    <tr>
+                        <td><?php echo esc_html($row->created_at); ?></td>
+                        <td><?php echo esc_html($row->level); ?></td>
+                        <td><?php echo esc_html($row->context); ?></td>
+                        <td><?php echo esc_html($row->message); ?></td>
+                        <td><div class="sch-log-payload"><?php echo esc_html((string) $row->payload); ?></div></td>
+                    </tr>
+                <?php endforeach; else : ?>
+                    <tr><td colspan="5">Nog geen logs.</td></tr>
+                <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+
+    public function render_settings(): void {
+        ?>
+        <div class="wrap">
+            <h1>Instellingen</h1>
+            <?php $this->render_admin_notice(); ?>
+
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-card">
+                <?php wp_nonce_field('sch_save_settings'); ?>
+                <input type="hidden" name="action" value="sch_save_settings">
+                <table class="form-table">
+                    <tr><th>OpenAI API key</th><td><input type="password" name="openai_api_key" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_OPENAI_API_KEY, '')); ?>"></td></tr>
+                    <tr><th>OpenAI model</th><td><input type="text" name="openai_model" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_OPENAI_MODEL, 'gpt-5.4-mini')); ?>"></td></tr>
+                    <tr><th>Temperature</th><td><input type="number" step="0.1" min="0" max="2" name="openai_temperature" value="<?php echo esc_attr((string) get_option(self::OPTION_OPENAI_TEMPERATURE, '0.6')); ?>"></td></tr>
+                    <tr><th>Unsplash access key</th><td><input type="password" name="unsplash_access_key" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_UNSPLASH_ACCESS_KEY, '')); ?>"></td></tr>
+                    <tr>
+                        <th>Trusted source domein</th>
+                        <td>
+                            <input type="url" name="trusted_source_domain" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_TRUSTED_SOURCE_DOMAIN, 'https://shortcut.nl')); ?>">
+                            <p class="description">De orchestrator stuurt dit domein mee als bron. De receiver plugin moet alleen requests accepteren wanneer dit exact matcht.</p>
+                        </td>
+                    </tr>
+                    <tr><th>Featured images</th><td><label><input type="checkbox" name="enable_featured_images" value="1" <?php checked(get_option(self::OPTION_ENABLE_FEATURED_IMAGES, '1'), '1'); ?>> Inschakelen</label></td></tr>
+                    <tr><th>Supporting content</th><td><label><input type="checkbox" name="enable_supporting" value="1" <?php checked(get_option(self::OPTION_ENABLE_SUPPORTING, '1'), '1'); ?>> Automatisch jobs maken</label></td></tr>
+                    <tr><th>Auto discovery</th><td><label><input type="checkbox" name="enable_auto_discovery" value="1" <?php checked(get_option(self::OPTION_ENABLE_AUTO_DISCOVERY, '0'), '1'); ?>> Laat worker keyword discovery draaien als er geen queued jobs zijn</label></td></tr>
+                    <tr><th>Max research pages</th><td><input type="number" name="max_research_pages" value="<?php echo esc_attr((string) get_option(self::OPTION_MAX_RESEARCH_PAGES, '5')); ?>" min="1" max="20"></td></tr>
+                    <tr><th>Max discovery keywords</th><td><input type="number" name="max_discovery_keywords" value="<?php echo esc_attr((string) get_option(self::OPTION_MAX_DISCOVERY_KEYWORDS, '10')); ?>" min="1" max="50"></td></tr>
+                    <tr><th>Verbose logs</th><td><label><input type="checkbox" name="enable_verbose_logs" value="1" <?php checked(get_option(self::OPTION_ENABLE_VERBOSE_LOGS, '1'), '1'); ?>> Veel extra logregels wegschrijven</label></td></tr>
+                </table>
+                <p><button class="button button-primary">Instellingen opslaan</button></p>
+                <p>Gebruik hier je eigen sleutels. Hardcode ze niet in de plugin.</p>
+            </form>
+        </div>
+        <?php
+    }
+
+    private function now(): string {
+        return current_time('mysql');
+    }
+
+    private function is_verbose_logging_enabled(): bool {
+        return get_option(self::OPTION_ENABLE_VERBOSE_LOGS, '1') === '1';
+    }
+
+    private function vlog(string $context, string $message, $payload = null): void {
+        if ($this->is_verbose_logging_enabled()) {
+            $this->log('info', $context, $message, $payload);
+        }
+    }
+
+    private function redirect_with_message(string $page, string $message, string $type = 'success'): void {
+        $url = add_query_arg([
+            'page' => $page,
+            'sch_message' => rawurlencode($message),
+            'sch_message_type' => rawurlencode($type),
+        ], admin_url('admin.php'));
+
+        wp_safe_redirect($url);
+        exit;
+    }
+
+    private function verify_admin_nonce(string $action): void {
+        if (!current_user_can('manage_options')) {
+            wp_die('Geen toegang.');
+        }
+        check_admin_referer($action);
+    }
+
+    private function decode_json_array($value): array {
+        if (is_array($value)) {
+            return $value;
+        }
+        if (!is_string($value) || trim($value) === '') {
+            return [];
+        }
+        $decoded = json_decode($value, true);
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    private function implode_target_strings(array $targets): string {
+        $out = [];
+        foreach ($targets as $target) {
+            $url = trim((string) ($target['url'] ?? ''));
+            $anchor = trim((string) ($target['anchor'] ?? ''));
+            if ($url !== '') {
+                $out[] = $url . ($anchor !== '' ? ' [' . $anchor . ']' : '');
+            }
+        }
+        return implode(' | ', $out);
+    }
+
+    private function sanitize_link_targets_from_post(): string {
+        $urls    = array_map('wp_unslash', (array) ($_POST['link_target_url'] ?? []));
+        $anchors = array_map('wp_unslash', (array) ($_POST['link_target_anchor'] ?? []));
+        $items   = [];
+        $count   = max(count($urls), count($anchors));
+
+        for ($i = 0; $i < $count; $i++) {
+            $url = esc_url_raw(trim((string) ($urls[$i] ?? '')));
+            $anchor = sanitize_text_field((string) ($anchors[$i] ?? ''));
+            if ($url === '') {
+                continue;
+            }
+            $items[] = ['url' => $url, 'anchor' => $anchor];
+        }
+
+        return wp_json_encode($items);
+    }
+
+    private function sanitize_research_urls_from_post(): string {
+        $urls = array_map('wp_unslash', (array) ($_POST['research_url'] ?? []));
+        $items = [];
+
+        foreach ($urls as $url) {
+            $url = esc_url_raw(trim((string) $url));
+            if ($url === '') {
+                continue;
+            }
+            $items[] = ['url' => $url];
+        }
+
+        return wp_json_encode($items);
+    }
+
+    private function sanitize_secondary_keywords_from_post(): string {
+        $items = [];
+        foreach ((array) ($_POST['secondary_keywords'] ?? []) as $keyword) {
+            $keyword = sanitize_text_field(wp_unslash((string) $keyword));
+            if ($keyword !== '') {
+                $items[] = ['keyword' => $keyword];
+            }
+        }
+        return wp_json_encode($items);
+    }
+
+    private function get_secondary_keywords_list(object $keyword): array {
+        $decoded = $this->decode_json_array($keyword->secondary_keywords);
+        $list = [];
+        foreach ($decoded as $item) {
+            $value = is_array($item) ? trim((string) ($item['keyword'] ?? '')) : trim((string) $item);
+            if ($value !== '') {
+                $list[] = $value;
+            }
+        }
+        return $list;
+    }
+
+    private function get_client_link_targets(object $client): array {
+        $targets = $this->decode_json_array($client->link_targets);
+        $clean = [];
+        foreach ($targets as $target) {
+            $url = esc_url_raw((string) ($target['url'] ?? ''));
+            $anchor = sanitize_text_field((string) ($target['anchor'] ?? ''));
+            if ($url !== '') {
+                $clean[] = ['url' => $url, 'anchor' => $anchor];
+            }
+        }
+        return $clean;
+    }
+
+    private function get_client_research_urls(object $client): array {
+        $targets = $this->decode_json_array($client->research_urls);
+        $clean = [];
+        foreach ($targets as $target) {
+            $url = esc_url_raw((string) ($target['url'] ?? ''));
+            if ($url !== '') {
+                $clean[] = ['url' => $url];
+            }
+        }
+        return $clean;
+    }
+
+    private function generate_secret(int $length = 32): string {
+        return wp_generate_password($length, false, false);
+    }
+
+    private function normalize_site_url(string $url): string {
+        $url = trim($url);
+        if ($url === '') {
+            return '';
+        }
+        if (!preg_match('~^https?://~i', $url)) {
+            $url = 'https://' . ltrim($url, '/');
+        }
+        return untrailingslashit(esc_url_raw($url));
+    }
+
+    private function get_trusted_source_domain(): string {
+        $url = $this->normalize_site_url((string) get_option(self::OPTION_TRUSTED_SOURCE_DOMAIN, 'https://shortcut.nl'));
+        if ($url === '') {
+            $url = 'https://shortcut.nl';
+        }
+        return $url;
+    }
+
+    private function looks_like_site_url(string $value): bool {
+        $value = trim($value);
+        if ($value === '') {
+            return false;
+        }
+
+        return (bool) (
+            filter_var($value, FILTER_VALIDATE_URL) ||
+            preg_match('~^[a-z0-9][a-z0-9\.\-]+\.[a-z]{2,}(/.*)?$~i', $value)
+        );
+    }
+
+    private function is_valid_default_status(string $value): bool {
+        return in_array(strtolower(trim($value)), ['draft', 'publish'], true);
+    }
+
+    private function derive_site_name_from_url(string $url): string {
+        $host = wp_parse_url($url, PHP_URL_HOST);
+        if (!$host) {
+            return 'Onbekende blog';
+        }
+        $host = preg_replace('~^www\.~i', '', (string) $host);
+        return ucwords(str_replace(['-', '.'], [' ', ' '], $host));
+    }
+
+    private function split_bulk_site_line(string $line): array {
+        $line = trim($line);
+        if ($line === '') {
+            return [];
+        }
+
+        if (strpos($line, '|') !== false) {
+            $parts = array_map('trim', explode('|', $line));
+            return array_values(array_filter($parts, static function ($value) {
+                return $value !== '';
+            }));
+        }
+
+        if (strpos($line, "\t") !== false) {
+            $parts = array_map('trim', explode("\t", $line));
+            return array_values(array_filter($parts, static function ($value) {
+                return $value !== '';
+            }));
+        }
+
+        $csv = str_getcsv($line);
+        $csv = array_map('trim', $csv);
+        $csv = array_values(array_filter($csv, static function ($value) {
+            return $value !== '';
+        }));
+        return $csv;
+    }
+
+    private function parse_bulk_sites_input(
+        string $input,
+        string $fallback_status,
+        string $fallback_category,
+        int $fallback_max_posts_per_day,
+        int $fallback_publish_priority
+    ): array {
+        $rows = preg_split('/\r\n|\r|\n/', $input);
+        $items = [];
+        $line_number = 0;
+
+        foreach ((array) $rows as $line) {
+            $line_number++;
+            $line = trim($line);
+
+            if ($line === '' || strpos($line, '#') === 0) {
+                continue;
+            }
+
+            $parts = $this->split_bulk_site_line($line);
+            if (!$parts) {
+                continue;
+            }
+
+            $name = '';
+            $base_url = '';
+            $default_status = $fallback_status;
+            $default_category = $fallback_category;
+            $max_posts_per_day = $fallback_max_posts_per_day;
+            $publish_priority = $fallback_publish_priority;
+
+            if (count($parts) === 1) {
+                $base_url = $parts[0];
+            } else {
+                if ($this->looks_like_site_url($parts[0])) {
+                    $base_url = $parts[0];
+                    $remaining = array_slice($parts, 1);
+                } else {
+                    $name = $parts[0];
+                    $base_url = $parts[1] ?? '';
+                    $remaining = array_slice($parts, 2);
+                }
+
+                if (!empty($remaining) && !$this->is_valid_default_status((string) $remaining[0])) {
+                    array_shift($remaining);
+                }
+
+                if (isset($remaining[0]) && $this->is_valid_default_status((string) $remaining[0])) {
+                    $default_status = strtolower((string) $remaining[0]);
+                }
+
+                if (isset($remaining[1])) {
+                    $default_category = sanitize_text_field((string) $remaining[1]);
+                }
+
+                if (isset($remaining[2])) {
+                    $max_posts_per_day = max(1, (int) $remaining[2]);
+                }
+
+                if (isset($remaining[3])) {
+                    $publish_priority = (int) $remaining[3];
+                }
+            }
+
+            $base_url = $this->normalize_site_url($base_url);
+            if ($base_url === '') {
+                $items[] = [
+                    'error' => 'Regel ' . $line_number . ': geen geldige URL gevonden.',
+                ];
+                continue;
+            }
+
+            if ($name === '') {
+                $name = $this->derive_site_name_from_url($base_url);
+            }
+
+            if (!$this->is_valid_default_status($default_status)) {
+                $default_status = $fallback_status;
+            }
+
+            $items[] = [
+                'name' => sanitize_text_field($name),
+                'base_url' => $base_url,
+                'receiver_secret' => '',
+                'default_status' => $default_status,
+                'default_category' => $default_category,
+                'max_posts_per_day' => $max_posts_per_day,
+                'publish_priority' => $publish_priority,
+            ];
+        }
+
+        return $items;
+    }
+
+    public function handle_save_client(): void {
+        $this->verify_admin_nonce('sch_save_client');
+        $id = (int) ($_POST['id'] ?? 0);
+
+        $data = [
+            'name'           => sanitize_text_field($_POST['name'] ?? ''),
+            'website_url'    => esc_url_raw($_POST['website_url'] ?? ''),
+            'default_anchor' => sanitize_text_field($_POST['default_anchor'] ?? ''),
+            'link_targets'   => $this->sanitize_link_targets_from_post(),
+            'research_urls'  => $this->sanitize_research_urls_from_post(),
+            'is_active'      => 1,
+            'updated_at'     => $this->now(),
+        ];
+
+        if ($id > 0) {
+            $updated = $this->db->update($this->table('clients'), $data, ['id' => $id]);
+            if ($updated === false) {
+                $this->log('error', 'client', 'Client update mislukt', [
+                    'client_id' => $id,
+                    'db_error' => $this->db->last_error,
+                    'data' => $data,
+                ]);
+                $this->redirect_with_message('sch-clients', 'Klant bijwerken mislukt. Check logs.', 'error');
+            }
+        } else {
+            $data['created_at'] = $this->now();
+            $inserted = $this->db->insert($this->table('clients'), $data);
+            if (!$inserted) {
+                $this->log('error', 'client', 'Client insert mislukt', [
+                    'db_error' => $this->db->last_error,
+                    'data' => $data,
+                ]);
+                $this->redirect_with_message('sch-clients', 'Klant opslaan mislukt. Check logs.', 'error');
+            }
+        }
+
+        $this->vlog('client', 'Klant opgeslagen', $data);
+        $this->redirect_with_message('sch-clients', 'Klant opgeslagen.');
+    }
+
+    public function handle_save_site(): void {
+        $this->verify_admin_nonce('sch_save_site');
+        $id = (int) ($_POST['id'] ?? 0);
+
+        $data = [
+            'name'              => sanitize_text_field($_POST['name'] ?? ''),
+            'base_url'          => $this->normalize_site_url((string) ($_POST['base_url'] ?? '')),
+            'receiver_secret'   => '',
+            'default_status'    => sanitize_text_field($_POST['default_status'] ?? 'draft'),
+            'default_category'  => sanitize_text_field($_POST['default_category'] ?? ''),
+            'max_posts_per_day' => max(1, (int) ($_POST['max_posts_per_day'] ?? 3)),
+            'publish_priority'  => (int) ($_POST['publish_priority'] ?? 10),
+            'is_active'         => 1,
+            'updated_at'        => $this->now(),
+        ];
+
+        if ($data['base_url'] === '') {
+            $this->redirect_with_message('sch-sites', 'Geen geldige blog URL opgegeven.', 'error');
+        }
+
+        if (!$this->is_valid_default_status($data['default_status'])) {
+            $data['default_status'] = 'draft';
+        }
+
+        if ($id > 0) {
+            $updated = $this->db->update($this->table('sites'), $data, ['id' => $id]);
+            if ($updated === false) {
+                $this->log('error', 'site', 'Site update mislukt', [
+                    'site_id' => $id,
+                    'db_error' => $this->db->last_error,
+                    'data' => $data,
+                ]);
+                $this->redirect_with_message('sch-sites', 'Blog bijwerken mislukt. Check logs.', 'error');
+            }
+        } else {
+            $data['created_at'] = $this->now();
+            $inserted = $this->db->insert($this->table('sites'), $data);
+            if (!$inserted) {
+                $this->log('error', 'site', 'Site insert mislukt', [
+                    'db_error' => $this->db->last_error,
+                    'data' => $data,
+                ]);
+                $this->redirect_with_message('sch-sites', 'Blog opslaan mislukt. Check logs.', 'error');
+            }
+        }
+
+        $this->vlog('site', 'Blog opgeslagen', $data);
+        $this->redirect_with_message('sch-sites', 'Blog opgeslagen.');
+    }
+
+    public function handle_bulk_save_sites(): void {
+        $this->verify_admin_nonce('sch_bulk_save_sites');
+
+        $bulk_sites = (string) wp_unslash($_POST['bulk_sites'] ?? '');
+        $fallback_status = sanitize_text_field($_POST['bulk_default_status'] ?? 'draft');
+        $fallback_category = sanitize_text_field($_POST['bulk_default_category'] ?? '');
+        $fallback_max_posts_per_day = max(1, (int) ($_POST['bulk_max_posts_per_day'] ?? 3));
+        $fallback_publish_priority = (int) ($_POST['bulk_publish_priority'] ?? 10);
+        $update_existing = isset($_POST['bulk_update_existing']);
+
+        if (!$this->is_valid_default_status($fallback_status)) {
+            $fallback_status = 'draft';
+        }
+
+        $parsed = $this->parse_bulk_sites_input(
+            $bulk_sites,
+            $fallback_status,
+            $fallback_category,
+            $fallback_max_posts_per_day,
+            $fallback_publish_priority
+        );
+
+        $result = [
+            'created' => 0,
+            'updated' => 0,
+            'skipped' => 0,
+            'messages' => [],
+        ];
+
+        foreach ($parsed as $item) {
+            if (!empty($item['error'])) {
+                $result['skipped']++;
+                $result['messages'][] = $item['error'];
+                $this->log('warning', 'site_bulk', 'Bulkregel overgeslagen', $item);
+                continue;
+            }
+
+            $existing = $this->db->get_row($this->db->prepare(
+                "SELECT * FROM {$this->table('sites')} WHERE base_url=%s LIMIT 1",
+                $item['base_url']
+            ));
+
+            $data = [
+                'name'              => $item['name'],
+                'base_url'          => $item['base_url'],
+                'receiver_secret'   => '',
+                'default_status'    => $item['default_status'],
+                'default_category'  => $item['default_category'],
+                'max_posts_per_day' => $item['max_posts_per_day'],
+                'publish_priority'  => $item['publish_priority'],
+                'is_active'         => 1,
+                'updated_at'        => $this->now(),
+            ];
+
+            if ($existing) {
+                if ($update_existing) {
+                    $updated = $this->db->update($this->table('sites'), $data, ['id' => (int) $existing->id]);
+                    if ($updated === false) {
+                        $result['skipped']++;
+                        $result['messages'][] = 'DB fout bij bijwerken: ' . $item['base_url'];
+                        $this->log('error', 'site_bulk', 'Bulk site update mislukt', [
+                            'existing_id' => (int) $existing->id,
+                            'db_error' => $this->db->last_error,
+                            'data' => $data,
+                        ]);
+                    } else {
+                        $result['updated']++;
+                    }
+                } else {
+                    $result['skipped']++;
+                    $result['messages'][] = 'Overgeslagen, bestaat al: ' . $item['base_url'];
+                }
+            } else {
+                $data['created_at'] = $this->now();
+                $inserted = $this->db->insert($this->table('sites'), $data);
+                if (!$inserted) {
+                    $result['skipped']++;
+                    $result['messages'][] = 'DB fout bij insert: ' . $item['base_url'];
+                    $this->log('error', 'site_bulk', 'Bulk site insert mislukt', [
+                        'db_error' => $this->db->last_error,
+                        'data' => $data,
+                    ]);
+                } else {
+                    $result['created']++;
+                }
+            }
+        }
+
+        $this->vlog('site_bulk', 'Bulk blogs verwerkt', $result);
+
+        set_transient('sch_bulk_sites_result_' . get_current_user_id(), $result, MINUTE_IN_SECONDS * 5);
+        wp_safe_redirect(admin_url('admin.php?page=sch-sites'));
+        exit;
+    }
+
+    public function handle_save_keyword(): void {
+        $this->verify_admin_nonce('sch_save_keyword');
+
+        $id = (int) ($_POST['id'] ?? 0);
+        $site_ids = array_values(array_unique(array_filter(array_map('intval', (array) ($_POST['target_site_ids'] ?? [])))));
+
+        if (empty($site_ids)) {
+            $this->log('error', 'keyword', 'Keyword niet opgeslagen: geen doelblogs geselecteerd', [
+                'post' => $_POST,
+            ]);
+            $this->redirect_with_message('sch-keywords', 'Selecteer minimaal 1 doelblog voor dit keyword.', 'error');
+        }
+
+        $client_id = (int) ($_POST['client_id'] ?? 0);
+        $main_keyword = sanitize_text_field($_POST['main_keyword'] ?? '');
+
+        if ($client_id <= 0 || $main_keyword === '') {
+            $this->log('error', 'keyword', 'Keyword niet opgeslagen: client of hoofdkeyword ontbreekt', [
+                'client_id' => $client_id,
+                'main_keyword' => $main_keyword,
+            ]);
+            $this->redirect_with_message('sch-keywords', 'Klant en hoofdkeyword zijn verplicht.', 'error');
+        }
+
+        $data = [
+            'client_id'          => $client_id,
+            'main_keyword'       => $main_keyword,
+            'secondary_keywords' => $this->sanitize_secondary_keywords_from_post(),
+            'target_site_ids'    => wp_json_encode($site_ids),
+            'content_type'       => sanitize_text_field($_POST['content_type'] ?? 'pillar'),
+            'tone_of_voice'      => sanitize_text_field($_POST['tone_of_voice'] ?? 'deskundig maar menselijk'),
+            'target_word_count'  => max(300, (int) ($_POST['target_word_count'] ?? 1200)),
+            'priority'           => (int) ($_POST['priority'] ?? 10),
+            'status'             => 'queued',
+            'source'             => 'manual',
+            'updated_at'         => $this->now(),
+        ];
+
+        if ($id > 0) {
+            $updated = $this->db->update($this->table('keywords'), $data, ['id' => $id]);
+
+            if ($updated === false) {
+                $this->log('error', 'keyword', 'Keyword update mislukt', [
+                    'keyword_id' => $id,
+                    'db_error' => $this->db->last_error,
+                    'data' => $data,
+                ]);
+                $this->redirect_with_message('sch-keywords', 'Keyword bijwerken mislukt. Check logs.', 'error');
+            }
+
+            $this->delete_jobs_for_keyword($id);
+            $created_jobs = $this->create_jobs_for_keyword($id);
+
+            if ($created_jobs < 1) {
+                $this->redirect_with_message('sch-keywords', 'Keyword opgeslagen, maar er zijn geen jobs aangemaakt. Check logs.', 'error');
+            }
+
+            $this->redirect_with_message('sch-keywords', 'Keyword bijgewerkt. Jobs aangemaakt: ' . $created_jobs);
+        } else {
+            $data['created_at'] = $this->now();
+            $inserted = $this->db->insert($this->table('keywords'), $data);
+
+            if (!$inserted) {
+                $this->log('error', 'keyword', 'Keyword insert mislukt', [
+                    'db_error' => $this->db->last_error,
+                    'data' => $data,
+                ]);
+                $this->redirect_with_message('sch-keywords', 'Keyword opslaan mislukt. Check logs.', 'error');
+            }
+
+            $id = (int) $this->db->insert_id;
+            $created_jobs = $this->create_jobs_for_keyword($id);
+
+            if ($created_jobs < 1) {
+                $this->redirect_with_message('sch-keywords', 'Keyword opgeslagen, maar er zijn geen jobs aangemaakt. Check logs.', 'error');
+            }
+
+            $this->redirect_with_message('sch-keywords', 'Keyword opgeslagen. Jobs aangemaakt: ' . $created_jobs);
+        }
+    }
+
+    public function handle_discover_keywords(): void {
+        $this->verify_admin_nonce('sch_discover_keywords');
+
+        $client_id = (int) ($_POST['client_id'] ?? 0);
+        if ($client_id <= 0) {
+            $this->redirect_with_message('sch-clients', 'Geen geldige klant geselecteerd.', 'error');
+        }
+
+        $client = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('clients')} WHERE id=%d", $client_id));
+        if (!$client) {
+            $this->redirect_with_message('sch-clients', 'Klant niet gevonden.', 'error');
+        }
+
+        try {
+            $created = $this->discover_keywords_for_client($client);
+            $this->redirect_with_message('sch-clients', 'Keyword discovery afgerond. Nieuwe keywords: ' . $created);
+        } catch (Throwable $e) {
+            $this->log('error', 'keyword_discovery', 'Keyword discovery mislukt', [
+                'client_id' => $client_id,
+                'error' => $e->getMessage(),
+            ]);
+            $this->redirect_with_message('sch-clients', 'Keyword discovery mislukt. Check logs.', 'error');
+        }
+    }
+
+    public function handle_save_settings(): void {
+        $this->verify_admin_nonce('sch_save_settings');
+
+        update_option(self::OPTION_OPENAI_API_KEY, sanitize_text_field((string) ($_POST['openai_api_key'] ?? '')));
+        update_option(self::OPTION_OPENAI_MODEL, sanitize_text_field((string) ($_POST['openai_model'] ?? 'gpt-5.4-mini')));
+        update_option(self::OPTION_UNSPLASH_ACCESS_KEY, sanitize_text_field((string) ($_POST['unsplash_access_key'] ?? '')));
+
+        $temperature = max(0, min(2, (float) ($_POST['openai_temperature'] ?? 0.6)));
+        update_option(self::OPTION_OPENAI_TEMPERATURE, (string) $temperature);
+
+        $trusted_source_domain = $this->normalize_site_url((string) ($_POST['trusted_source_domain'] ?? 'https://shortcut.nl'));
+        if ($trusted_source_domain === '') {
+            $trusted_source_domain = 'https://shortcut.nl';
+        }
+        update_option(self::OPTION_TRUSTED_SOURCE_DOMAIN, $trusted_source_domain);
+
+        update_option(self::OPTION_ENABLE_FEATURED_IMAGES, isset($_POST['enable_featured_images']) ? '1' : '0');
+        update_option(self::OPTION_ENABLE_SUPPORTING, isset($_POST['enable_supporting']) ? '1' : '0');
+        update_option(self::OPTION_ENABLE_AUTO_DISCOVERY, isset($_POST['enable_auto_discovery']) ? '1' : '0');
+        update_option(self::OPTION_ENABLE_VERBOSE_LOGS, isset($_POST['enable_verbose_logs']) ? '1' : '0');
+
+        $max_research_pages = max(1, min(20, (int) ($_POST['max_research_pages'] ?? 5)));
+        $max_discovery_keywords = max(1, min(50, (int) ($_POST['max_discovery_keywords'] ?? 10)));
+        update_option(self::OPTION_MAX_RESEARCH_PAGES, (string) $max_research_pages);
+        update_option(self::OPTION_MAX_DISCOVERY_KEYWORDS, (string) $max_discovery_keywords);
+
+        $this->redirect_with_message('sch-settings', 'Instellingen opgeslagen.');
+    }
+
+    public function handle_run_now(): void {
+        $this->verify_admin_nonce('sch_run_now');
+        $this->run_worker();
+        $this->redirect_with_message('sch-content-hub', 'Worker uitgevoerd. Check jobs en logs.');
+    }
+
+    public function handle_retry_job(): void {
+        $this->verify_admin_nonce('sch_retry_job');
+        $id = (int) ($_GET['id'] ?? 0);
+        if ($id > 0) {
+            $updated = $this->db->update($this->table('jobs'), [
+                'status'      => 'queued',
+                'locked_at'   => null,
+                'started_at'  => null,
+                'finished_at' => null,
+                'updated_at'  => $this->now(),
+            ], ['id' => $id]);
+
+            $this->vlog('worker', 'Job opnieuw in queue gezet', [
+                'job_id' => $id,
+                'updated' => $updated,
+                'db_error' => $this->db->last_error,
+            ]);
+        }
+        $this->redirect_with_message('sch-jobs', 'Job opnieuw in queue gezet.');
+    }
+
+    public function handle_delete_client(): void {
+        $this->verify_admin_nonce('sch_delete_client');
+        $id = (int) ($_GET['id'] ?? 0);
+        if ($id > 0) {
+            $this->db->delete($this->table('clients'), ['id' => $id]);
+            $this->vlog('client', 'Klant verwijderd', ['client_id' => $id]);
+        }
+        $this->redirect_with_message('sch-clients', 'Klant verwijderd.');
+    }
+
+    public function handle_delete_site(): void {
+        $this->verify_admin_nonce('sch_delete_site');
+        $id = (int) ($_GET['id'] ?? 0);
+        if ($id > 0) {
+            $this->db->delete($this->table('sites'), ['id' => $id]);
+            $this->vlog('site', 'Blog verwijderd', ['site_id' => $id]);
+        }
+        $this->redirect_with_message('sch-sites', 'Blog verwijderd.');
+    }
+
+    public function handle_delete_keyword(): void {
+        $this->verify_admin_nonce('sch_delete_keyword');
+        $id = (int) ($_GET['id'] ?? 0);
+        if ($id > 0) {
+            $this->delete_jobs_for_keyword($id);
+            $this->db->delete($this->table('keywords'), ['id' => $id]);
+            $this->vlog('keyword', 'Keyword verwijderd', ['keyword_id' => $id]);
+        }
+        $this->redirect_with_message('sch-keywords', 'Keyword verwijderd.');
+    }
+
+    private function delete_jobs_for_keyword(int $keyword_id): void {
+        $deleted = $this->db->query($this->db->prepare("DELETE FROM {$this->table('jobs')} WHERE keyword_id=%d", $keyword_id));
+        $this->vlog('jobs', 'Jobs verwijderd voor keyword', [
+            'keyword_id' => $keyword_id,
+            'deleted' => $deleted,
+            'db_error' => $this->db->last_error,
+        ]);
+    }
+
+    private function create_jobs_for_keyword(int $keyword_id): int {
+        $keyword = $this->db->get_row($this->db->prepare(
+            "SELECT * FROM {$this->table('keywords')} WHERE id=%d",
+            $keyword_id
+        ));
+
+        if (!$keyword) {
+            $this->log('error', 'jobs', 'Geen jobs aangemaakt: keyword niet gevonden', [
+                'keyword_id' => $keyword_id,
+            ]);
+            return 0;
+        }
+
+        $site_ids = $this->decode_json_array($keyword->target_site_ids);
+        $site_ids = array_values(array_unique(array_filter(array_map('intval', (array) $site_ids))));
+
+        if (empty($site_ids)) {
+            $this->log('error', 'jobs', 'Geen jobs aangemaakt: target_site_ids is leeg', [
+                'keyword_id' => $keyword_id,
+                'raw_target_site_ids' => $keyword->target_site_ids,
+            ]);
+            return 0;
+        }
+
+        $created = 0;
+
+        foreach ($site_ids as $site_id) {
+            $site_exists = (int) $this->db->get_var($this->db->prepare(
+                "SELECT COUNT(*) FROM {$this->table('sites')} WHERE id=%d AND is_active=1",
+                $site_id
+            ));
+
+            if ($site_exists < 1) {
+                $this->log('warning', 'jobs', 'Site overgeslagen bij job-aanmaak: site bestaat niet of is inactief', [
+                    'keyword_id' => $keyword_id,
+                    'site_id' => $site_id,
+                ]);
+                continue;
+            }
+
+            $inserted = $this->db->insert($this->table('jobs'), [
+                'keyword_id' => (int) $keyword->id,
+                'client_id'  => (int) $keyword->client_id,
+                'site_id'    => (int) $site_id,
+                'job_type'   => 'write_publish',
+                'status'     => 'queued',
+                'attempts'   => 0,
+                'created_at' => $this->now(),
+                'updated_at' => $this->now(),
+            ]);
+
+            if ($inserted) {
+                $created++;
+                $this->vlog('jobs', 'Job aangemaakt', [
+                    'keyword_id' => $keyword_id,
+                    'site_id' => $site_id,
+                    'job_id' => (int) $this->db->insert_id,
+                ]);
+            } else {
+                $this->log('error', 'jobs', 'Job insert mislukt', [
+                    'keyword_id' => $keyword_id,
+                    'site_id' => $site_id,
+                    'db_error' => $this->db->last_error,
+                ]);
+            }
+        }
+
+        $this->log('info', 'jobs', 'Job-aanmaak afgerond', [
+            'keyword_id' => $keyword_id,
+            'requested_site_ids' => $site_ids,
+            'created_jobs' => $created,
+        ]);
+
+        return $created;
+    }
+
+    private function log(string $level, string $context, string $message, $payload = null): void {
+        $this->db->insert($this->table('logs'), [
+            'level'      => $level,
+            'context'    => $context,
+            'message'    => $message,
+            'payload'    => $payload !== null ? wp_json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null,
+            'created_at' => $this->now(),
+        ]);
+    }
+
+    public function run_worker(): void {
+        $this->log('info', 'worker', 'run_worker gestart');
+
+        $job = $this->db->get_row("SELECT * FROM {$this->table('jobs')} WHERE status='queued' ORDER BY id ASC LIMIT 1");
+
+        if (!$job) {
+            $this->log('info', 'worker', 'Geen queued job gevonden');
+
+            if (get_option(self::OPTION_ENABLE_AUTO_DISCOVERY, '0') === '1') {
+                $this->vlog('worker', 'Auto discovery staat aan, client scan start');
+                $this->maybe_run_auto_discovery();
+            }
+            return;
+        }
+
+        $this->log('info', 'worker', 'Queued job gevonden', [
+            'job_id' => (int) $job->id,
+            'keyword_id' => (int) $job->keyword_id,
+            'site_id' => (int) $job->site_id,
+            'attempts' => (int) $job->attempts,
+        ]);
+
+        $updated = $this->db->update($this->table('jobs'), [
+            'status'     => 'running',
+            'attempts'   => (int) $job->attempts + 1,
+            'locked_at'  => $this->now(),
+            'started_at' => $this->now(),
+            'updated_at' => $this->now(),
+        ], ['id' => (int) $job->id]);
+
+        if ($updated === false) {
+            $this->log('error', 'worker', 'Job kon niet op running gezet worden', [
+                'job_id' => (int) $job->id,
+                'db_error' => $this->db->last_error,
+            ]);
+            return;
+        }
+
+        try {
+            $this->process_job((int) $job->id);
+            $this->log('info', 'worker', 'Job succesvol verwerkt', [
+                'job_id' => (int) $job->id,
+            ]);
+        } catch (Throwable $e) {
+            $this->db->update($this->table('jobs'), [
+                'status'      => 'failed',
+                'result'      => wp_json_encode(['error' => $e->getMessage()]),
+                'finished_at' => $this->now(),
+                'updated_at'  => $this->now(),
+            ], ['id' => (int) $job->id]);
+
+            $this->log('error', 'worker', 'Job failed', [
+                'job_id' => (int) $job->id,
+                'error'  => $e->getMessage(),
+            ]);
+        }
+    }
+
+    private function maybe_run_auto_discovery(): void {
+        $client = $this->db->get_row("SELECT * FROM {$this->table('clients')} WHERE is_active=1 ORDER BY updated_at ASC LIMIT 1");
+        if (!$client) {
+            $this->vlog('keyword_discovery', 'Geen actieve client gevonden voor auto discovery');
+            return;
+        }
+
+        try {
+            $created = $this->discover_keywords_for_client($client);
+            $this->log('info', 'keyword_discovery', 'Auto discovery afgerond', [
+                'client_id' => (int) $client->id,
+                'created_keywords' => $created,
+            ]);
+        } catch (Throwable $e) {
+            $this->log('error', 'keyword_discovery', 'Auto discovery mislukt', [
+                'client_id' => (int) $client->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    private function process_job(int $job_id): void {
+        $job = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('jobs')} WHERE id=%d", $job_id));
+        if (!$job) {
+            throw new RuntimeException('Job niet gevonden.');
+        }
+
+        $keyword = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('keywords')} WHERE id=%d", (int) $job->keyword_id));
+        $client  = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('clients')} WHERE id=%d", (int) $job->client_id));
+        $site    = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('sites')} WHERE id=%d", (int) $job->site_id));
+        if (!$keyword || !$client || !$site) {
+            throw new RuntimeException('Keyword, klant of blog ontbreekt.');
+        }
+
+        $this->vlog('worker', 'Job context geladen', [
+            'job_id' => $job_id,
+            'keyword_id' => (int) $keyword->id,
+            'client_id' => (int) $client->id,
+            'site_id' => (int) $site->id,
+            'keyword' => (string) $keyword->main_keyword,
+        ]);
+
+        $article = $this->generate_article($keyword, $client, $site);
+
+        $featured_image = null;
+        if (get_option(self::OPTION_ENABLE_FEATURED_IMAGES, '1') === '1') {
+            try {
+                $featured_image = $this->generate_featured_image_payload($keyword, $client, $article);
+            } catch (Throwable $e) {
+                $this->log('warning', 'featured_image', 'Featured image stap overgeslagen', [
+                    'job_id' => $job_id,
+                    'error'  => $e->getMessage(),
+                ]);
+            }
+        }
+
+        $article_id = $this->store_article($job, $keyword, $client, $site, $article, $featured_image);
+        $publish_result = $this->publish_to_remote_site($site, $article, $featured_image, $job, $keyword, $client, $article_id);
+
+        $this->db->update($this->table('articles'), [
+            'remote_post_id' => sanitize_text_field((string) ($publish_result['remote_post_id'] ?? '')),
+            'remote_url'     => esc_url_raw((string) ($publish_result['remote_url'] ?? '')),
+            'publish_status' => sanitize_text_field((string) ($publish_result['status'] ?? 'draft')),
+            'updated_at'     => $this->now(),
+        ], ['id' => $article_id]);
+
+        $this->db->update($this->table('jobs'), [
+            'status'      => 'published',
+            'result'      => wp_json_encode($publish_result),
+            'finished_at' => $this->now(),
+            'updated_at'  => $this->now(),
+        ], ['id' => $job_id]);
+
+        $this->db->update($this->table('keywords'), [
+            'status'            => 'processed',
+            'last_processed_at' => $this->now(),
+            'updated_at'        => $this->now(),
+        ], ['id' => (int) $keyword->id]);
+
+        if ($keyword->content_type === 'pillar' && get_option(self::OPTION_ENABLE_SUPPORTING, '1') === '1') {
+            $this->maybe_create_supporting_jobs($keyword, $client);
+        }
+    }
+
+    private function maybe_create_supporting_jobs(object $pillar_keyword, object $client): void {
+        $secondary = $this->get_secondary_keywords_list($pillar_keyword);
+        if (!$secondary) {
+            $this->vlog('supporting', 'Geen secondary keywords gevonden voor supporting jobs', [
+                'keyword_id' => (int) $pillar_keyword->id,
+            ]);
+            return;
+        }
+
+        $site_ids = $this->decode_json_array($pillar_keyword->target_site_ids);
+        foreach (array_slice($secondary, 0, 3) as $supporting_keyword_text) {
+            $existing = $this->db->get_var($this->db->prepare(
+                "SELECT id FROM {$this->table('keywords')} WHERE client_id=%d AND main_keyword=%s LIMIT 1",
+                (int) $client->id,
+                $supporting_keyword_text
+            ));
+            if ($existing) {
+                $this->vlog('supporting', 'Supporting keyword bestaat al', [
+                    'client_id' => (int) $client->id,
+                    'keyword' => $supporting_keyword_text,
+                ]);
+                continue;
+            }
+
+            $inserted = $this->db->insert($this->table('keywords'), [
+                'client_id'          => (int) $client->id,
+                'main_keyword'       => $supporting_keyword_text,
+                'secondary_keywords' => wp_json_encode([]),
+                'target_site_ids'    => wp_json_encode($site_ids),
+                'content_type'       => 'supporting',
+                'tone_of_voice'      => $pillar_keyword->tone_of_voice,
+                'target_word_count'  => max(700, (int) floor((int) $pillar_keyword->target_word_count * 0.6)),
+                'priority'           => (int) $pillar_keyword->priority + 5,
+                'status'             => 'queued',
+                'source'             => 'supporting',
+                'source_context'     => wp_json_encode([
+                    'parent_keyword_id' => (int) $pillar_keyword->id,
+                    'parent_keyword' => (string) $pillar_keyword->main_keyword,
+                ]),
+                'created_at'         => $this->now(),
+                'updated_at'         => $this->now(),
+            ]);
+
+            if ($inserted) {
+                $new_keyword_id = (int) $this->db->insert_id;
+                $this->create_jobs_for_keyword($new_keyword_id);
+                $this->log('info', 'supporting', 'Supporting keyword aangemaakt', [
+                    'keyword_id' => $new_keyword_id,
+                    'keyword' => $supporting_keyword_text,
+                ]);
+            } else {
+                $this->log('error', 'supporting', 'Supporting keyword insert mislukt', [
+                    'db_error' => $this->db->last_error,
+                    'keyword' => $supporting_keyword_text,
+                ]);
+            }
+        }
+    }
+
+    private function is_openai_quota_error(Throwable $e): bool {
+        $message = strtolower($e->getMessage());
+
+        return (
+            strpos($message, 'insufficient_quota') !== false ||
+            strpos($message, 'exceeded your current quota') !== false ||
+            strpos($message, 'billing') !== false ||
+            strpos($message, 'http 429') !== false
+        );
+    }
+
+    private function generate_article(object $keyword, object $client, object $site): array {
+        $api_key = trim((string) get_option(self::OPTION_OPENAI_API_KEY, ''));
+        if ($api_key === '') {
+            throw new RuntimeException('OpenAI API key ontbreekt. Artikel wordt niet gepubliceerd.');
+        }
+
+        $secondary_keywords = $this->get_secondary_keywords_list($keyword);
+        $link_targets = $this->get_client_link_targets($client);
+        if (!$link_targets) {
+            $link_targets[] = ['url' => $client->website_url, 'anchor' => $client->default_anchor ?: $keyword->main_keyword];
+        }
+        $primary_target = $this->pick_primary_link_target($link_targets, (string) $keyword->main_keyword);
+
+        $research_bundle = [];
+        try {
+            $research_bundle = $this->build_client_research_bundle($client);
+        } catch (Throwable $e) {
+            $this->log('warning', 'research', 'Research bundle kon niet volledig worden opgebouwd', [
+                'client_id' => (int) $client->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        try {
+            $plan = $this->agent_plan($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $research_bundle);
+            $draft = $this->agent_write($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $plan, $research_bundle);
+            $edited = $this->agent_edit($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $plan, $draft, $research_bundle);
+            $reviewed = $this->agent_review($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $plan, $edited, $research_bundle);
+            return $reviewed;
+        } catch (Throwable $e) {
+            if ($this->is_openai_quota_error($e)) {
+                $this->log('error', 'openai_quota', 'OpenAI quota/billing probleem. Publicatie geblokkeerd.', [
+                    'keyword' => (string) $keyword->main_keyword,
+                    'client_id' => (int) $client->id,
+                    'site_id' => (int) $site->id,
+                    'error' => $e->getMessage(),
+                ]);
+
+                throw new RuntimeException('OpenAI quota of billing probleem. Post is niet gepubliceerd.');
+            }
+
+            $this->log('warning', 'openai', 'AI pipeline fallback gebruikt', [
+                'keyword' => $keyword->main_keyword,
+                'error'   => $e->getMessage(),
+            ]);
+
+            return $this->generate_fallback_article($keyword, $client, $site, $e->getMessage());
+        }
+    }
+
+    private function pick_primary_link_target(array $targets, string $main_keyword): array {
+        foreach ($targets as $target) {
+            if (stripos((string) ($target['anchor'] ?? ''), $main_keyword) !== false) {
+                return $target;
+            }
+        }
+        return $targets[0];
+    }
+
+    private function build_client_research_bundle(object $client): array {
+        $urls = $this->get_client_research_urls($client);
+        if (!$urls && !empty($client->website_url)) {
+            $urls[] = ['url' => (string) $client->website_url];
+        }
+
+        $max_pages = max(1, (int) get_option(self::OPTION_MAX_RESEARCH_PAGES, '5'));
+        $urls = array_slice($urls, 0, $max_pages);
+
+        $pages = [];
+        foreach ($urls as $item) {
+            $url = (string) ($item['url'] ?? '');
+            if ($url === '') {
+                continue;
+            }
+
+            $page = $this->fetch_and_extract_page($url);
+            if (!empty($page['text'])) {
+                $pages[] = $page;
+            }
+        }
+
+        $bundle = [
+            'client_name' => (string) $client->name,
+            'website_url' => (string) $client->website_url,
+            'pages' => $pages,
+        ];
+
+        $this->vlog('research', 'Research bundle opgebouwd', [
+            'client_id' => (int) $client->id,
+            'page_count' => count($pages),
+            'urls' => array_map(static function ($p) { return (string) ($p['url'] ?? ''); }, $pages),
+        ]);
+
+        return $bundle;
+    }
+
+    private function fetch_and_extract_page(string $url): array {
+        $start = microtime(true);
+        $response = wp_remote_get($url, [
+            'timeout' => 25,
+            'redirection' => 5,
+            'headers' => [
+                'User-Agent' => 'ShortcutContentHubBot/0.5.2 (+WordPress)',
+                'Accept' => 'text/html,application/xhtml+xml',
+            ],
+        ]);
+
+        if (is_wp_error($response)) {
+            throw new RuntimeException('Research GET mislukt voor ' . $url . ': ' . $response->get_error_message());
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        $body = (string) wp_remote_retrieve_body($response);
+
+        if ($code < 200 || $code >= 300) {
+            throw new RuntimeException('Research GET gaf HTTP ' . $code . ' voor ' . $url);
+        }
+
+        $title = '';
+        if (preg_match('~<title[^>]*>(.*?)</title>~is', $body, $m)) {
+            $title = trim(wp_strip_all_tags(html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5)));
+        }
+
+        $text = preg_replace('~<script\b[^>]*>.*?</script>~is', ' ', $body);
+        $text = preg_replace('~<style\b[^>]*>.*?</style>~is', ' ', $text);
+        $text = preg_replace('~<noscript\b[^>]*>.*?</noscript>~is', ' ', $text);
+        $text = wp_strip_all_tags($text);
+        $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5);
+        $text = preg_replace('/\s+/u', ' ', $text);
+        $text = trim((string) $text);
+        $text = mb_substr($text, 0, 12000);
+
+        $duration = round((microtime(true) - $start) * 1000);
+
+        $this->vlog('research_http', 'Pagina opgehaald', [
+            'url' => $url,
+            'http_code' => $code,
+            'title' => $title,
+            'text_length' => mb_strlen($text),
+            'duration_ms' => $duration,
+        ]);
+
+        return [
+            'url' => $url,
+            'title' => $title,
+            'text' => $text,
+        ];
+    }
+
+    private function discover_keywords_for_client(object $client): int {
+        $this->log('info', 'keyword_discovery', 'Keyword discovery gestart', [
+            'client_id' => (int) $client->id,
+            'client_name' => (string) $client->name,
+        ]);
+
+        $research_bundle = $this->build_client_research_bundle($client);
+        if (empty($research_bundle['pages'])) {
+            throw new RuntimeException('Geen bruikbare research pagina’s gevonden voor deze klant.');
+        }
+
+        $sites = $this->db->get_results("SELECT id FROM {$this->table('sites')} WHERE is_active=1 ORDER BY publish_priority ASC");
+        $site_ids = array_map(static function ($site) {
+            return (int) $site->id;
+        }, (array) $sites);
+
+        if (!$site_ids) {
+            throw new RuntimeException('Er zijn geen actieve blogs beschikbaar voor discovery-keywords.');
+        }
+
+        $ideas = $this->agent_discover_keywords($client, $research_bundle);
+
+        $created = 0;
+        foreach ($ideas as $idea) {
+            $main_keyword = sanitize_text_field((string) ($idea['main_keyword'] ?? ''));
+            if ($main_keyword === '') {
+                continue;
+            }
+
+            $exists = $this->db->get_var($this->db->prepare(
+                "SELECT id FROM {$this->table('keywords')} WHERE client_id=%d AND main_keyword=%s LIMIT 1",
+                (int) $client->id,
+                $main_keyword
+            ));
+            if ($exists) {
+                $this->vlog('keyword_discovery', 'Keyword bestaat al, discovery slaat over', [
+                    'client_id' => (int) $client->id,
+                    'keyword' => $main_keyword,
+                ]);
+                continue;
+            }
+
+            $secondary = [];
+            foreach ((array) ($idea['secondary_keywords'] ?? []) as $secondary_keyword) {
+                $secondary_keyword = sanitize_text_field((string) $secondary_keyword);
+                if ($secondary_keyword !== '') {
+                    $secondary[] = ['keyword' => $secondary_keyword];
+                }
+            }
+
+            $inserted = $this->db->insert($this->table('keywords'), [
+                'client_id'          => (int) $client->id,
+                'main_keyword'       => $main_keyword,
+                'secondary_keywords' => wp_json_encode($secondary),
+                'target_site_ids'    => wp_json_encode($site_ids),
+                'content_type'       => sanitize_text_field((string) ($idea['content_type'] ?? 'pillar')),
+                'tone_of_voice'      => 'deskundig maar menselijk',
+                'target_word_count'  => max(600, (int) ($idea['target_word_count'] ?? 1200)),
+                'priority'           => (int) ($idea['priority'] ?? 10),
+                'status'             => 'queued',
+                'source'             => 'discovery',
+                'source_context'     => wp_json_encode($idea, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'created_at'         => $this->now(),
+                'updated_at'         => $this->now(),
+            ]);
+
+            if ($inserted) {
+                $keyword_id = (int) $this->db->insert_id;
+                $created_jobs = $this->create_jobs_for_keyword($keyword_id);
+                $created++;
+
+                $this->log('info', 'keyword_discovery', 'Discovery keyword aangemaakt', [
+                    'client_id' => (int) $client->id,
+                    'keyword_id' => $keyword_id,
+                    'keyword' => $main_keyword,
+                    'created_jobs' => $created_jobs,
+                ]);
+            } else {
+                $this->log('error', 'keyword_discovery', 'Discovery keyword insert mislukt', [
+                    'client_id' => (int) $client->id,
+                    'keyword' => $main_keyword,
+                    'db_error' => $this->db->last_error,
+                ]);
+            }
+        }
+
+        $this->log('info', 'keyword_discovery', 'Keyword discovery afgerond', [
+            'client_id' => (int) $client->id,
+            'created_keywords' => $created,
+        ]);
+
+        return $created;
+    }
+
+    private function agent_discover_keywords(object $client, array $research_bundle): array {
+        $max_keywords = max(1, (int) get_option(self::OPTION_MAX_DISCOVERY_KEYWORDS, '10'));
+
+        $result = $this->openai_json_call(
+            'keyword_discovery',
+            [
+                'role' => 'Je bent een Nederlandse SEO strateeg die zelfstandig keywordkansen ontdekt op basis van echte websitecontent.',
+                'goal' => 'Vind concrete blogkeywordkansen, cluster-gerelateerde long-tail termen en geef bruikbare contenttypes terug. Geef alleen JSON terug.',
+            ],
+            [
+                'client_name' => (string) $client->name,
+                'website_url' => (string) $client->website_url,
+                'max_keywords' => $max_keywords,
+                'research_bundle' => $research_bundle,
+                'requirements' => [
+                    'focus_on_commercially_relevant_informational_keywords' => true,
+                    'include_long_tail' => true,
+                    'avoid_brand_only_terms' => true,
+                    'avoid_obvious_duplicate_variants' => true,
+                ],
+            ],
+            [
+                'type' => 'object',
+                'additionalProperties' => false,
+                'properties' => [
+                    'keywords' => [
+                        'type' => 'array',
+                        'items' => [
+                            'type' => 'object',
+                            'additionalProperties' => false,
+                            'properties' => [
+                                'main_keyword' => ['type' => 'string'],
+                                'secondary_keywords' => [
+                                    'type' => 'array',
+                                    'items' => ['type' => 'string'],
+                                ],
+                                'content_type' => ['type' => 'string'],
+                                'target_word_count' => ['type' => 'integer'],
+                                'priority' => ['type' => 'integer'],
+                                'why' => ['type' => 'string'],
+                            ],
+                            'required' => ['main_keyword', 'secondary_keywords', 'content_type', 'target_word_count', 'priority', 'why'],
+                        ],
+                    ],
+                ],
+                'required' => ['keywords'],
+            ]
+        );
+
+        $keywords = (array) ($result['keywords'] ?? []);
+        $this->vlog('keyword_discovery', 'OpenAI discovery output ontvangen', [
+            'client_id' => (int) $client->id,
+            'keyword_count' => count($keywords),
+        ]);
+
+        return $keywords;
+    }
+
+    private function generate_article_system_payload(
+        object $keyword,
+        object $client,
+        object $site,
+        array $primary_target,
+        array $secondary_keywords,
+        array $link_targets,
+        array $research_bundle
+    ): array {
+        return [
+            'main_keyword'       => (string) $keyword->main_keyword,
+            'secondary_keywords' => $secondary_keywords,
+            'content_type'       => (string) $keyword->content_type,
+            'tone_of_voice'      => (string) $keyword->tone_of_voice,
+            'target_word_count'  => (int) $keyword->target_word_count,
+            'client_name'        => (string) $client->name,
+            'client_website'     => (string) $client->website_url,
+            'site_name'          => (string) $site->name,
+            'primary_target'     => $primary_target,
+            'available_targets'  => $link_targets,
+            'research_bundle'    => $research_bundle,
+        ];
+    }
+
+    private function agent_plan(
+        object $keyword,
+        object $client,
+        object $site,
+        array $primary_target,
+        array $secondary_keywords,
+        array $link_targets,
+        array $research_bundle
+    ): array {
+        return $this->openai_json_call(
+            'planner',
+            [
+                'role' => 'Senior content strategist voor Nederlandse SEO-content.',
+                'goal' => 'Maak een diep contentplan voor een artikel op basis van keyword, doelgroep, zoekintentie en opgehaalde websitecontent. Geef alleen JSON terug.',
+            ],
+            $this->generate_article_system_payload($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $research_bundle),
+            [
+                'type' => 'object',
+                'additionalProperties' => false,
+                'properties' => [
+                    'angle' => ['type' => 'string'],
+                    'search_intent' => ['type' => 'string'],
+                    'headline_options' => ['type' => 'array', 'items' => ['type' => 'string']],
+                    'outline' => ['type' => 'array', 'items' => ['type' => 'string']],
+                    'internal_notes' => ['type' => 'array', 'items' => ['type' => 'string']],
+                    'content_gaps_found_on_site' => ['type' => 'array', 'items' => ['type' => 'string']],
+                ],
+                'required' => ['angle', 'search_intent', 'headline_options', 'outline', 'internal_notes', 'content_gaps_found_on_site'],
+            ]
+        );
+    }
+
+    private function agent_write(
+        object $keyword,
+        object $client,
+        object $site,
+        array $primary_target,
+        array $secondary_keywords,
+        array $link_targets,
+        array $plan,
+        array $research_bundle
+    ): array {
+        return $this->openai_json_call(
+            'writer',
+            [
+                'role' => 'Nederlandse SEO-copywriter.',
+                'goal' => 'Schrijf een sterk artikel in HTML, gevoed door research uit de website van de klant. Geef alleen JSON terug.',
+            ],
+            array_merge(
+                $this->generate_article_system_payload($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $research_bundle),
+                [
+                    'plan' => $plan,
+                    'requirements' => [
+                        'content_html' => true,
+                        'one_primary_link' => true,
+                        'natural_dutch' => true,
+                        'avoid_generic_ai_phrases' => true,
+                        'build_on_site_research' => true,
+                        'do_not_output_h1_in_content' => true,
+                        'do_not_repeat_post_title_inside_content' => true,
+                    ],
+                ]
+            ),
+            $this->article_schema()
+        );
+    }
+
+    private function agent_edit(
+        object $keyword,
+        object $client,
+        object $site,
+        array $primary_target,
+        array $secondary_keywords,
+        array $link_targets,
+        array $plan,
+        array $draft,
+        array $research_bundle
+    ): array {
+        return $this->openai_json_call(
+            'editor',
+            [
+                'role' => 'Kritische eindredacteur.',
+                'goal' => 'Verbeter stijl, logica, ritme en leesbaarheid, zonder de commerciële intentie kwijt te raken. Geef alleen JSON terug.',
+            ],
+            [
+                'main_keyword' => (string) $keyword->main_keyword,
+                'secondary_keywords' => $secondary_keywords,
+                'primary_target' => $primary_target,
+                'plan' => $plan,
+                'draft' => $draft,
+                'research_bundle' => $research_bundle,
+            ],
+            $this->article_schema()
+        );
+    }
+
+    private function agent_review(
+        object $keyword,
+        object $client,
+        object $site,
+        array $primary_target,
+        array $secondary_keywords,
+        array $link_targets,
+        array $plan,
+        array $edited,
+        array $research_bundle
+    ): array {
+        $reviewed = $this->openai_json_call(
+            'reviewer',
+            [
+                'role' => 'SEO reviewer en eindredacteur.',
+                'goal' => 'Controleer SEO, structuur, meta data, interne consistentie met site research en linkplaatsing. Lever alleen de definitieve JSON terug.',
+            ],
+            [
+                'main_keyword'       => (string) $keyword->main_keyword,
+                'secondary_keywords' => $secondary_keywords,
+                'target_word_count'  => (int) $keyword->target_word_count,
+                'site_name'          => (string) $site->name,
+                'primary_target'     => $primary_target,
+                'available_targets'  => $link_targets,
+                'plan'               => $plan,
+                'draft'              => $edited,
+                'research_bundle'    => $research_bundle,
+                'checks'             => [
+                    'keyword_in_title' => true,
+                    'keyword_in_intro' => true,
+                    'single_primary_link' => true,
+                    'meta_title_present' => true,
+                    'meta_description_present' => true,
+                    'uses_site_context' => true,
+                    'no_h1_in_content' => true,
+                    'do_not_repeat_post_title_inside_content' => true,
+                ],
+            ],
+            $this->article_schema()
+        );
+
+        $reviewed['slug'] = sanitize_title((string) ($reviewed['slug'] ?? $keyword->main_keyword . '-' . $site->name));
+        $reviewed['article_type'] = sanitize_text_field((string) ($reviewed['article_type'] ?? $keyword->content_type));
+
+        return [
+            'title'            => sanitize_text_field((string) ($reviewed['title'] ?? '')),
+            'slug'             => sanitize_title((string) ($reviewed['slug'] ?? '')),
+            'content'          => wp_kses_post((string) ($reviewed['content'] ?? '')),
+            'meta_title'       => sanitize_text_field((string) ($reviewed['meta_title'] ?? '')),
+            'meta_description' => sanitize_textarea_field((string) ($reviewed['meta_description'] ?? '')),
+            'canonical_url'    => esc_url_raw((string) ($reviewed['canonical_url'] ?? '')),
+            'article_type'     => sanitize_text_field((string) ($reviewed['article_type'] ?? 'pillar')),
+        ];
+    }
+
+    private function article_schema(): array {
+        return [
+            'type' => 'object',
+            'additionalProperties' => false,
+            'properties' => [
+                'title' => ['type' => 'string'],
+                'slug' => ['type' => 'string'],
+                'content' => ['type' => 'string'],
+                'meta_title' => ['type' => 'string'],
+                'meta_description' => ['type' => 'string'],
+                'canonical_url' => ['type' => 'string'],
+                'article_type' => ['type' => 'string'],
+            ],
+            'required' => ['title', 'slug', 'content', 'meta_title', 'meta_description', 'canonical_url', 'article_type'],
+        ];
+    }
+
+    private function openai_json_call(string $name, array $system_context, array $user_payload, array $schema): array {
+        $api_key = trim((string) get_option(self::OPTION_OPENAI_API_KEY, ''));
+        $model = trim((string) get_option(self::OPTION_OPENAI_MODEL, 'gpt-5.4-mini'));
+        $temperature = (float) get_option(self::OPTION_OPENAI_TEMPERATURE, '0.6');
+
+        if ($api_key === '') {
+            throw new RuntimeException('OpenAI API key ontbreekt.');
+        }
+
+        $instructions = implode("\n", [
+            $system_context['role'] ?? '',
+            $system_context['goal'] ?? '',
+            'Schrijf in natuurlijk Nederlands.',
+            'Geef uitsluitend geldige JSON terug die exact aan het schema voldoet.',
+            'Geen markdown code fences.',
+            'Geen extra uitleg buiten de JSON.',
+        ]);
+
+        $body = [
+            'model' => $model,
+            'instructions' => $instructions,
+            'input' => wp_json_encode($user_payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            'temperature' => $temperature,
+            'text' => [
+                'format' => [
+                    'type' => 'json_schema',
+                    'name' => $name,
+                    'strict' => true,
+                    'schema' => $schema,
+                ],
+            ],
+        ];
+
+        $this->vlog('openai', 'OpenAI request start', [
+            'name' => $name,
+            'model' => $model,
+            'temperature' => $temperature,
+        ]);
+
+        $start = microtime(true);
+        $response = wp_remote_post('https://api.openai.com/v1/responses', [
+            'timeout' => 120,
+            'headers' => [
+                'Authorization' => 'Bearer ' . $api_key,
+                'Content-Type'  => 'application/json',
+            ],
+            'body' => wp_json_encode($body),
+        ]);
+
+        if (is_wp_error($response)) {
+            throw new RuntimeException('OpenAI request mislukt: ' . $response->get_error_message());
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        $raw  = (string) wp_remote_retrieve_body($response);
+        $json = json_decode($raw, true);
+        $duration = round((microtime(true) - $start) * 1000);
+
+        $this->vlog('openai', 'OpenAI response ontvangen', [
+            'name' => $name,
+            'http_code' => $code,
+            'duration_ms' => $duration,
+            'body_excerpt' => mb_substr($raw, 0, 800),
+        ]);
+
+        if ($code < 200 || $code >= 300 || !is_array($json)) {
+            throw new RuntimeException('OpenAI response ongeldig: HTTP ' . $code . ' / ' . mb_substr($raw, 0, 800));
+        }
+
+        $text = $this->extract_openai_text($json);
+        if ($text === '') {
+            throw new RuntimeException('Geen OpenAI output gevonden.');
+        }
+
+        $decoded = json_decode($text, true);
+        if (!is_array($decoded)) {
+            throw new RuntimeException('OpenAI gaf geen geldige JSON terug: ' . mb_substr($text, 0, 800));
+        }
+
+        return $decoded;
+    }
+
+    private function extract_openai_text(array $response): string {
+        if (!empty($response['output_text']) && is_string($response['output_text'])) {
+            return trim($response['output_text']);
+        }
+        if (!empty($response['output']) && is_array($response['output'])) {
+            foreach ($response['output'] as $output_item) {
+                if (empty($output_item['content']) || !is_array($output_item['content'])) {
+                    continue;
+                }
+                foreach ($output_item['content'] as $content_item) {
+                    if (!empty($content_item['text']) && is_string($content_item['text'])) {
+                        return trim($content_item['text']);
+                    }
+                }
+            }
+        }
+        return '';
+    }
+
+    private function generate_fallback_article(object $keyword, object $client, object $site, string $reason): array {
+        $secondary = $this->get_secondary_keywords_list($keyword);
+        $targets = $this->get_client_link_targets($client);
+
+        $primary_target = $targets ? $targets[0] : [
+            'url' => $client->website_url,
+            'anchor' => $client->default_anchor ?: $keyword->main_keyword,
+        ];
+
+        $title = ucfirst((string) $keyword->main_keyword) . ' uitgelegd';
+
+        $content  = '<p>Fallbackcontent gebruikt. Reden: ' . esc_html($reason) . '</p>';
+        $content .= '<p><a href="' . esc_url($primary_target['url'] ?? $client->website_url) . '">' . esc_html($primary_target['anchor'] ?? $keyword->main_keyword) . '</a></p>';
+
+        if ($secondary) {
+            $content .= '<h2>Gerelateerde onderwerpen</h2>';
+            $content .= '<p>' . esc_html(implode(', ', $secondary)) . '</p>';
+        }
+
+        $content .= '<h2>Praktische informatie</h2>';
+        $content .= '<p>Deze content houdt de pipeline draaiend wanneer de AI-laag tijdelijk faalt.</p>';
+
+        return [
+            'title' => $title,
+            'slug' => sanitize_title((string) $keyword->main_keyword . '-' . $site->name),
+            'content' => $content,
+            'meta_title' => $title . ' | ' . $site->name,
+            'meta_description' => 'Lees meer over ' . $keyword->main_keyword . '.',
+            'canonical_url' => '',
+            'article_type' => (string) $keyword->content_type,
+        ];
+    }
+
+    private function generate_featured_image_payload(object $keyword, object $client, array $article): ?array {
+        $access_key = trim((string) get_option(self::OPTION_UNSPLASH_ACCESS_KEY, ''));
+        if ($access_key === '') {
+            return null;
+        }
+
+        $search_term = $this->derive_unsplash_search_term_via_openai(
+            (string) $keyword->main_keyword,
+            wp_strip_all_tags((string) ($article['meta_description'] ?? ''))
+        );
+
+        $photo = $this->fetch_unsplash_random($search_term, $access_key);
+        if (!empty($photo['download_loc'])) {
+            wp_remote_get($photo['download_loc'], [
+                'timeout' => 10,
+                'headers' => ['Authorization' => 'Client-ID ' . $access_key],
+            ]);
+        }
+
+        return [
+            'search_term' => $search_term,
+            'image_url' => (string) $photo['image_url'],
+            'alt' => (string) ($photo['alt'] ?: $keyword->main_keyword),
+            'credit_name' => (string) ($photo['photographer'] ?? ''),
+            'credit_url' => (string) ($photo['profile_html'] ?? ''),
+            'source_url' => (string) ($photo['photo_page'] ?? ''),
+            'caption' => (string) ('Photo via Unsplash - ' . (!empty($photo['photographer']) ? $photo['photographer'] : '')),
+            'unsplash_id' => (string) ($photo['id'] ?? ''),
+        ];
+    }
+
+    private function derive_unsplash_search_term_via_openai(string $term_name, string $description): string {
+        $api_key = trim((string) get_option(self::OPTION_OPENAI_API_KEY, ''));
+        if ($api_key === '') {
+            return $term_name;
+        }
+
+        try {
+            $result = $this->openai_json_call(
+                'featured_image_search_term',
+                [
+                    'role' => 'Je kiest een korte Unsplash zoekterm.',
+                    'goal' => 'Geef een ultrakorte stock-photo zoekterm van 1 tot 3 woorden.',
+                ],
+                [
+                    'term_name' => $term_name,
+                    'description' => $description,
+                ],
+                [
+                    'type' => 'object',
+                    'additionalProperties' => false,
+                    'properties' => [
+                        'search_term' => ['type' => 'string'],
+                    ],
+                    'required' => ['search_term'],
+                ]
+            );
+            $term = trim((string) ($result['search_term'] ?? ''));
+            return $term !== '' ? $term : $term_name;
+        } catch (Throwable $e) {
+            return $term_name;
+        }
+    }
+
+    private function fetch_unsplash_random(string $keyword, string $access_key): array {
+        $url = add_query_arg([
+            'query' => $keyword,
+            'content_filter' => 'high',
+            'orientation' => 'landscape',
+        ], 'https://api.unsplash.com/photos/random');
+
+        $start = microtime(true);
+        $response = wp_remote_get($url, [
+            'timeout' => 20,
+            'headers' => [
+                'Authorization' => 'Client-ID ' . $access_key,
+                'Accept-Version' => 'v1',
+            ],
+        ]);
+
+        if (is_wp_error($response)) {
+            throw new RuntimeException('Unsplash error: ' . $response->get_error_message());
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        $body = (string) wp_remote_retrieve_body($response);
+        $duration = round((microtime(true) - $start) * 1000);
+
+        $this->vlog('featured_image', 'Unsplash response ontvangen', [
+            'keyword' => $keyword,
+            'http_code' => $code,
+            'duration_ms' => $duration,
+            'body_excerpt' => mb_substr($body, 0, 500),
+        ]);
+
+        if ($code !== 200) {
+            throw new RuntimeException('Unsplash HTTP ' . $code . ' - ' . mb_substr($body, 0, 500));
+        }
+
+        $data = json_decode($body, true);
+        if (!$data) {
+            throw new RuntimeException('Unsplash invalid JSON');
+        }
+        if (isset($data[0]) && is_array($data[0])) {
+            $data = $data[0];
+        }
+
+        $urls = $data['urls'] ?? [];
+        $chosen = $urls['regular'] ?? ($urls['full'] ?? ($urls['small'] ?? ''));
+        if ($chosen === '') {
+            throw new RuntimeException('Geen bruikbare image URL in Unsplash response.');
+        }
+
+        return [
+            'image_url' => $chosen,
+            'photo_page' => $data['links']['html'] ?? '',
+            'download_loc' => $data['links']['download_location'] ?? '',
+            'photographer' => $data['user']['name'] ?? '',
+            'profile_html' => $data['user']['links']['html'] ?? '',
+            'alt' => $data['alt_description'] ?? '',
+            'id' => $data['id'] ?? '',
+        ];
+    }
+
+    private function store_article(object $job, object $keyword, object $client, object $site, array $article, ?array $featured_image): int {
+        $inserted = $this->db->insert($this->table('articles'), [
+            'job_id' => (int) $job->id,
+            'keyword_id' => (int) $keyword->id,
+            'client_id' => (int) $client->id,
+            'site_id' => (int) $site->id,
+            'article_type' => sanitize_text_field($article['article_type'] ?? 'pillar'),
+            'title' => wp_strip_all_tags($article['title'] ?? ''),
+            'slug' => sanitize_title($article['slug'] ?? ''),
+            'content' => wp_kses_post($article['content'] ?? ''),
+            'meta_title' => sanitize_text_field($article['meta_title'] ?? ''),
+            'meta_description' => sanitize_textarea_field($article['meta_description'] ?? ''),
+            'canonical_url' => esc_url_raw($article['canonical_url'] ?? ''),
+            'featured_image_data' => $featured_image ? wp_json_encode($featured_image) : null,
+            'publish_status' => 'queued',
+            'created_at' => $this->now(),
+            'updated_at' => $this->now(),
+        ]);
+
+        if (!$inserted) {
+            throw new RuntimeException('Article insert mislukt: ' . $this->db->last_error);
+        }
+
+        $article_id = (int) $this->db->insert_id;
+        $this->vlog('article', 'Artikel opgeslagen in centrale database', [
+            'article_id' => $article_id,
+            'job_id' => (int) $job->id,
+            'keyword_id' => (int) $keyword->id,
+        ]);
+
+        return $article_id;
+    }
+
+    private function build_receiver_url(object $site): string {
+        return untrailingslashit((string) $site->base_url) . '/wp-admin/admin-post.php?action=shortcut_receive_content';
+    }
+
+    private function publish_to_remote_site(object $site, array $article, ?array $featured_image, object $job, object $keyword, object $client, int $article_id): array {
+        $trusted_source_domain = $this->get_trusted_source_domain();
+
+        $payload = [
+            'timestamp' => time(),
+            'source' => 'shortcut-content-hub',
+            'source_site' => $trusted_source_domain,
+            'title' => (string) $article['title'],
+            'slug' => (string) $article['slug'],
+            'content' => (string) $article['content'],
+            'meta_title' => (string) $article['meta_title'],
+            'meta_description' => (string) $article['meta_description'],
+            'canonical_url' => (string) ($article['canonical_url'] ?? ''),
+            'status' => (string) $site->default_status,
+            'category' => (string) $site->default_category,
+            'external_job_id' => (int) $job->id,
+            'external_article_id' => $article_id,
+            'client_name' => (string) $client->name,
+            'keyword' => (string) $keyword->main_keyword,
+            'content_type' => (string) ($article['article_type'] ?? 'pillar'),
+            'featured_image' => $featured_image,
+        ];
+
+        $body_json = wp_json_encode($payload);
+        $url = $this->build_receiver_url($site);
+
+        $this->vlog('publish', 'Remote publish start', [
+            'site_id' => (int) $site->id,
+            'url' => $url,
+            'source_site' => $trusted_source_domain,
+            'payload_excerpt' => mb_substr($body_json, 0, 1000),
+        ]);
+
+        $start = microtime(true);
+        $response = wp_remote_post($url, [
+            'timeout' => 60,
+            'headers' => [
+                'Content-Type' => 'application/json',
+                'X-SCH-Source-Site' => $trusted_source_domain,
+            ],
+            'body' => $body_json,
+        ]);
+
+        if (is_wp_error($response)) {
+            throw new RuntimeException('Publish mislukt: ' . $response->get_error_message());
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        $body = (string) wp_remote_retrieve_body($response);
+        $json = json_decode($body, true);
+        $duration = round((microtime(true) - $start) * 1000);
+
+        $this->vlog('publish', 'Remote publish response ontvangen', [
+            'site_id' => (int) $site->id,
+            'http_code' => $code,
+            'duration_ms' => $duration,
+            'body' => mb_substr($body, 0, 1000),
+        ]);
+
+        if ($code < 200 || $code >= 300 || !is_array($json) || empty($json['success'])) {
+            throw new RuntimeException('Remote response ongeldig: HTTP ' . $code . ' / ' . mb_substr($body, 0, 1000));
+        }
+
+        $this->log('info', 'publish', 'Remote publish geslaagd', [
+            'site_id' => (int) $site->id,
+            'response' => $json,
+        ]);
+
+        return $json;
+    }
+}
+
+SCH_Orchestrator::instance();
