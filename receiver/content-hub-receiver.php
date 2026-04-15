@@ -17,6 +17,8 @@ if (!defined('ABSPATH')) {
 
 final class SCH_Receiver {
     const OPTION_TRUSTED_SOURCE_DOMAIN = 'sch_receiver_trusted_source_domain';
+    const REGISTRATION_ACTION = 'sch_register_receiver_blog';
+    const REGISTRATION_TIMEOUT = 20;
 
     private static ?SCH_Receiver $instance = null;
 
@@ -28,10 +30,16 @@ final class SCH_Receiver {
     }
 
     private function __construct() {
+        register_activation_hook(__FILE__, [self::class, 'handle_activation']);
         add_action('admin_menu', [$this, 'admin_menu']);
         add_action('admin_post_shortcut_receive_content', [$this, 'handle_receive']);
         add_action('admin_post_nopriv_shortcut_receive_content', [$this, 'handle_receive']);
         add_action('admin_post_sch_receiver_save_settings', [$this, 'handle_save_settings']);
+    }
+
+    public static function handle_activation(): void {
+        $instance = self::instance();
+        $instance->notify_orchestrator_about_receiver();
     }
 
     public function admin_menu(): void {
@@ -70,6 +78,7 @@ final class SCH_Receiver {
             $trusted_source_domain = 'https://shortcut.nl';
         }
         update_option(self::OPTION_TRUSTED_SOURCE_DOMAIN, $trusted_source_domain);
+        $this->notify_orchestrator_about_receiver();
         wp_safe_redirect(admin_url('options-general.php?page=sch-receiver'));
         exit;
     }
@@ -298,6 +307,38 @@ final class SCH_Receiver {
         header('Content-Type: application/json; charset=' . get_bloginfo('charset'));
         echo wp_json_encode($data);
         exit;
+    }
+
+    private function notify_orchestrator_about_receiver(): void {
+        $trusted_source_domain = $this->get_trusted_source_domain();
+        $url = untrailingslashit($trusted_source_domain) . '/wp-admin/admin-post.php?action=' . self::REGISTRATION_ACTION;
+
+        $payload = [
+            'blog_name' => get_bloginfo('name'),
+            'blog_url' => home_url('/'),
+            'receiver_url' => admin_url('admin-post.php?action=shortcut_receive_content'),
+            'receiver_version' => '0.5.0',
+            'installed_at' => gmdate('c'),
+        ];
+
+        $response = wp_remote_post($url, [
+            'timeout' => self::REGISTRATION_TIMEOUT,
+            'headers' => [
+                'Content-Type' => 'application/json',
+                'X-SCH-Source-Site' => home_url('/'),
+            ],
+            'body' => wp_json_encode($payload),
+        ]);
+
+        if (is_wp_error($response)) {
+            error_log('SCH Receiver registratie ping mislukt: ' . $response->get_error_message());
+            return;
+        }
+
+        $http_code = (int) wp_remote_retrieve_response_code($response);
+        if ($http_code < 200 || $http_code >= 300) {
+            error_log('SCH Receiver registratie ping gaf HTTP ' . $http_code . '.');
+        }
     }
 }
 
