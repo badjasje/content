@@ -2,7 +2,7 @@
 /*
 Plugin Name: Shortcut Content Hub Orchestrator
 Description: Centrale content orchestrator voor klanten, keyword discovery, jobs en distributie naar externe WordPress blogs via een receiver plugin. Inclusief AI schrijf- en redactieflow, website research, Unsplash featured images en bulk blog import.
-Version: 0.5.4
+Version: 0.5.5
 Author: OpenAI
 */
 
@@ -11,11 +11,12 @@ if (!defined('ABSPATH')) {
 }
 
 final class SCH_Orchestrator {
-    const VERSION = '0.5.4';
+    const VERSION = '0.5.5';
     const CRON_HOOK = 'sch_orchestrator_minute_worker';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
-    const DB_VERSION = '0.5.5';
+    const DB_VERSION = '0.5.6';
+    const EXACT_MATCH_THRESHOLD_PERCENT = 30;
 
     const OPTION_OPENAI_API_KEY = 'sch_openai_api_key';
     const OPTION_OPENAI_MODEL = 'sch_openai_model';
@@ -187,6 +188,7 @@ final class SCH_Orchestrator {
         $keywords = $this->table('keywords');
         $jobs     = $this->table('jobs');
         $articles = $this->table('articles');
+        $anchor_history = $this->table('anchor_history');
         $logs     = $this->table('logs');
 
         dbDelta("CREATE TABLE {$clients} (
@@ -286,6 +288,23 @@ final class SCH_Orchestrator {
             PRIMARY KEY (id),
             KEY keyword_id (keyword_id),
             KEY site_id (site_id)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$anchor_history} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            keyword_id BIGINT UNSIGNED NULL,
+            job_id BIGINT UNSIGNED NULL,
+            article_id BIGINT UNSIGNED NULL,
+            target_url VARCHAR(255) NOT NULL,
+            anchor_text VARCHAR(255) NOT NULL,
+            anchor_type VARCHAR(20) NOT NULL DEFAULT 'generic',
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY client_id (client_id),
+            KEY target_url (target_url(191)),
+            KEY anchor_type (anchor_type),
+            KEY created_at (created_at)
         ) {$charset};");
 
         dbDelta("CREATE TABLE {$logs} (
@@ -1001,6 +1020,99 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
 
         return $backlinks;
+    }
+
+    private function normalize_anchor_text(string $text): string {
+        $text = function_exists('mb_strtolower') ? mb_strtolower($text) : strtolower($text);
+        $text = preg_replace('/\s+/u', ' ', $text);
+        return trim((string) $text);
+    }
+
+    private function classify_anchor_type(string $anchor, string $main_keyword, object $client): string {
+        $anchor_normalized = $this->normalize_anchor_text(wp_strip_all_tags($anchor));
+        $keyword_normalized = $this->normalize_anchor_text($main_keyword);
+
+        if ($anchor_normalized === '' || in_array($anchor_normalized, ['klik hier', 'lees meer', 'meer info'], true)) {
+            return 'generic';
+        }
+
+        if ($keyword_normalized !== '' && $anchor_normalized === $keyword_normalized) {
+            return 'exact';
+        }
+
+        $client_name = $this->normalize_anchor_text((string) ($client->name ?? ''));
+        $website_host = $this->normalize_anchor_text((string) wp_parse_url((string) ($client->website_url ?? ''), PHP_URL_HOST));
+        $website_host = str_replace('www.', '', $website_host);
+
+        if (($client_name !== '' && strpos($anchor_normalized, $client_name) !== false) || ($website_host !== '' && strpos($anchor_normalized, $website_host) !== false)) {
+            return 'branded';
+        }
+
+        if ($keyword_normalized !== '' && strpos($anchor_normalized, $keyword_normalized) !== false) {
+            return 'partial';
+        }
+
+        return 'generic';
+    }
+
+    private function store_anchor_history_rows(object $job, object $keyword, object $client, int $article_id, array $backlinks): void {
+        if (!$backlinks) {
+            return;
+        }
+
+        foreach ($backlinks as $backlink) {
+            $target_url = esc_url_raw((string) ($backlink['url'] ?? ''));
+            $anchor_text = sanitize_text_field((string) ($backlink['anchor'] ?? ''));
+            if ($target_url === '') {
+                continue;
+            }
+
+            $anchor_type = $this->classify_anchor_type($anchor_text, (string) $keyword->main_keyword, $client);
+            $this->db->insert($this->table('anchor_history'), [
+                'client_id' => (int) $client->id,
+                'keyword_id' => (int) $keyword->id,
+                'job_id' => (int) $job->id,
+                'article_id' => $article_id,
+                'target_url' => $target_url,
+                'anchor_text' => $anchor_text,
+                'anchor_type' => $anchor_type,
+                'created_at' => $this->now(),
+            ]);
+        }
+    }
+
+    private function get_anchor_history_stats(int $client_id, string $target_url): array {
+        $rows = $this->db->get_results($this->db->prepare(
+            "SELECT anchor_type, COUNT(*) AS total
+             FROM {$this->table('anchor_history')}
+             WHERE client_id=%d AND target_url=%s
+             GROUP BY anchor_type",
+            $client_id,
+            $target_url
+        ));
+
+        $stats = [
+            'total' => 0,
+            'exact' => 0,
+            'partial' => 0,
+            'branded' => 0,
+            'generic' => 0,
+        ];
+
+        foreach ((array) $rows as $row) {
+            $type = sanitize_key((string) ($row->anchor_type ?? ''));
+            $count = (int) ($row->total ?? 0);
+            if ($count < 1) {
+                continue;
+            }
+            $stats['total'] += $count;
+            if (isset($stats[$type])) {
+                $stats[$type] += $count;
+            }
+        }
+
+        $stats['exact_ratio_percent'] = $stats['total'] > 0 ? round(($stats['exact'] / $stats['total']) * 100, 1) : 0.0;
+        return $stats;
     }
 
     private function sanitize_link_targets_from_post(): string {
@@ -1966,6 +2078,21 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'job_id' => (int) $job->id,
             ]);
         } catch (Throwable $e) {
+            if (strpos($e->getMessage(), 'ANCHOR_BLOCK:') === 0) {
+                $this->db->update($this->table('jobs'), [
+                    'status'      => 'blocked',
+                    'result'      => wp_json_encode(['error' => $e->getMessage()]),
+                    'finished_at' => $this->now(),
+                    'updated_at'  => $this->now(),
+                ], ['id' => (int) $job->id]);
+
+                $this->log('warning', 'worker', 'Job geblokkeerd door anchor policy', [
+                    'job_id' => (int) $job->id,
+                    'error'  => $e->getMessage(),
+                ]);
+                return;
+            }
+
             $this->db->update($this->table('jobs'), [
                 'status'      => 'failed',
                 'result'      => wp_json_encode(['error' => $e->getMessage()]),
@@ -2145,7 +2272,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         if (!$link_targets) {
             $link_targets[] = ['url' => $client->website_url, 'anchor' => $client->default_anchor ?: $keyword->main_keyword];
         }
-        $primary_target = $this->pick_primary_link_target($link_targets, (string) $keyword->main_keyword);
+        $anchor_plan = $this->build_anchor_plan($keyword, $client, $link_targets);
+        $primary_target = $this->pick_primary_link_target($link_targets, (string) $keyword->main_keyword, $client, (bool) ($anchor_plan['force_non_exact'] ?? false));
 
         $research_bundle = [];
         try {
@@ -2157,11 +2285,15 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             ]);
         }
 
+        if ((bool) ($anchor_plan['threshold_exceeded'] ?? false) && (bool) ($anchor_plan['force_non_exact'] ?? false) && $this->classify_anchor_type((string) ($primary_target['anchor'] ?? ''), (string) $keyword->main_keyword, $client) === 'exact') {
+            throw new RuntimeException('ANCHOR_BLOCK: Exact-match drempel overschreden en geen alternatief anchor type beschikbaar.');
+        }
+
         try {
-            $plan = $this->agent_plan($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $research_bundle);
-            $draft = $this->agent_write($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $plan, $research_bundle);
-            $edited = $this->agent_edit($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $plan, $draft, $research_bundle);
-            $reviewed = $this->agent_review($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $plan, $edited, $research_bundle);
+            $plan = $this->agent_plan($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $research_bundle, $anchor_plan);
+            $draft = $this->agent_write($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $plan, $research_bundle, $anchor_plan);
+            $edited = $this->agent_edit($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $plan, $draft, $research_bundle, $anchor_plan);
+            $reviewed = $this->agent_review($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $plan, $edited, $research_bundle, $anchor_plan);
             return $reviewed;
         } catch (Throwable $e) {
             if ($this->is_openai_quota_error($e)) {
@@ -2184,7 +2316,53 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
     }
 
-    private function pick_primary_link_target(array $targets, string $main_keyword): array {
+    private function build_anchor_plan(object $keyword, object $client, array $link_targets): array {
+        $default_mix = ['branded' => 45, 'partial' => 35, 'generic' => 20];
+        $first_target = $link_targets[0] ?? ['url' => '', 'anchor' => ''];
+        $target_url = esc_url_raw((string) ($first_target['url'] ?? ''));
+        $history = $this->get_anchor_history_stats((int) $client->id, $target_url);
+        $threshold = self::EXACT_MATCH_THRESHOLD_PERCENT;
+        $threshold_exceeded = ((float) ($history['exact_ratio_percent'] ?? 0)) >= $threshold;
+
+        $has_non_exact_candidate = false;
+        foreach ($link_targets as $candidate) {
+            $candidate_type = $this->classify_anchor_type((string) ($candidate['anchor'] ?? ''), (string) $keyword->main_keyword, $client);
+            if ($candidate_type !== 'exact') {
+                $has_non_exact_candidate = true;
+                break;
+            }
+        }
+
+        if ($threshold_exceeded && $has_non_exact_candidate) {
+            $this->log('warning', 'anchor_plan', 'Job wordt herpland naar non-exact anchor door overschreden exact-match ratio.', [
+                'client_id' => (int) $client->id,
+                'keyword_id' => (int) $keyword->id,
+                'target_url' => $target_url,
+                'exact_ratio_percent' => (float) ($history['exact_ratio_percent'] ?? 0),
+                'exact_match_threshold_percent' => $threshold,
+            ]);
+        }
+
+        return [
+            'percentages' => $default_mix,
+            'exact_match_threshold_percent' => $threshold,
+            'history' => $history,
+            'threshold_exceeded' => $threshold_exceeded,
+            'force_non_exact' => $threshold_exceeded,
+            'target_url' => $target_url,
+        ];
+    }
+
+    private function pick_primary_link_target(array $targets, string $main_keyword, object $client, bool $force_non_exact = false): array {
+        if ($force_non_exact) {
+            foreach ($targets as $target) {
+                $type = $this->classify_anchor_type((string) ($target['anchor'] ?? ''), $main_keyword, $client);
+                if ($type !== 'exact') {
+                    return $target;
+                }
+            }
+        }
+
         foreach ($targets as $target) {
             if (stripos((string) ($target['anchor'] ?? ''), $main_keyword) !== false) {
                 return $target;
@@ -2442,7 +2620,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         array $primary_target,
         array $secondary_keywords,
         array $link_targets,
-        array $research_bundle
+        array $research_bundle,
+        array $anchor_plan
     ): array {
         return [
             'main_keyword'       => (string) $keyword->main_keyword,
@@ -2456,6 +2635,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'primary_target'     => $primary_target,
             'available_targets'  => $link_targets,
             'research_bundle'    => $research_bundle,
+            'anchor_plan'        => $anchor_plan,
         ];
     }
 
@@ -2466,7 +2646,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         array $primary_target,
         array $secondary_keywords,
         array $link_targets,
-        array $research_bundle
+        array $research_bundle,
+        array $anchor_plan
     ): array {
         return $this->openai_json_call(
             'planner',
@@ -2474,19 +2655,29 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'role' => 'Senior content strategist voor Nederlandse SEO-content.',
                 'goal' => 'Maak een diep contentplan voor een artikel op basis van keyword, doelgroep, zoekintentie en opgehaalde websitecontent. Geef alleen JSON terug.',
             ],
-            $this->generate_article_system_payload($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $research_bundle),
+            $this->generate_article_system_payload($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $research_bundle, $anchor_plan),
             [
                 'type' => 'object',
                 'additionalProperties' => false,
                 'properties' => [
                     'angle' => ['type' => 'string'],
                     'search_intent' => ['type' => 'string'],
+                    'anchor_plan' => [
+                        'type' => 'object',
+                        'additionalProperties' => false,
+                        'properties' => [
+                            'branded' => ['type' => 'integer'],
+                            'partial' => ['type' => 'integer'],
+                            'generic' => ['type' => 'integer'],
+                        ],
+                        'required' => ['branded', 'partial', 'generic'],
+                    ],
                     'headline_options' => ['type' => 'array', 'items' => ['type' => 'string']],
                     'outline' => ['type' => 'array', 'items' => ['type' => 'string']],
                     'internal_notes' => ['type' => 'array', 'items' => ['type' => 'string']],
                     'content_gaps_found_on_site' => ['type' => 'array', 'items' => ['type' => 'string']],
                 ],
-                'required' => ['angle', 'search_intent', 'headline_options', 'outline', 'internal_notes', 'content_gaps_found_on_site'],
+                'required' => ['angle', 'search_intent', 'anchor_plan', 'headline_options', 'outline', 'internal_notes', 'content_gaps_found_on_site'],
             ]
         );
     }
@@ -2499,7 +2690,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         array $secondary_keywords,
         array $link_targets,
         array $plan,
-        array $research_bundle
+        array $research_bundle,
+        array $anchor_plan
     ): array {
         return $this->openai_json_call(
             'writer',
@@ -2508,7 +2700,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'goal' => 'Schrijf een sterk artikel in HTML, gevoed door research uit de website van de klant. Geef alleen JSON terug.',
             ],
             array_merge(
-                $this->generate_article_system_payload($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $research_bundle),
+                $this->generate_article_system_payload($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $research_bundle, $anchor_plan),
                 [
                     'plan' => $plan,
                     'requirements' => [
@@ -2517,6 +2709,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                         'natural_dutch' => true,
                         'avoid_generic_ai_phrases' => true,
                         'build_on_site_research' => true,
+                        'respect_anchor_plan_percentages' => true,
                         'do_not_output_h1_in_content' => true,
                         'do_not_repeat_post_title_inside_content' => true,
                     ],
@@ -2535,7 +2728,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         array $link_targets,
         array $plan,
         array $draft,
-        array $research_bundle
+        array $research_bundle,
+        array $anchor_plan
     ): array {
         return $this->openai_json_call(
             'editor',
@@ -2550,6 +2744,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'plan' => $plan,
                 'draft' => $draft,
                 'research_bundle' => $research_bundle,
+                'anchor_plan' => $anchor_plan,
             ],
             $this->article_schema()
         );
@@ -2564,7 +2759,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         array $link_targets,
         array $plan,
         array $edited,
-        array $research_bundle
+        array $research_bundle,
+        array $anchor_plan
     ): array {
         $reviewed = $this->openai_json_call(
             'reviewer',
@@ -2582,6 +2778,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'plan'               => $plan,
                 'draft'              => $edited,
                 'research_bundle'    => $research_bundle,
+                'anchor_plan'        => $anchor_plan,
                 'checks'             => [
                     'keyword_in_title' => true,
                     'keyword_in_intro' => true,
@@ -2913,6 +3110,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
 
         $article_id = (int) $this->db->insert_id;
+        $this->store_anchor_history_rows($job, $keyword, $client, $article_id, $backlinks);
         $this->vlog('article', 'Artikel opgeslagen in centrale database', [
             'article_id' => $article_id,
             'job_id' => (int) $job->id,
