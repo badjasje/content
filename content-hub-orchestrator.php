@@ -356,6 +356,7 @@ final class SCH_Orchestrator {
         add_submenu_page('sch-content-hub', 'Blogs', 'Blogs', 'manage_options', 'sch-sites', [$this, 'render_sites']);
         add_submenu_page('sch-content-hub', 'Keywords', 'Keywords', 'manage_options', 'sch-keywords', [$this, 'render_keywords']);
         add_submenu_page('sch-content-hub', 'Jobs', 'Jobs', 'manage_options', 'sch-jobs', [$this, 'render_jobs']);
+        add_submenu_page('sch-content-hub', 'Conflicten', 'Conflicten', 'manage_options', 'sch-conflicts', [$this, 'render_conflicts']);
         add_submenu_page('sch-content-hub', 'Redactie', 'Redactie', 'manage_options', 'sch-editorial', [$this, 'render_editorial']);
         add_submenu_page('sch-content-hub', 'Rapportage', 'Rapportage', 'manage_options', 'sch-reporting', [$this, 'render_reporting']);
         add_submenu_page('sch-content-hub', 'Logs', 'Logs', 'manage_options', 'sch-logs', [$this, 'render_logs']);
@@ -780,6 +781,89 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 <?php endif; ?>
                 </tbody>
             </table>
+        </div>
+        <?php
+    }
+
+    public function render_conflicts(): void {
+        $rows = $this->db->get_results("
+            SELECT
+                j.id,
+                j.client_id,
+                j.keyword_id,
+                j.site_id,
+                j.payload,
+                j.created_at,
+                c.name AS client_name,
+                k.main_keyword,
+                s.name AS site_name
+            FROM {$this->table('jobs')} j
+            LEFT JOIN {$this->table('clients')} c ON c.id = j.client_id
+            LEFT JOIN {$this->table('keywords')} k ON k.id = j.keyword_id
+            LEFT JOIN {$this->table('sites')} s ON s.id = j.site_id
+            WHERE j.status = 'blocked_cannibalization'
+            ORDER BY c.name ASC, j.created_at DESC, j.id DESC
+            LIMIT 500
+        ");
+
+        $grouped = [];
+        foreach ($rows as $row) {
+            $client_name = (string) ($row->client_name ?: 'Onbekende klant');
+            if (!isset($grouped[$client_name])) {
+                $grouped[$client_name] = [];
+            }
+            $grouped[$client_name][] = $row;
+        }
+        ?>
+        <div class="wrap">
+            <h1>Cannibalisatie-conflicten</h1>
+            <?php $this->render_admin_notice(); ?>
+
+            <?php if (!$grouped) : ?>
+                <p>Geen conflicten gevonden.</p>
+            <?php else : ?>
+                <?php foreach ($grouped as $client_name => $client_rows) : ?>
+                    <h2><?php echo esc_html($client_name); ?> (<?php echo (int) count($client_rows); ?>)</h2>
+                    <table class="widefat striped" style="margin-bottom:24px;">
+                        <thead>
+                        <tr><th>Job ID</th><th>Nieuw keyword</th><th>Blog</th><th>Conflict met</th><th>Suggestie</th><th>Aangemaakt</th></tr>
+                        </thead>
+                        <tbody>
+                        <?php foreach ($client_rows as $row) : ?>
+                            <?php
+                            $payload = json_decode((string) $row->payload, true);
+                            $payload = is_array($payload) ? $payload : [];
+                            $conflicts = isset($payload['conflicts']) && is_array($payload['conflicts']) ? $payload['conflicts'] : [];
+                            $suggestion = sanitize_text_field((string) ($payload['suggestion'] ?? 'Consolideer met bestaand artikel of voeg interne link toe.'));
+                            $conflict_labels = [];
+                            foreach ($conflicts as $conflict) {
+                                $existing_keyword = sanitize_text_field((string) ($conflict['existing_keyword'] ?? ''));
+                                $article_title = sanitize_text_field((string) ($conflict['article_title'] ?? ''));
+                                $matched_terms = isset($conflict['matched_terms']) && is_array($conflict['matched_terms']) ? array_map('sanitize_text_field', $conflict['matched_terms']) : [];
+                                $parts = array_filter([$existing_keyword, $article_title], static fn ($value): bool => $value !== '');
+                                $line = implode(' / ', $parts);
+                                if ($line === '') {
+                                    $line = 'Bestaand artikel';
+                                }
+                                if ($matched_terms) {
+                                    $line .= ' (match: ' . implode(', ', $matched_terms) . ')';
+                                }
+                                $conflict_labels[] = $line;
+                            }
+                            ?>
+                            <tr>
+                                <td><?php echo (int) $row->id; ?></td>
+                                <td><?php echo esc_html((string) ($row->main_keyword ?: '')); ?></td>
+                                <td><?php echo esc_html((string) ($row->site_name ?: '')); ?></td>
+                                <td><?php echo esc_html($conflict_labels ? implode(' | ', $conflict_labels) : 'Onbekend conflict'); ?></td>
+                                <td><?php echo esc_html($suggestion); ?></td>
+                                <td><?php echo esc_html((string) $row->created_at); ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                <?php endforeach; ?>
+            <?php endif; ?>
         </div>
         <?php
     }
@@ -2141,6 +2225,70 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             return 0;
         }
 
+        $conflicts = $this->find_cannibalization_conflicts($keyword);
+        if (!empty($conflicts)) {
+            $suggestion = 'Consolideer dit onderwerp met bestaand artikel en voeg waar nodig een interne link toe in plaats van een nieuw artikel.';
+            $blocked_count = 0;
+
+            foreach ($site_ids as $site_id) {
+                $site_exists = (int) $this->db->get_var($this->db->prepare(
+                    "SELECT COUNT(*) FROM {$this->table('sites')} WHERE id=%d AND is_active=1",
+                    $site_id
+                ));
+
+                if ($site_exists < 1) {
+                    continue;
+                }
+
+                if (!empty($target_site_categories)) {
+                    $site_category = (string) $this->db->get_var($this->db->prepare(
+                        "SELECT default_category FROM {$this->table('sites')} WHERE id=%d LIMIT 1",
+                        $site_id
+                    ));
+                    $site_category = $this->sanitize_blog_category($site_category);
+
+                    if (!in_array($site_category, $target_site_categories, true)) {
+                        continue;
+                    }
+                }
+
+                $inserted = $this->db->insert($this->table('jobs'), [
+                    'keyword_id' => (int) $keyword->id,
+                    'client_id'  => (int) $keyword->client_id,
+                    'site_id'    => (int) $site_id,
+                    'job_type'   => 'write_publish',
+                    'status'     => 'blocked_cannibalization',
+                    'attempts'   => 0,
+                    'payload'    => wp_json_encode([
+                        'reason' => 'cannibalization_detected',
+                        'conflicts' => $conflicts,
+                        'suggestion' => $suggestion,
+                    ]),
+                    'result'     => wp_json_encode([
+                        'blocked' => true,
+                        'reason' => 'cannibalization_detected',
+                    ]),
+                    'finished_at' => $this->now(),
+                    'created_at' => $this->now(),
+                    'updated_at' => $this->now(),
+                ]);
+
+                if ($inserted) {
+                    $blocked_count++;
+                }
+            }
+
+            $this->log('warning', 'jobs', 'Job-aanmaak geblokkeerd wegens keyword cannibalisatie', [
+                'keyword_id' => $keyword_id,
+                'client_id' => (int) $keyword->client_id,
+                'blocked_jobs' => $blocked_count,
+                'conflicts' => $conflicts,
+                'suggestion' => $suggestion,
+            ]);
+
+            return $blocked_count;
+        }
+
         foreach ($site_ids as $site_id) {
             if ($created >= (int) $monthly_budget['remaining']) {
                 break;
@@ -2214,6 +2362,87 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         ]);
 
         return $created;
+    }
+
+    private function find_cannibalization_conflicts(object $keyword): array {
+        $candidate_terms = $this->keyword_terms_from_values(
+            (string) $keyword->main_keyword,
+            $this->decode_json_array($keyword->secondary_keywords)
+        );
+        if (empty($candidate_terms)) {
+            return [];
+        }
+
+        $rows = $this->db->get_results($this->db->prepare(
+            "SELECT
+                a.id AS article_id,
+                a.title AS article_title,
+                a.remote_url,
+                a.created_at,
+                k.main_keyword AS existing_main_keyword,
+                k.secondary_keywords AS existing_secondary_keywords
+            FROM {$this->table('articles')} a
+            INNER JOIN {$this->table('keywords')} k ON k.id = a.keyword_id
+            WHERE a.client_id = %d
+              AND a.keyword_id <> %d
+            ORDER BY a.created_at DESC",
+            (int) $keyword->client_id,
+            (int) $keyword->id
+        ));
+
+        if (!$rows) {
+            return [];
+        }
+
+        $conflicts = [];
+        foreach ($rows as $row) {
+            $existing_terms = $this->keyword_terms_from_values(
+                (string) $row->existing_main_keyword,
+                $this->decode_json_array($row->existing_secondary_keywords)
+            );
+            if (empty($existing_terms)) {
+                continue;
+            }
+
+            $matched = array_values(array_intersect($candidate_terms, $existing_terms));
+            if (empty($matched)) {
+                continue;
+            }
+
+            $conflicts[] = [
+                'article_id' => (int) $row->article_id,
+                'article_title' => sanitize_text_field((string) $row->article_title),
+                'article_url' => esc_url_raw((string) $row->remote_url),
+                'article_created_at' => (string) $row->created_at,
+                'existing_keyword' => sanitize_text_field((string) $row->existing_main_keyword),
+                'matched_terms' => array_values(array_map('sanitize_text_field', $matched)),
+            ];
+        }
+
+        return $conflicts;
+    }
+
+    private function keyword_terms_from_values(string $main_keyword, array $secondary_keywords): array {
+        $terms = [];
+        $main = $this->normalize_keyword_term($main_keyword);
+        if ($main !== '') {
+            $terms[] = $main;
+        }
+
+        foreach ($secondary_keywords as $term) {
+            $normalized = $this->normalize_keyword_term((string) $term);
+            if ($normalized !== '') {
+                $terms[] = $normalized;
+            }
+        }
+
+        return array_values(array_unique($terms));
+    }
+
+    private function normalize_keyword_term(string $term): string {
+        $term = strtolower(sanitize_text_field($term));
+        $term = preg_replace('/\s+/', ' ', trim($term));
+        return is_string($term) ? $term : '';
     }
 
     private function log(string $level, string $context, string $message, $payload = null): void {
