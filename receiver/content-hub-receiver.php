@@ -1,8 +1,8 @@
 <?php
 /*
 Plugin Name: Shortcut Content Hub Receiver
-Description: Ontvangt gesigneerde content van de Shortcut Content Hub Orchestrator via admin-post en maakt of update WordPress posts, SEO-meta en featured images.
-Version: 0.4.0
+Description: Ontvangt content van de Shortcut Content Hub Orchestrator via admin-post en maakt of update WordPress posts, SEO-meta en featured images.
+Version: 0.5.0
 Author: OpenAI
 */
 
@@ -16,7 +16,7 @@ if (!defined('ABSPATH')) {
 }
 
 final class SCH_Receiver {
-    const OPTION_SECRET = 'sch_receiver_secret';
+    const OPTION_TRUSTED_SOURCE_DOMAIN = 'sch_receiver_trusted_source_domain';
 
     private static ?SCH_Receiver $instance = null;
 
@@ -47,12 +47,14 @@ final class SCH_Receiver {
                 <input type="hidden" name="action" value="sch_receiver_save_settings">
                 <table class="form-table">
                     <tr>
-                        <th>Shared secret</th>
-                        <td><input type="text" name="receiver_secret" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_SECRET, '')); ?>"></td>
+                        <th>Trusted source domein</th>
+                        <td>
+                            <input type="url" name="trusted_source_domain" class="regular-text" value="<?php echo esc_attr($this->get_trusted_source_domain()); ?>" placeholder="https://shortcut.nl">
+                            <p class="description">Alle requests met source domein <code>shortcut.nl</code> worden geaccepteerd. Geen tokens of shared secrets nodig.</p>
+                        </td>
                     </tr>
                 </table>
                 <p><button class="button button-primary">Opslaan</button></p>
-                <p>Zorg dat deze exact gelijk is aan de receiver secret in de centrale orchestrator.</p>
             </form>
         </div>
         <?php
@@ -63,26 +65,23 @@ final class SCH_Receiver {
             wp_die('Geen toegang.');
         }
         check_admin_referer('sch_receiver_save_settings');
-        update_option(self::OPTION_SECRET, sanitize_text_field((string) ($_POST['receiver_secret'] ?? '')));
+        $trusted_source_domain = $this->normalize_site_url((string) ($_POST['trusted_source_domain'] ?? 'https://shortcut.nl'));
+        if ($trusted_source_domain === '') {
+            $trusted_source_domain = 'https://shortcut.nl';
+        }
+        update_option(self::OPTION_TRUSTED_SOURCE_DOMAIN, $trusted_source_domain);
         wp_safe_redirect(admin_url('options-general.php?page=sch-receiver'));
         exit;
     }
 
     public function handle_receive(): void {
-        $secret = trim((string) get_option(self::OPTION_SECRET, ''));
-        if ($secret === '') {
-            $this->json_response(['success' => false, 'message' => 'Receiver secret ontbreekt.'], 500);
+        if (!$this->is_trusted_request()) {
+            $this->json_response(['success' => false, 'message' => 'Request is niet afkomstig van trusted source domein.'], 403);
         }
 
         $raw = file_get_contents('php://input');
         if (!is_string($raw) || trim($raw) === '') {
             $this->json_response(['success' => false, 'message' => 'Lege payload.'], 400);
-        }
-
-        $signature = isset($_SERVER['HTTP_X_SCH_SIGNATURE']) ? (string) $_SERVER['HTTP_X_SCH_SIGNATURE'] : '';
-        $expected = hash_hmac('sha256', $raw, $secret);
-        if ($signature === '' || !hash_equals($expected, $signature)) {
-            $this->json_response(['success' => false, 'message' => 'Ongeldige signature.'], 403);
         }
 
         $payload = json_decode($raw, true);
@@ -234,6 +233,64 @@ final class SCH_Receiver {
         update_post_meta($attachment_id, '_sch_source_url', esc_url_raw((string) ($image['source_url'] ?? '')));
 
         return (int) $attachment_id;
+    }
+
+    private function get_trusted_source_domain(): string {
+        $saved = $this->normalize_site_url((string) get_option(self::OPTION_TRUSTED_SOURCE_DOMAIN, 'https://shortcut.nl'));
+        if ($saved === '') {
+            return 'https://shortcut.nl';
+        }
+        return $saved;
+    }
+
+    private function normalize_site_url(string $url): string {
+        $url = trim($url);
+        if ($url === '') {
+            return '';
+        }
+        if (!preg_match('#^https?://#i', $url)) {
+            $url = 'https://' . $url;
+        }
+        $normalized = esc_url_raw($url);
+        if ($normalized === '') {
+            return '';
+        }
+        return untrailingslashit($normalized);
+    }
+
+    private function normalize_host(string $url): string {
+        $host = wp_parse_url($url, PHP_URL_HOST);
+        return strtolower((string) $host);
+    }
+
+    private function is_trusted_request(): bool {
+        $trusted_host = $this->normalize_host($this->get_trusted_source_domain());
+        if ($trusted_host === '') {
+            return false;
+        }
+
+        $candidates = [];
+        $source_header = isset($_SERVER['HTTP_X_SCH_SOURCE_SITE']) ? (string) $_SERVER['HTTP_X_SCH_SOURCE_SITE'] : '';
+        $origin_header = isset($_SERVER['HTTP_ORIGIN']) ? (string) $_SERVER['HTTP_ORIGIN'] : '';
+        $referer_header = isset($_SERVER['HTTP_REFERER']) ? (string) $_SERVER['HTTP_REFERER'] : '';
+
+        if ($source_header !== '') {
+            $candidates[] = $source_header;
+        }
+        if ($origin_header !== '') {
+            $candidates[] = $origin_header;
+        }
+        if ($referer_header !== '') {
+            $candidates[] = $referer_header;
+        }
+
+        foreach ($candidates as $candidate) {
+            if ($this->normalize_host($candidate) === $trusted_host) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function json_response(array $data, int $status_code): void {
