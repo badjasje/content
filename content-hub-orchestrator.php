@@ -2,7 +2,7 @@
 /*
 Plugin Name: Shortcut Content Hub Orchestrator
 Description: Centrale content orchestrator voor klanten, keyword discovery, jobs en distributie naar externe WordPress blogs via een receiver plugin. Inclusief AI schrijf- en redactieflow, website research, Unsplash featured images en bulk blog import.
-Version: 0.5.2
+Version: 0.5.3
 Author: OpenAI
 */
 
@@ -11,11 +11,11 @@ if (!defined('ABSPATH')) {
 }
 
 final class SCH_Orchestrator {
-    const VERSION = '0.5.2';
+    const VERSION = '0.5.3';
     const CRON_HOOK = 'sch_orchestrator_minute_worker';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
-    const DB_VERSION = '0.5.2';
+    const DB_VERSION = '0.5.3';
 
     const OPTION_OPENAI_API_KEY = 'sch_openai_api_key';
     const OPTION_OPENAI_MODEL = 'sch_openai_model';
@@ -196,6 +196,7 @@ final class SCH_Orchestrator {
             default_anchor VARCHAR(191) NOT NULL DEFAULT '',
             link_targets LONGTEXT NULL,
             research_urls LONGTEXT NULL,
+            max_posts_per_month INT UNSIGNED NOT NULL DEFAULT 0,
             is_active TINYINT(1) NOT NULL DEFAULT 1,
             created_at DATETIME NOT NULL,
             updated_at DATETIME NOT NULL,
@@ -299,6 +300,7 @@ final class SCH_Orchestrator {
         ) {$charset};");
 
         $this->maybe_add_column($clients, 'research_urls', "ALTER TABLE {$clients} ADD COLUMN research_urls LONGTEXT NULL AFTER link_targets");
+        $this->maybe_add_column($clients, 'max_posts_per_month', "ALTER TABLE {$clients} ADD COLUMN max_posts_per_month INT UNSIGNED NOT NULL DEFAULT 0 AFTER research_urls");
         $this->maybe_add_column($keywords, 'source', "ALTER TABLE {$keywords} ADD COLUMN source VARCHAR(50) NOT NULL DEFAULT 'manual' AFTER status");
         $this->maybe_add_column($keywords, 'source_context', "ALTER TABLE {$keywords} ADD COLUMN source_context LONGTEXT NULL AFTER source");
         $this->maybe_add_column($jobs, 'attempts', "ALTER TABLE {$jobs} ADD COLUMN attempts INT UNSIGNED NOT NULL DEFAULT 0 AFTER status");
@@ -391,6 +393,13 @@ final class SCH_Orchestrator {
                     <tr><th>Naam</th><td><input type="text" name="name" class="regular-text" required value="<?php echo esc_attr($edit->name ?? ''); ?>"></td></tr>
                     <tr><th>Website URL</th><td><input type="url" name="website_url" class="regular-text" value="<?php echo esc_attr($edit->website_url ?? ''); ?>"></td></tr>
                     <tr><th>Default anchor</th><td><input type="text" name="default_anchor" class="regular-text" value="<?php echo esc_attr($edit->default_anchor ?? ''); ?>"></td></tr>
+                    <tr>
+                        <th>Max blogs per maand</th>
+                        <td>
+                            <input type="number" name="max_posts_per_month" value="<?php echo esc_attr((string) ($edit->max_posts_per_month ?? 0)); ?>" min="0">
+                            <p class="description">0 = onbeperkt. Bij een waarde &gt; 0 worden jobs verdeeld over de maand op basis van dag/maand-ratio.</p>
+                        </td>
+                    </tr>
 
                     <tr>
                         <th>Link targets</th>
@@ -447,7 +456,7 @@ final class SCH_Orchestrator {
 
             <h2 style="margin-top:30px;">Bestaande klanten</h2>
             <table class="widefat striped">
-                <thead><tr><th>ID</th><th>Naam</th><th>Website</th><th>Research URLs</th><th>Links</th><th>Acties</th></tr></thead>
+                <thead><tr><th>ID</th><th>Naam</th><th>Website</th><th>Max/maand</th><th>Research URLs</th><th>Links</th><th>Acties</th></tr></thead>
                 <tbody>
                 <?php if ($rows) : foreach ($rows as $row) : ?>
                     <?php $client_research = $this->get_client_research_urls($row); ?>
@@ -455,6 +464,7 @@ final class SCH_Orchestrator {
                         <td><?php echo (int) $row->id; ?></td>
                         <td><?php echo esc_html($row->name); ?></td>
                         <td><?php echo esc_html($row->website_url); ?></td>
+                        <td><?php echo (int) ($row->max_posts_per_month ?? 0); ?></td>
                         <td><?php echo esc_html(implode(' | ', array_map(static function ($v) { return (string) ($v['url'] ?? ''); }, $client_research))); ?></td>
                         <td><?php echo esc_html($this->implode_target_strings($this->get_client_link_targets($row))); ?></td>
                         <td class="sch-actions">
@@ -851,6 +861,53 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         return wp_json_encode($items);
     }
 
+    private function get_client_month_window(): array {
+        $now = current_datetime();
+        $month_start = (clone $now)->modify('first day of this month')->setTime(0, 0, 0);
+        $month_end = (clone $month_start)->modify('first day of next month');
+        $days_in_month = (int) $month_start->format('t');
+        $day_in_month = (int) $now->format('j');
+
+        return [
+            'month_start' => $month_start->format('Y-m-d H:i:s'),
+            'month_end' => $month_end->format('Y-m-d H:i:s'),
+            'days_in_month' => max(1, $days_in_month),
+            'day_in_month' => max(1, $day_in_month),
+        ];
+    }
+
+    private function get_client_monthly_creation_budget(int $client_id, int $max_posts_per_month): array {
+        if ($max_posts_per_month <= 0) {
+            return [
+                'allowed_now' => PHP_INT_MAX,
+                'already_created' => 0,
+                'remaining' => PHP_INT_MAX,
+                'reason' => 'unlimited',
+            ];
+        }
+
+        $window = $this->get_client_month_window();
+        $allowed_by_today = (int) ceil(($window['day_in_month'] / $window['days_in_month']) * $max_posts_per_month);
+        $allowed_by_today = min($max_posts_per_month, max(0, $allowed_by_today));
+
+        $already_created = (int) $this->db->get_var($this->db->prepare(
+            "SELECT COUNT(*) FROM {$this->table('jobs')} WHERE client_id=%d AND created_at >= %s AND created_at < %s",
+            $client_id,
+            $window['month_start'],
+            $window['month_end']
+        ));
+
+        $remaining = max(0, $allowed_by_today - $already_created);
+
+        return [
+            'allowed_now' => $allowed_by_today,
+            'already_created' => $already_created,
+            'remaining' => $remaining,
+            'reason' => $remaining > 0 ? 'quota_available' : 'quota_blocked_for_today',
+            'window' => $window,
+        ];
+    }
+
     private function sanitize_secondary_keywords_from_post(): string {
         $items = [];
         foreach ((array) ($_POST['secondary_keywords'] ?? []) as $keyword) {
@@ -1091,6 +1148,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'default_anchor' => sanitize_text_field($_POST['default_anchor'] ?? ''),
             'link_targets'   => $this->sanitize_link_targets_from_post(),
             'research_urls'  => $this->sanitize_research_urls_from_post(),
+            'max_posts_per_month' => max(0, (int) ($_POST['max_posts_per_month'] ?? 0)),
             'is_active'      => 1,
             'updated_at'     => $this->now(),
         ];
@@ -1595,8 +1653,27 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
 
         $created = 0;
+        $client_max_posts_per_month = (int) $this->db->get_var($this->db->prepare(
+            "SELECT max_posts_per_month FROM {$this->table('clients')} WHERE id=%d",
+            (int) $keyword->client_id
+        ));
+        $monthly_budget = $this->get_client_monthly_creation_budget((int) $keyword->client_id, $client_max_posts_per_month);
+
+        if ($monthly_budget['remaining'] <= 0) {
+            $this->log('info', 'jobs', 'Geen jobs aangemaakt: maandlimiet bereikt voor huidige dagverdeling', [
+                'keyword_id' => $keyword_id,
+                'client_id' => (int) $keyword->client_id,
+                'max_posts_per_month' => $client_max_posts_per_month,
+                'budget' => $monthly_budget,
+            ]);
+            return 0;
+        }
 
         foreach ($site_ids as $site_id) {
+            if ($created >= (int) $monthly_budget['remaining']) {
+                break;
+            }
+
             $site_exists = (int) $this->db->get_var($this->db->prepare(
                 "SELECT COUNT(*) FROM {$this->table('sites')} WHERE id=%d AND is_active=1",
                 $site_id
@@ -1641,6 +1718,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'keyword_id' => $keyword_id,
             'requested_site_ids' => $site_ids,
             'created_jobs' => $created,
+            'client_max_posts_per_month' => $client_max_posts_per_month,
+            'monthly_budget' => $monthly_budget,
         ]);
 
         return $created;
