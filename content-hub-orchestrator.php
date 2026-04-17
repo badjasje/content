@@ -3106,6 +3106,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         array $research_bundle,
         array $anchor_plan
     ): array {
+        $previous_variants = $this->get_recent_article_variants((int) $client->id, (int) $site->id, (string) $keyword->main_keyword);
+
         return [
             'main_keyword'       => (string) $keyword->main_keyword,
             'secondary_keywords' => $secondary_keywords,
@@ -3119,7 +3121,51 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'available_targets'  => $link_targets,
             'research_bundle'    => $research_bundle,
             'anchor_plan'        => $anchor_plan,
+            'site_profile'       => [
+                'audience_level' => 'Nederlandstalige zakelijke lezers; niveau: geïnformeerde beginner tot medior.',
+                'desired_angle' => 'Praktisch en toepasbaar met voldoende technische diepgang waar relevant.',
+                'forbidden_repetitions' => [
+                    'Gebruik geen titel die semantisch gelijk is aan eerdere varianten.',
+                    'Gebruik geen intro met vrijwel dezelfde openingszin als eerdere varianten.',
+                    'Kopieer geen H2-structuur van eerdere varianten.',
+                    'Hergebruik geen identieke CTA-formulering uit eerdere varianten.',
+                ],
+            ],
+            'previous_variants'  => $previous_variants,
         ];
+    }
+
+    private function get_recent_article_variants(int $client_id, int $site_id, string $main_keyword, int $limit = 5): array {
+        $rows = $this->db->get_results($this->db->prepare(
+            "SELECT a.title, a.content
+             FROM {$this->table('articles')} a
+             INNER JOIN {$this->table('keywords')} k ON k.id = a.keyword_id
+             WHERE a.client_id = %d
+               AND a.site_id = %d
+               AND k.main_keyword = %s
+             ORDER BY a.id DESC
+             LIMIT %d",
+            $client_id,
+            $site_id,
+            $main_keyword,
+            max(1, $limit)
+        ));
+
+        if (!is_array($rows) || !$rows) {
+            return [];
+        }
+
+        $variants = [];
+        foreach ($rows as $row) {
+            $content = wp_strip_all_tags((string) ($row->content ?? ''));
+            $intro = trim((string) mb_substr(preg_replace('/\s+/', ' ', $content) ?: '', 0, 240));
+            $variants[] = [
+                'title' => sanitize_text_field((string) ($row->title ?? '')),
+                'intro_excerpt' => $intro,
+            ];
+        }
+
+        return $variants;
     }
 
     private function agent_plan(
@@ -3157,10 +3203,11 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     ],
                     'headline_options' => ['type' => 'array', 'items' => ['type' => 'string']],
                     'outline' => ['type' => 'array', 'items' => ['type' => 'string']],
+                    'differentiation_strategy' => ['type' => 'array', 'items' => ['type' => 'string']],
                     'internal_notes' => ['type' => 'array', 'items' => ['type' => 'string']],
                     'content_gaps_found_on_site' => ['type' => 'array', 'items' => ['type' => 'string']],
                 ],
-                'required' => ['angle', 'search_intent', 'anchor_plan', 'headline_options', 'outline', 'internal_notes', 'content_gaps_found_on_site'],
+                'required' => ['angle', 'search_intent', 'anchor_plan', 'headline_options', 'outline', 'differentiation_strategy', 'internal_notes', 'content_gaps_found_on_site'],
             ]
         );
     }
@@ -3195,6 +3242,9 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                         'respect_anchor_plan_percentages' => true,
                         'do_not_output_h1_in_content' => true,
                         'do_not_repeat_post_title_inside_content' => true,
+                        'use_a_distinct_opening_hook_vs_previous_variants' => true,
+                        'use_a_distinct_h2_structure_vs_previous_variants' => true,
+                        'use_a_distinct_cta_wording_vs_previous_variants' => true,
                     ],
                 ]
             ),
@@ -3271,6 +3321,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     'uses_site_context' => true,
                     'no_h1_in_content' => true,
                     'do_not_repeat_post_title_inside_content' => true,
+                    'title_not_semantically_too_close_to_previous_variants' => true,
+                    'intro_not_semantically_too_close_to_previous_variants' => true,
                 ],
             ],
             $this->article_schema()
