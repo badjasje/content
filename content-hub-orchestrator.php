@@ -2,7 +2,7 @@
 /*
 Plugin Name: Shortcut Content Hub Orchestrator
 Description: Centrale content orchestrator voor klanten, keyword discovery, jobs en distributie naar externe WordPress blogs via een receiver plugin. Inclusief AI schrijf- en redactieflow, website research, Unsplash featured images en bulk blog import.
-Version: 0.5.6
+Version: 0.6.0
 Author: OpenAI
 */
 
@@ -11,12 +11,12 @@ if (!defined('ABSPATH')) {
 }
 
 final class SCH_Orchestrator {
-    const VERSION = '0.5.6';
+    const VERSION = '0.6.0';
     const CRON_HOOK = 'sch_orchestrator_minute_worker';
     const GSC_CRON_HOOK = 'sch_orchestrator_gsc_sync_worker';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
-    const DB_VERSION = '0.6.0';
+    const DB_VERSION = '0.7.0';
     const EXACT_MATCH_THRESHOLD_PERCENT = 30;
 
     const OPTION_OPENAI_API_KEY = 'sch_openai_api_key';
@@ -47,6 +47,14 @@ final class SCH_Orchestrator {
     const OPTION_GSC_DEFAULT_TOP_N_CLICKS = 'sch_gsc_default_top_n_clicks';
     const OPTION_GSC_DEFAULT_MIN_IMPRESSIONS = 'sch_gsc_default_min_impressions';
     const OPTION_GSC_AUTO_SYNC = 'sch_gsc_auto_sync';
+    const OPTION_GA_ENABLED = 'sch_ga_enabled';
+    const OPTION_GA_CLIENT_ID = 'sch_ga_client_id';
+    const OPTION_GA_CLIENT_SECRET = 'sch_ga_client_secret';
+    const OPTION_GA_AUTO_SYNC = 'sch_ga_auto_sync';
+    const OPTION_FEEDBACK_AUTO_SYNC = 'sch_feedback_auto_sync';
+
+    const GA_CRON_HOOK = 'sch_orchestrator_ga_sync_worker';
+    const FEEDBACK_CRON_HOOK = 'sch_orchestrator_feedback_sync_worker';
 
 
     private static ?SCH_Orchestrator $instance = null;
@@ -74,6 +82,8 @@ final class SCH_Orchestrator {
         add_filter('cron_schedules', [$this, 'add_cron_schedule']);
         add_action(self::CRON_HOOK, [$this, 'run_worker']);
         add_action(self::GSC_CRON_HOOK, [$this, 'run_gsc_auto_sync']);
+        add_action(self::GA_CRON_HOOK, [$this, 'run_ga_auto_sync']);
+        add_action(self::FEEDBACK_CRON_HOOK, [$this, 'run_feedback_auto_sync']);
 
         add_action('admin_menu', [$this, 'admin_menu']);
         add_action('admin_post_sch_save_client', [$this, 'handle_save_client']);
@@ -98,22 +108,35 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_gsc_fetch_properties', [$this, 'handle_gsc_fetch_properties']);
         add_action('admin_post_sch_gsc_save_property', [$this, 'handle_gsc_save_property']);
         add_action('admin_post_sch_gsc_sync_keywords', [$this, 'handle_gsc_sync_keywords']);
+        add_action('admin_post_sch_ga_connect', [$this, 'handle_ga_connect']);
+        add_action('admin_post_sch_ga_oauth_callback', [$this, 'handle_ga_oauth_callback']);
+        add_action('admin_post_sch_ga_disconnect', [$this, 'handle_ga_disconnect']);
+        add_action('admin_post_sch_ga_fetch_properties', [$this, 'handle_ga_fetch_properties']);
+        add_action('admin_post_sch_ga_save_property', [$this, 'handle_ga_save_property']);
+        add_action('admin_post_sch_mark_signal_resolved', [$this, 'mark_signal_resolved']);
+        add_action('admin_post_sch_mark_signal_ignored', [$this, 'mark_signal_ignored']);
         add_action('admin_post_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
         add_action('admin_post_nopriv_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
 
         add_action('admin_enqueue_scripts', [$this, 'admin_assets']);
         $this->schedule_gsc_cron();
+        $this->schedule_ga_cron();
+        $this->schedule_feedback_cron();
     }
 
     public function activate(): void {
         $this->create_tables();
         $this->schedule_cron();
         $this->schedule_gsc_cron();
+        $this->schedule_ga_cron();
+        $this->schedule_feedback_cron();
     }
 
     public function deactivate(): void {
         wp_clear_scheduled_hook(self::CRON_HOOK);
         wp_clear_scheduled_hook(self::GSC_CRON_HOOK);
+        wp_clear_scheduled_hook(self::GA_CRON_HOOK);
+        wp_clear_scheduled_hook(self::FEEDBACK_CRON_HOOK);
     }
 
     public function add_cron_schedule(array $schedules): array {
@@ -192,6 +215,18 @@ final class SCH_Orchestrator {
         }
     }
 
+    private function schedule_ga_cron(): void {
+        if (!wp_next_scheduled(self::GA_CRON_HOOK)) {
+            wp_schedule_event(time() + HOUR_IN_SECONDS + 300, 'daily', self::GA_CRON_HOOK);
+        }
+    }
+
+    private function schedule_feedback_cron(): void {
+        if (!wp_next_scheduled(self::FEEDBACK_CRON_HOOK)) {
+            wp_schedule_event(time() + HOUR_IN_SECONDS + 600, 'daily', self::FEEDBACK_CRON_HOOK);
+        }
+    }
+
     private function table(string $name): string {
         return $this->db->prefix . 'sch_' . $name;
     }
@@ -232,6 +267,14 @@ final class SCH_Orchestrator {
         $articles = $this->table('articles');
         $anchor_history = $this->table('anchor_history');
         $logs     = $this->table('logs');
+        $gsc_page_metrics = $this->table('gsc_page_metrics');
+        $gsc_query_metrics = $this->table('gsc_query_metrics');
+        $gsc_query_page_metrics = $this->table('gsc_query_page_metrics');
+        $ga_page_metrics = $this->table('ga_page_metrics');
+        $page_overlay_daily = $this->table('page_overlay_daily');
+        $feedback_signals = $this->table('feedback_signals');
+        $refresh_candidates = $this->table('refresh_candidates');
+        $query_overlap = $this->table('query_overlap');
 
         dbDelta("CREATE TABLE {$clients} (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -371,6 +414,181 @@ final class SCH_Orchestrator {
             KEY context (context)
         ) {$charset};");
 
+        dbDelta("CREATE TABLE {$gsc_page_metrics} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NULL,
+            article_id BIGINT UNSIGNED NULL,
+            property VARCHAR(255) NOT NULL DEFAULT '',
+            page_url TEXT NOT NULL,
+            page_path VARCHAR(255) NOT NULL DEFAULT '',
+            metric_date DATE NOT NULL,
+            clicks DECIMAL(20,6) NOT NULL DEFAULT 0,
+            impressions DECIMAL(20,6) NOT NULL DEFAULT 0,
+            ctr DECIMAL(20,10) NOT NULL DEFAULT 0,
+            position DECIMAL(20,10) NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY client_date (client_id, metric_date),
+            KEY client_page_date (client_id, page_path(191), metric_date),
+            KEY article_date (article_id, metric_date)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$gsc_query_metrics} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NULL,
+            article_id BIGINT UNSIGNED NULL,
+            property VARCHAR(255) NOT NULL DEFAULT '',
+            query VARCHAR(255) NOT NULL DEFAULT '',
+            metric_date DATE NOT NULL,
+            clicks DECIMAL(20,6) NOT NULL DEFAULT 0,
+            impressions DECIMAL(20,6) NOT NULL DEFAULT 0,
+            ctr DECIMAL(20,10) NOT NULL DEFAULT 0,
+            position DECIMAL(20,10) NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY client_query_date (client_id, query(191), metric_date),
+            KEY client_date (client_id, metric_date)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$gsc_query_page_metrics} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NULL,
+            article_id BIGINT UNSIGNED NULL,
+            property VARCHAR(255) NOT NULL DEFAULT '',
+            query VARCHAR(255) NOT NULL DEFAULT '',
+            page_url TEXT NOT NULL,
+            page_path VARCHAR(255) NOT NULL DEFAULT '',
+            metric_date DATE NOT NULL,
+            clicks DECIMAL(20,6) NOT NULL DEFAULT 0,
+            impressions DECIMAL(20,6) NOT NULL DEFAULT 0,
+            ctr DECIMAL(20,10) NOT NULL DEFAULT 0,
+            position DECIMAL(20,10) NOT NULL DEFAULT 0,
+            matched_via VARCHAR(50) NOT NULL DEFAULT 'unmatched',
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY client_date (client_id, metric_date),
+            KEY client_query_date (client_id, query(191), metric_date),
+            KEY client_page_date (client_id, page_path(191), metric_date)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$ga_page_metrics} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NULL,
+            article_id BIGINT UNSIGNED NULL,
+            property_id VARCHAR(50) NOT NULL DEFAULT '',
+            page_url TEXT NOT NULL,
+            page_path VARCHAR(255) NOT NULL DEFAULT '',
+            metric_date DATE NOT NULL,
+            sessions DECIMAL(20,6) NOT NULL DEFAULT 0,
+            active_users DECIMAL(20,6) NOT NULL DEFAULT 0,
+            views DECIMAL(20,6) NOT NULL DEFAULT 0,
+            key_events DECIMAL(20,6) NOT NULL DEFAULT 0,
+            organic_sessions DECIMAL(20,6) NOT NULL DEFAULT 0,
+            organic_key_events DECIMAL(20,6) NOT NULL DEFAULT 0,
+            engagement_rate DECIMAL(20,10) NULL,
+            avg_session_duration DECIMAL(20,10) NULL,
+            matched_via VARCHAR(50) NOT NULL DEFAULT 'unmatched',
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY client_date (client_id, metric_date),
+            KEY client_page_date (client_id, page_path(191), metric_date),
+            KEY article_date (article_id, metric_date)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$page_overlay_daily} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NULL,
+            article_id BIGINT UNSIGNED NULL,
+            page_url TEXT NOT NULL,
+            page_path VARCHAR(255) NOT NULL DEFAULT '',
+            metric_date DATE NOT NULL,
+            gsc_clicks DECIMAL(20,6) NOT NULL DEFAULT 0,
+            gsc_impressions DECIMAL(20,6) NOT NULL DEFAULT 0,
+            gsc_ctr DECIMAL(20,10) NOT NULL DEFAULT 0,
+            gsc_position DECIMAL(20,10) NOT NULL DEFAULT 0,
+            gsc_query_count INT UNSIGNED NOT NULL DEFAULT 0,
+            ga_sessions DECIMAL(20,6) NOT NULL DEFAULT 0,
+            ga_active_users DECIMAL(20,6) NOT NULL DEFAULT 0,
+            ga_views DECIMAL(20,6) NOT NULL DEFAULT 0,
+            ga_key_events DECIMAL(20,6) NOT NULL DEFAULT 0,
+            ga_organic_sessions DECIMAL(20,6) NOT NULL DEFAULT 0,
+            ga_organic_key_events DECIMAL(20,6) NOT NULL DEFAULT 0,
+            matched_via VARCHAR(50) NOT NULL DEFAULT 'unmatched',
+            overlay_json LONGTEXT NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY client_page_date_unique (client_id, page_path(191), metric_date),
+            KEY client_date (client_id, metric_date),
+            KEY article_date (article_id, metric_date)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$feedback_signals} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NULL,
+            article_id BIGINT UNSIGNED NULL,
+            page_url TEXT NOT NULL,
+            signal_type VARCHAR(100) NOT NULL DEFAULT '',
+            severity VARCHAR(20) NOT NULL DEFAULT 'medium',
+            status VARCHAR(20) NOT NULL DEFAULT 'open',
+            priority_score DECIMAL(10,4) NOT NULL DEFAULT 0,
+            title VARCHAR(255) NOT NULL DEFAULT '',
+            description TEXT NULL,
+            recommended_action VARCHAR(100) NOT NULL DEFAULT '',
+            evidence_json LONGTEXT NULL,
+            first_detected_at DATETIME NOT NULL,
+            last_detected_at DATETIME NOT NULL,
+            resolved_at DATETIME NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY client_status_priority (client_id, status, priority_score),
+            KEY signal_type (signal_type),
+            KEY article_id (article_id)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$refresh_candidates} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NOT NULL,
+            article_id BIGINT UNSIGNED NOT NULL,
+            page_url TEXT NOT NULL,
+            priority_score DECIMAL(10,4) NOT NULL DEFAULT 0,
+            reason_primary VARCHAR(100) NOT NULL DEFAULT '',
+            reason_secondary VARCHAR(100) NOT NULL DEFAULT '',
+            suggested_scope VARCHAR(100) NOT NULL DEFAULT '',
+            recommendation_json LONGTEXT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'queued',
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY client_status_priority (client_id, status, priority_score),
+            KEY article_id (article_id)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$query_overlap} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            query VARCHAR(255) NOT NULL DEFAULT '',
+            page_url_a TEXT NOT NULL,
+            article_id_a BIGINT UNSIGNED NULL,
+            page_url_b TEXT NOT NULL,
+            article_id_b BIGINT UNSIGNED NULL,
+            overlap_score DECIMAL(10,4) NOT NULL DEFAULT 0,
+            evidence_json LONGTEXT NULL,
+            detected_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY client_query (client_id, query(191)),
+            KEY overlap_score (overlap_score),
+            KEY detected_at (detected_at)
+        ) {$charset};");
+
         $this->maybe_add_column($clients, 'research_urls', "ALTER TABLE {$clients} ADD COLUMN research_urls LONGTEXT NULL AFTER link_targets");
         $this->maybe_add_column($clients, 'max_posts_per_month', "ALTER TABLE {$clients} ADD COLUMN max_posts_per_month INT UNSIGNED NOT NULL DEFAULT 0 AFTER research_urls");
         $this->maybe_add_column($clients, 'gsc_property', "ALTER TABLE {$clients} ADD COLUMN gsc_property VARCHAR(255) NOT NULL DEFAULT '' AFTER max_posts_per_month");
@@ -378,6 +596,13 @@ final class SCH_Orchestrator {
         $this->maybe_add_column($clients, 'gsc_token_expires_at', "ALTER TABLE {$clients} ADD COLUMN gsc_token_expires_at DATETIME NULL AFTER gsc_token_data");
         $this->maybe_add_column($clients, 'gsc_connected_email', "ALTER TABLE {$clients} ADD COLUMN gsc_connected_email VARCHAR(191) NOT NULL DEFAULT '' AFTER gsc_token_expires_at");
         $this->maybe_add_column($clients, 'gsc_last_synced_at', "ALTER TABLE {$clients} ADD COLUMN gsc_last_synced_at DATETIME NULL AFTER gsc_connected_email");
+        $this->maybe_add_column($clients, 'ga_property_id', "ALTER TABLE {$clients} ADD COLUMN ga_property_id VARCHAR(50) NOT NULL DEFAULT '' AFTER gsc_last_synced_at");
+        $this->maybe_add_column($clients, 'ga_property_display_name', "ALTER TABLE {$clients} ADD COLUMN ga_property_display_name VARCHAR(255) NOT NULL DEFAULT '' AFTER ga_property_id");
+        $this->maybe_add_column($clients, 'ga_account_name', "ALTER TABLE {$clients} ADD COLUMN ga_account_name VARCHAR(255) NOT NULL DEFAULT '' AFTER ga_property_display_name");
+        $this->maybe_add_column($clients, 'ga_token_data', "ALTER TABLE {$clients} ADD COLUMN ga_token_data LONGTEXT NULL AFTER ga_account_name");
+        $this->maybe_add_column($clients, 'ga_token_expires_at', "ALTER TABLE {$clients} ADD COLUMN ga_token_expires_at DATETIME NULL AFTER ga_token_data");
+        $this->maybe_add_column($clients, 'ga_connected_email', "ALTER TABLE {$clients} ADD COLUMN ga_connected_email VARCHAR(191) NOT NULL DEFAULT '' AFTER ga_token_expires_at");
+        $this->maybe_add_column($clients, 'ga_last_synced_at', "ALTER TABLE {$clients} ADD COLUMN ga_last_synced_at DATETIME NULL AFTER ga_connected_email");
         $this->maybe_add_column($sites, 'default_status', "ALTER TABLE {$sites} ADD COLUMN default_status VARCHAR(20) NOT NULL DEFAULT 'draft' AFTER receiver_secret");
         $this->maybe_add_column($sites, 'default_category', "ALTER TABLE {$sites} ADD COLUMN default_category VARCHAR(191) NOT NULL DEFAULT '' AFTER default_status");
         $this->maybe_add_column($sites, 'max_posts_per_day', "ALTER TABLE {$sites} ADD COLUMN max_posts_per_day INT UNSIGNED NOT NULL DEFAULT 3 AFTER default_category");
@@ -417,6 +642,11 @@ final class SCH_Orchestrator {
         add_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28');
         add_option(self::OPTION_GSC_DEFAULT_ROW_LIMIT, '250');
         add_option(self::OPTION_GSC_AUTO_SYNC, '0');
+        add_option(self::OPTION_GA_ENABLED, '0');
+        add_option(self::OPTION_GA_CLIENT_ID, '');
+        add_option(self::OPTION_GA_CLIENT_SECRET, '');
+        add_option(self::OPTION_GA_AUTO_SYNC, '0');
+        add_option(self::OPTION_FEEDBACK_AUTO_SYNC, '0');
 
         update_option(self::OPTION_DB_VERSION, self::DB_VERSION);
     }
@@ -431,6 +661,10 @@ final class SCH_Orchestrator {
         add_submenu_page('sch-content-hub', 'Conflicten', 'Conflicten', 'manage_options', 'sch-conflicts', [$this, 'render_conflicts']);
         add_submenu_page('sch-content-hub', 'Redactie', 'Redactie', 'manage_options', 'sch-editorial', [$this, 'render_editorial']);
         add_submenu_page('sch-content-hub', 'Rapportage', 'Rapportage', 'manage_options', 'sch-reporting', [$this, 'render_reporting']);
+        add_submenu_page('sch-content-hub', 'Performance', 'Performance', 'manage_options', 'sch-performance', [$this, 'render_performance']);
+        add_submenu_page('sch-content-hub', 'Page Intelligence', 'Page Intelligence', 'manage_options', 'sch-page-intelligence', [$this, 'render_page_intelligence']);
+        add_submenu_page('sch-content-hub', 'Feedback', 'Feedback', 'manage_options', 'sch-feedback', [$this, 'render_feedback']);
+        add_submenu_page('sch-content-hub', 'Refresh Queue', 'Refresh Queue', 'manage_options', 'sch-refresh-queue', [$this, 'render_refresh_queue']);
         add_submenu_page('sch-content-hub', 'Logs', 'Logs', 'manage_options', 'sch-logs', [$this, 'render_logs']);
         add_submenu_page('sch-content-hub', 'Instellingen', 'Instellingen', 'manage_options', 'sch-settings', [$this, 'render_settings']);
     }
@@ -579,6 +813,21 @@ final class SCH_Orchestrator {
                             <?php endif; ?>
                         </td>
                     </tr>
+                    <tr>
+                        <th>Google Analytics 4</th>
+                        <td>
+                            <?php if ($edit && $this->is_ga_integration_enabled()) : ?>
+                                <p>Status: <strong><?php echo $this->client_has_ga_connection($edit) ? 'Verbonden' : 'Niet verbonden'; ?></strong></p>
+                                <p>Account: <code><?php echo esc_html((string) ($edit->ga_connected_email ?: 'Onbekend')); ?></code></p>
+                                <p>Property: <code><?php echo esc_html((string) (($edit->ga_property_id ?: 'Nog niet geselecteerd') . ($edit->ga_property_display_name ? ' - ' . $edit->ga_property_display_name : ''))); ?></code></p>
+                                <p>Laatste sync: <?php echo esc_html((string) ($edit->ga_last_synced_at ?: 'Nog nooit')); ?></p>
+                            <?php elseif (!$edit) : ?>
+                                <p class="description">Sla de klant eerst op om GA4 te koppelen.</p>
+                            <?php else : ?>
+                                <p class="description">Schakel eerst Google Analytics 4 in bij Instellingen.</p>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
                 </table>
 
                 <p><button class="button button-primary"><?php echo $edit ? 'Klant bijwerken' : 'Klant opslaan'; ?></button></p>
@@ -635,6 +884,37 @@ final class SCH_Orchestrator {
                         <label style="margin-left:12px;"><strong>Min. impressions</strong></label>
                         <input type="number" name="min_impressions" min="0" max="100000000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_MIN_IMPRESSIONS, '0')); ?>">
                         <button class="button button-primary" type="submit">Sync keywords</button>
+                    </form>
+                </div>
+            <?php endif; ?>
+
+            <?php if ($edit && $this->is_ga_integration_enabled()) : ?>
+                <?php $ga_properties_cache = $this->get_cached_ga_properties_for_user((int) $edit->id); ?>
+                <div class="sch-card" style="margin-top:20px;">
+                    <h2 style="margin-top:0;">Google Analytics 4 koppeling</h2>
+                    <p>
+                        <a class="button button-secondary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_ga_connect&client_id=' . (int) $edit->id), 'sch_ga_connect_' . (int) $edit->id)); ?>">Connect GA4</a>
+                        <?php if ($this->client_has_ga_connection($edit)) : ?>
+                            <a class="button" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_ga_disconnect&client_id=' . (int) $edit->id), 'sch_ga_disconnect_' . (int) $edit->id)); ?>" onclick="return confirm('GA4 koppeling verbreken?');">Disconnect</a>
+                        <?php endif; ?>
+                        <?php if ($this->client_has_ga_connection($edit)) : ?>
+                            <a class="button" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_ga_fetch_properties&client_id=' . (int) $edit->id), 'sch_ga_fetch_properties_' . (int) $edit->id)); ?>">Fetch properties</a>
+                        <?php endif; ?>
+                    </p>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-top:15px;">
+                        <?php wp_nonce_field('sch_ga_save_property'); ?>
+                        <input type="hidden" name="action" value="sch_ga_save_property">
+                        <input type="hidden" name="client_id" value="<?php echo (int) $edit->id; ?>">
+                        <label for="sch-ga-property"><strong>Selecteer property</strong></label><br>
+                        <select id="sch-ga-property" name="ga_property_id" style="min-width:420px;">
+                            <option value="">-- kies property --</option>
+                            <?php foreach ($ga_properties_cache as $property) : ?>
+                                <option value="<?php echo esc_attr((string) ($property['property_id'] ?? '')); ?>" <?php selected((string) ($edit->ga_property_id ?? ''), (string) ($property['property_id'] ?? '')); ?>>
+                                    <?php echo esc_html((string) ($property['label'] ?? '')); ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                        <button class="button button-primary" type="submit">Property opslaan</button>
                     </form>
                 </div>
             <?php endif; ?>
@@ -1488,6 +1768,21 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <tr><th>Default top N op clicks</th><td><input type="number" name="gsc_default_top_n_clicks" min="0" max="25000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_TOP_N_CLICKS, '0')); ?>"><p class="description">0 = uitgeschakeld (alle rows binnen row limit).</p></td></tr>
                     <tr><th>Default min impressions</th><td><input type="number" name="gsc_default_min_impressions" min="0" max="100000000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_MIN_IMPRESSIONS, '0')); ?>"></td></tr>
                     <tr><th>Auto sync</th><td><label><input type="checkbox" name="gsc_auto_sync" value="1" <?php checked(get_option(self::OPTION_GSC_AUTO_SYNC, '0'), '1'); ?>> Dagelijks gekoppelde klanten syncen</label></td></tr>
+                    <tr><th colspan="2"><h2 style="margin:10px 0 0;">Google Analytics 4</h2></th></tr>
+                    <tr><th>Enable GA4 integratie</th><td><label><input type="checkbox" name="ga_enabled" value="1" <?php checked(get_option(self::OPTION_GA_ENABLED, '0'), '1'); ?>> Inschakelen</label></td></tr>
+                    <tr><th>Google OAuth client ID</th><td><input type="text" name="ga_client_id" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_GA_CLIENT_ID, '')); ?>"></td></tr>
+                    <tr><th>Google OAuth client secret</th><td><input type="password" name="ga_client_secret" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_GA_CLIENT_SECRET, '')); ?>"></td></tr>
+                    <tr><th>Auto sync GA4</th><td><label><input type="checkbox" name="ga_auto_sync" value="1" <?php checked(get_option(self::OPTION_GA_AUTO_SYNC, '0'), '1'); ?>> Dagelijks GA4 page metrics syncen</label></td></tr>
+                    <tr><th>Auto feedback engine</th><td><label><input type="checkbox" name="feedback_auto_sync" value="1" <?php checked(get_option(self::OPTION_FEEDBACK_AUTO_SYNC, '0'), '1'); ?>> Dagelijks overlay + feedback signalen genereren</label></td></tr>
+                    <tr>
+                        <th>OAuth setup hulp</th>
+                        <td>
+                            <p><strong>Exacte GSC redirect URI:</strong> <code><?php echo esc_html($this->gsc_oauth_redirect_uri()); ?></code></p>
+                            <p><strong>Exacte GA4 redirect URI:</strong> <code><?php echo esc_html($this->ga_oauth_redirect_uri()); ?></code></p>
+                            <p><strong>Scopes:</strong> <code>https://www.googleapis.com/auth/webmasters.readonly</code> + <code>https://www.googleapis.com/auth/analytics.readonly</code> + <code>userinfo.email</code></p>
+                            <p class="description">Gebruik bij een OAuth app in testing mode expliciet test users. Alleen die users kunnen verbinden zolang de app niet verified is.</p>
+                        </td>
+                    </tr>
 
                     <tr><th colspan="2"><h2 style="margin:10px 0 0;">Random Content Machine</h2></th></tr>
                     <tr><th>Enable random content machine</th><td><label><input type="checkbox" name="random_machine_enabled" value="1" <?php checked(get_option(self::OPTION_RANDOM_MACHINE_ENABLED, '0'), '1'); ?>> Dagelijks automatisch random content jobs genereren</label></td></tr>
@@ -2746,6 +3041,11 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         update_option(self::OPTION_GSC_DEFAULT_TOP_N_CLICKS, (string) $this->sanitize_gsc_top_n_clicks((int) ($_POST['gsc_default_top_n_clicks'] ?? 0)));
         update_option(self::OPTION_GSC_DEFAULT_MIN_IMPRESSIONS, (string) $this->sanitize_gsc_min_impressions((int) ($_POST['gsc_default_min_impressions'] ?? 0)));
         update_option(self::OPTION_GSC_AUTO_SYNC, isset($_POST['gsc_auto_sync']) ? '1' : '0');
+        update_option(self::OPTION_GA_ENABLED, isset($_POST['ga_enabled']) ? '1' : '0');
+        update_option(self::OPTION_GA_CLIENT_ID, sanitize_text_field((string) ($_POST['ga_client_id'] ?? '')));
+        update_option(self::OPTION_GA_CLIENT_SECRET, sanitize_text_field((string) ($_POST['ga_client_secret'] ?? '')));
+        update_option(self::OPTION_GA_AUTO_SYNC, isset($_POST['ga_auto_sync']) ? '1' : '0');
+        update_option(self::OPTION_FEEDBACK_AUTO_SYNC, isset($_POST['feedback_auto_sync']) ? '1' : '0');
 
         update_option(self::OPTION_RANDOM_MACHINE_ENABLED, isset($_POST['random_machine_enabled']) ? '1' : '0');
         update_option(self::OPTION_RANDOM_DAILY_MAX, (string) max(1, min(100, (int) ($_POST['random_daily_max'] ?? 10))));
@@ -6079,6 +6379,1182 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             return [];
         }
         return array_values(array_filter(array_map('sanitize_text_field', $properties)));
+    }
+
+
+    private function is_ga_integration_enabled(): bool {
+        return get_option(self::OPTION_GA_ENABLED, '0') === '1';
+    }
+
+    private function client_has_ga_connection(object $client): bool {
+        return !empty($client->ga_token_data);
+    }
+
+    private function ga_oauth_redirect_uri(): string {
+        return admin_url('admin-post.php?action=sch_ga_oauth_callback');
+    }
+
+    public function handle_ga_connect(): void {
+        $client_id = (int) ($_GET['client_id'] ?? 0);
+        if ($client_id <= 0) {
+            $this->redirect_with_message('sch-clients', 'Geen geldige klant geselecteerd.', 'error');
+        }
+        if (!current_user_can('manage_options')) {
+            wp_die('Geen toegang.');
+        }
+        check_admin_referer('sch_ga_connect_' . $client_id);
+
+        if (!$this->is_ga_integration_enabled()) {
+            $this->redirect_with_message('sch-clients', 'Google Analytics integratie staat uit.', 'error');
+        }
+
+        $oauth_client_id = (string) get_option(self::OPTION_GA_CLIENT_ID, '');
+        $oauth_client_secret = (string) get_option(self::OPTION_GA_CLIENT_SECRET, '');
+        if ($oauth_client_id === '' || $oauth_client_secret === '') {
+            $this->redirect_with_message('sch-settings', 'Vul eerst GA OAuth client ID en secret in.', 'error');
+        }
+
+        $state_token = wp_generate_password(32, false, false);
+        set_transient('sch_ga_state_' . $state_token, [
+            'client_id' => $client_id,
+            'user_id' => get_current_user_id(),
+        ], MINUTE_IN_SECONDS * 15);
+
+        $auth_url = add_query_arg([
+            'client_id' => $oauth_client_id,
+            'redirect_uri' => $this->ga_oauth_redirect_uri(),
+            'response_type' => 'code',
+            'scope' => 'https://www.googleapis.com/auth/analytics.readonly https://www.googleapis.com/auth/userinfo.email',
+            'access_type' => 'offline',
+            'include_granted_scopes' => 'true',
+            'prompt' => 'consent',
+            'state' => $state_token,
+        ], 'https://accounts.google.com/o/oauth2/v2/auth');
+
+        wp_redirect($auth_url);
+        exit;
+    }
+
+    public function handle_ga_oauth_callback(): void {
+        if (!current_user_can('manage_options')) {
+            wp_die('Geen toegang.');
+        }
+
+        $state = sanitize_text_field((string) ($_GET['state'] ?? ''));
+        $code = sanitize_text_field((string) ($_GET['code'] ?? ''));
+        $error = sanitize_text_field((string) ($_GET['error'] ?? ''));
+
+        $state_payload = get_transient('sch_ga_state_' . $state);
+        delete_transient('sch_ga_state_' . $state);
+
+        if (!is_array($state_payload) || empty($state_payload['client_id']) || (int) ($state_payload['user_id'] ?? 0) !== get_current_user_id()) {
+            $this->redirect_with_message('sch-clients', 'GA OAuth state validatie mislukt.', 'error');
+        }
+
+        $client_id = (int) $state_payload['client_id'];
+        if ($error !== '') {
+            $this->redirect_with_message('sch-clients', 'GA autorisatie geannuleerd of mislukt.', 'error');
+        }
+        if ($code === '') {
+            $this->redirect_with_message('sch-clients', 'Geen GA OAuth code ontvangen.', 'error');
+        }
+
+        try {
+            $token = $this->ga_exchange_code_for_token($code);
+            $email = $this->ga_fetch_account_email((string) ($token['access_token'] ?? ''));
+            $token_payload = [
+                'access_token' => (string) ($token['access_token'] ?? ''),
+                'refresh_token' => (string) ($token['refresh_token'] ?? ''),
+                'token_type' => (string) ($token['token_type'] ?? 'Bearer'),
+                'scope' => (string) ($token['scope'] ?? ''),
+            ];
+
+            $this->db->update($this->table('clients'), [
+                'ga_token_data' => $this->encrypt_sensitive_value(wp_json_encode($token_payload)),
+                'ga_token_expires_at' => $this->gsc_expiry_time_from_token_response($token),
+                'ga_connected_email' => $email,
+                'updated_at' => $this->now(),
+            ], ['id' => $client_id]);
+
+            $this->redirect_with_message('sch-clients', 'Google Analytics gekoppeld.');
+        } catch (Throwable $e) {
+            $this->log('error', 'ga_oauth', 'GA OAuth callback mislukt', ['client_id' => $client_id, 'error' => $e->getMessage()]);
+            $this->redirect_with_message('sch-clients', 'Google Analytics koppeling mislukt. Check logs.', 'error');
+        }
+    }
+
+    public function handle_ga_disconnect(): void {
+        $client_id = (int) ($_GET['client_id'] ?? 0);
+        if ($client_id <= 0) {
+            $this->redirect_with_message('sch-clients', 'Geen geldige klant geselecteerd.', 'error');
+        }
+        if (!current_user_can('manage_options')) {
+            wp_die('Geen toegang.');
+        }
+        check_admin_referer('sch_ga_disconnect_' . $client_id);
+
+        $this->db->update($this->table('clients'), [
+            'ga_property_id' => '',
+            'ga_property_display_name' => '',
+            'ga_account_name' => '',
+            'ga_token_data' => null,
+            'ga_token_expires_at' => null,
+            'ga_connected_email' => '',
+            'updated_at' => $this->now(),
+        ], ['id' => $client_id]);
+        $this->redirect_with_message('sch-clients', 'GA4 koppeling verbroken.');
+    }
+
+    public function handle_ga_fetch_properties(): void {
+        $client_id = (int) ($_GET['client_id'] ?? 0);
+        if ($client_id <= 0) {
+            $this->redirect_with_message('sch-clients', 'Geen geldige klant geselecteerd.', 'error');
+        }
+        if (!current_user_can('manage_options')) {
+            wp_die('Geen toegang.');
+        }
+        check_admin_referer('sch_ga_fetch_properties_' . $client_id);
+
+        $client = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('clients')} WHERE id=%d", $client_id));
+        if (!$client) {
+            $this->redirect_with_message('sch-clients', 'Klant niet gevonden.', 'error');
+        }
+
+        try {
+            $properties = $this->ga_list_account_summaries_or_properties_for_client($client);
+            set_transient($this->ga_properties_cache_key($client_id), $properties, HOUR_IN_SECONDS);
+            $this->redirect_with_message('sch-clients', 'GA properties opgehaald: ' . count($properties));
+        } catch (Throwable $e) {
+            $this->log('error', 'ga_property', 'GA property lijst ophalen mislukt', ['client_id' => $client_id, 'error' => $e->getMessage()]);
+            $this->redirect_with_message('sch-clients', 'GA properties ophalen mislukt. Check logs.', 'error');
+        }
+    }
+
+    public function handle_ga_save_property(): void {
+        $this->verify_admin_nonce('sch_ga_save_property');
+        $client_id = (int) ($_POST['client_id'] ?? 0);
+        $property_id = sanitize_text_field((string) ($_POST['ga_property_id'] ?? ''));
+        if ($client_id <= 0 || $property_id === '') {
+            $this->redirect_with_message('sch-clients', 'Klant en GA property zijn verplicht.', 'error');
+        }
+
+        $properties = $this->get_cached_ga_properties_for_user($client_id);
+        $display_name = '';
+        $account_name = '';
+        foreach ($properties as $property) {
+            if ((string) ($property['property_id'] ?? '') === $property_id) {
+                $display_name = sanitize_text_field((string) ($property['display_name'] ?? ''));
+                $account_name = sanitize_text_field((string) ($property['account_name'] ?? ''));
+                break;
+            }
+        }
+
+        $this->db->update($this->table('clients'), [
+            'ga_property_id' => $property_id,
+            'ga_property_display_name' => $display_name,
+            'ga_account_name' => $account_name,
+            'updated_at' => $this->now(),
+        ], ['id' => $client_id]);
+
+        $this->redirect_with_message('sch-clients', 'GA property gekoppeld.');
+    }
+
+    private function ga_exchange_code_for_token(string $code): array {
+        $response = wp_remote_post('https://oauth2.googleapis.com/token', [
+            'timeout' => 30,
+            'body' => [
+                'code' => $code,
+                'client_id' => (string) get_option(self::OPTION_GA_CLIENT_ID, ''),
+                'client_secret' => (string) get_option(self::OPTION_GA_CLIENT_SECRET, ''),
+                'redirect_uri' => $this->ga_oauth_redirect_uri(),
+                'grant_type' => 'authorization_code',
+            ],
+        ]);
+        if (is_wp_error($response)) {
+            throw new RuntimeException('GA OAuth token exchange mislukt: ' . $response->get_error_message());
+        }
+        $status = (int) wp_remote_retrieve_response_code($response);
+        $body = json_decode((string) wp_remote_retrieve_body($response), true);
+        if ($status < 200 || $status >= 300 || !is_array($body) || empty($body['access_token'])) {
+            throw new RuntimeException('GA OAuth token exchange gaf HTTP ' . $status);
+        }
+        return $body;
+    }
+
+    private function ga_fetch_account_email(string $access_token): string {
+        return $this->gsc_fetch_account_email($access_token);
+    }
+
+    private function ga_get_token_payload_for_client(object $client): array {
+        $encrypted = (string) ($client->ga_token_data ?? '');
+        if ($encrypted === '') {
+            throw new RuntimeException('Geen GA token data gevonden voor klant.');
+        }
+        $json = $this->decrypt_sensitive_value($encrypted);
+        $decoded = json_decode($json, true);
+        if (!is_array($decoded)) {
+            throw new RuntimeException('GA token data kon niet worden gelezen.');
+        }
+        return $decoded;
+    }
+
+    private function ga_get_valid_access_token_for_client(object $client): string {
+        $token_data = $this->ga_get_token_payload_for_client($client);
+        $access_token = (string) ($token_data['access_token'] ?? '');
+        $refresh_token = (string) ($token_data['refresh_token'] ?? '');
+        $expires_at = (string) ($client->ga_token_expires_at ?? '');
+
+        if ($access_token !== '' && $expires_at !== '' && strtotime($expires_at) > time() + 60) {
+            return $access_token;
+        }
+        if ($refresh_token === '') {
+            throw new RuntimeException('Geen GA refresh token aanwezig voor klant.');
+        }
+
+        $response = wp_remote_post('https://oauth2.googleapis.com/token', [
+            'timeout' => 30,
+            'body' => [
+                'client_id' => (string) get_option(self::OPTION_GA_CLIENT_ID, ''),
+                'client_secret' => (string) get_option(self::OPTION_GA_CLIENT_SECRET, ''),
+                'grant_type' => 'refresh_token',
+                'refresh_token' => $refresh_token,
+            ],
+        ]);
+        if (is_wp_error($response)) {
+            throw new RuntimeException('GA token refresh mislukt: ' . $response->get_error_message());
+        }
+        $status = (int) wp_remote_retrieve_response_code($response);
+        $body = json_decode((string) wp_remote_retrieve_body($response), true);
+        if ($status < 200 || $status >= 300 || !is_array($body)) {
+            throw new RuntimeException('GA token refresh gaf HTTP ' . $status);
+        }
+
+        $token_data['access_token'] = (string) ($body['access_token'] ?? '');
+        if (!empty($body['refresh_token'])) {
+            $token_data['refresh_token'] = (string) $body['refresh_token'];
+        }
+
+        $this->db->update($this->table('clients'), [
+            'ga_token_data' => $this->encrypt_sensitive_value(wp_json_encode($token_data)),
+            'ga_token_expires_at' => $this->gsc_expiry_time_from_token_response($body),
+            'updated_at' => $this->now(),
+        ], ['id' => (int) $client->id]);
+
+        return (string) $token_data['access_token'];
+    }
+
+    private function ga_list_account_summaries_or_properties_for_client(object $client): array {
+        $access_token = $this->ga_get_valid_access_token_for_client($client);
+        $response = wp_remote_get('https://analyticsadmin.googleapis.com/v1beta/accountSummaries?pageSize=200', [
+            'timeout' => 30,
+            'headers' => ['Authorization' => 'Bearer ' . $access_token],
+        ]);
+        if (is_wp_error($response)) {
+            throw new RuntimeException('GA account summaries ophalen mislukt: ' . $response->get_error_message());
+        }
+        $status = (int) wp_remote_retrieve_response_code($response);
+        $body = json_decode((string) wp_remote_retrieve_body($response), true);
+        if ($status < 200 || $status >= 300) {
+            throw new RuntimeException('GA account summaries ophalen mislukt: HTTP ' . $status);
+        }
+
+        $properties = [];
+        foreach ((array) ($body['accountSummaries'] ?? []) as $summary) {
+            $account_name = sanitize_text_field((string) ($summary['displayName'] ?? ''));
+            foreach ((array) ($summary['propertySummaries'] ?? []) as $property) {
+                $resource = sanitize_text_field((string) ($property['property'] ?? ''));
+                $property_id = str_replace('properties/', '', $resource);
+                $display_name = sanitize_text_field((string) ($property['displayName'] ?? ''));
+                if ($property_id === '') {
+                    continue;
+                }
+                $properties[] = [
+                    'property_id' => $property_id,
+                    'display_name' => $display_name,
+                    'account_name' => $account_name,
+                    'label' => trim($account_name . ' / ' . $display_name . ' (' . $property_id . ')'),
+                ];
+            }
+        }
+
+        return $properties;
+    }
+
+    private function ga_properties_cache_key(int $client_id): string {
+        return 'sch_ga_props_' . get_current_user_id() . '_' . $client_id;
+    }
+
+    private function get_cached_ga_properties_for_user(int $client_id): array {
+        $properties = get_transient($this->ga_properties_cache_key($client_id));
+        return is_array($properties) ? $properties : [];
+    }
+
+    private function gsc_query_page_metrics(string $property, string $access_token, string $start_date, string $end_date, int $row_limit, int $start_row = 0): array {
+        return $this->gsc_query_search_analytics($property, $access_token, $start_date, $end_date, ['page'], $row_limit, $start_row);
+    }
+
+    private function gsc_query_query_metrics(string $property, string $access_token, string $start_date, string $end_date, int $row_limit, int $start_row = 0): array {
+        return $this->gsc_query_search_analytics($property, $access_token, $start_date, $end_date, ['query'], $row_limit, $start_row);
+    }
+
+    private function gsc_query_query_page_metrics(string $property, string $access_token, string $start_date, string $end_date, int $row_limit, int $start_row = 0): array {
+        return $this->gsc_query_search_analytics($property, $access_token, $start_date, $end_date, ['query', 'page'], $row_limit, $start_row);
+    }
+
+    private function gsc_query_search_analytics(string $property, string $access_token, string $start_date, string $end_date, array $dimensions, int $row_limit, int $start_row = 0): array {
+        $encoded_property = rawurlencode($property);
+        $response = wp_remote_post('https://www.googleapis.com/webmasters/v3/sites/' . $encoded_property . '/searchAnalytics/query', [
+            'timeout' => 30,
+            'headers' => ['Authorization' => 'Bearer ' . $access_token, 'Content-Type' => 'application/json'],
+            'body' => wp_json_encode([
+                'startDate' => $start_date,
+                'endDate' => $end_date,
+                'dimensions' => $dimensions,
+                'rowLimit' => max(1, min(25000, $row_limit)),
+                'startRow' => max(0, $start_row),
+            ]),
+        ]);
+
+        if (is_wp_error($response)) {
+            throw new RuntimeException('Search Analytics request mislukt: ' . $response->get_error_message());
+        }
+        $status = (int) wp_remote_retrieve_response_code($response);
+        $body = json_decode((string) wp_remote_retrieve_body($response), true);
+        if ($status < 200 || $status >= 300) {
+            throw new RuntimeException('Search Analytics fout: HTTP ' . $status);
+        }
+        return (array) ($body['rows'] ?? []);
+    }
+
+    private function normalize_page_url(string $url): string {
+        $url = esc_url_raw(trim($url));
+        if ($url === '') {
+            return '';
+        }
+        $parts = wp_parse_url($url);
+        if (!is_array($parts) || empty($parts['host'])) {
+            return '';
+        }
+        $host = strtolower((string) $parts['host']);
+        $host = preg_replace('/^www\./', '', $host);
+        $path = '/' . ltrim((string) ($parts['path'] ?? '/'), '/');
+        $path = preg_replace('#/+#', '/', $path);
+        $path = rtrim($path, '/');
+        if ($path === '') {
+            $path = '/';
+        }
+        return 'https://' . $host . $path;
+    }
+
+    private function normalize_page_path(string $url_or_path): string {
+        $path = (string) wp_parse_url($url_or_path, PHP_URL_PATH);
+        if ($path === '') {
+            $path = $url_or_path;
+        }
+        $path = '/' . ltrim($path, '/');
+        $path = preg_replace('#/+#', '/', $path);
+        $path = rtrim($path, '/');
+        return $path === '' ? '/' : $path;
+    }
+
+    private function match_article_by_url(int $client_id, string $page_url): ?object {
+        $normalized_url = $this->normalize_page_url($page_url);
+        $article = $this->match_article_by_remote_url($client_id, $normalized_url);
+        if ($article) {
+            return $article;
+        }
+        return $this->match_article_by_canonical_url($client_id, $normalized_url);
+    }
+
+    private function match_article_by_remote_url(int $client_id, string $normalized_url): ?object {
+        if ($normalized_url === '') {
+            return null;
+        }
+        $articles = $this->db->get_results($this->db->prepare("SELECT * FROM {$this->table('articles')} WHERE client_id=%d AND remote_url<>''", $client_id));
+        foreach ((array) $articles as $article) {
+            if ($this->normalize_page_url((string) ($article->remote_url ?? '')) === $normalized_url) {
+                return $article;
+            }
+        }
+        return null;
+    }
+
+    private function match_article_by_canonical_url(int $client_id, string $normalized_url): ?object {
+        if ($normalized_url === '') {
+            return null;
+        }
+        $articles = $this->db->get_results($this->db->prepare("SELECT * FROM {$this->table('articles')} WHERE client_id=%d AND canonical_url<>''", $client_id));
+        foreach ((array) $articles as $article) {
+            if ($this->normalize_page_url((string) ($article->canonical_url ?? '')) === $normalized_url) {
+                return $article;
+            }
+        }
+        return null;
+    }
+
+    private function match_article_by_site_and_slug(int $site_id, string $path): ?object {
+        if ($site_id <= 0 || $path === '/') {
+            return null;
+        }
+        $slug = sanitize_title(basename($path));
+        if ($slug === '') {
+            return null;
+        }
+        $article = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('articles')} WHERE site_id=%d AND slug=%s ORDER BY id DESC LIMIT 1", $site_id, $slug));
+        return $article ?: null;
+    }
+
+    private function resolve_site_for_page_url(int $client_id, string $normalized_url): ?object {
+        if ($normalized_url === '') {
+            return null;
+        }
+        $host = (string) wp_parse_url($normalized_url, PHP_URL_HOST);
+        if ($host === '') {
+            return null;
+        }
+        $sites = $this->db->get_results("SELECT * FROM {$this->table('sites')} WHERE is_active=1");
+        foreach ((array) $sites as $site) {
+            $site_host = (string) wp_parse_url((string) ($site->base_url ?? ''), PHP_URL_HOST);
+            $site_host = preg_replace('/^www\./', '', strtolower($site_host));
+            if ($site_host !== '' && $site_host === preg_replace('/^www\./', '', strtolower($host))) {
+                return $site;
+            }
+        }
+        return null;
+    }
+
+    private function infer_article_mapping(int $client_id, string $page_url): array {
+        $normalized_url = $this->normalize_page_url($page_url);
+        $path = $this->normalize_page_path($normalized_url ?: $page_url);
+
+        $article = $this->match_article_by_remote_url($client_id, $normalized_url);
+        if ($article) {
+            return ['article_id' => (int) $article->id, 'site_id' => (int) ($article->site_id ?? 0), 'matched_via' => 'remote_url_exact', 'page_url' => $normalized_url, 'page_path' => $path];
+        }
+
+        $article = $this->match_article_by_canonical_url($client_id, $normalized_url);
+        if ($article) {
+            return ['article_id' => (int) $article->id, 'site_id' => (int) ($article->site_id ?? 0), 'matched_via' => 'canonical_exact', 'page_url' => $normalized_url, 'page_path' => $path];
+        }
+
+        $site = $this->resolve_site_for_page_url($client_id, $normalized_url);
+        if ($site) {
+            $article = $this->match_article_by_site_and_slug((int) $site->id, $path);
+            if ($article) {
+                return ['article_id' => (int) $article->id, 'site_id' => (int) ($site->id ?? 0), 'matched_via' => 'slug_site_match', 'page_url' => $normalized_url, 'page_path' => $path];
+            }
+            return ['article_id' => 0, 'site_id' => (int) $site->id, 'matched_via' => 'path_match', 'page_url' => $normalized_url, 'page_path' => $path];
+        }
+
+        return ['article_id' => 0, 'site_id' => 0, 'matched_via' => 'unmatched', 'page_url' => $normalized_url, 'page_path' => $path];
+    }
+
+    private function sync_gsc_page_metrics_for_client(object $client, int $range_days = 28, int $row_limit = 2500): int {
+        $access_token = $this->gsc_get_valid_access_token_for_client($client);
+        $end = new DateTimeImmutable('now', wp_timezone());
+        $start = $end->sub(new DateInterval('P' . max(1, $range_days) . 'D'));
+        $rows = $this->gsc_query_page_metrics((string) $client->gsc_property, $access_token, $start->format('Y-m-d'), $end->format('Y-m-d'), $row_limit, 0);
+
+        $inserted = 0;
+        foreach ($rows as $row) {
+            $page_url = (string) (($row['keys'][0] ?? ''));
+            $mapping = $this->infer_article_mapping((int) $client->id, $page_url);
+            $this->db->insert($this->table('gsc_page_metrics'), [
+                'client_id' => (int) $client->id,
+                'site_id' => $mapping['site_id'] > 0 ? $mapping['site_id'] : null,
+                'article_id' => $mapping['article_id'] > 0 ? $mapping['article_id'] : null,
+                'property' => sanitize_text_field((string) $client->gsc_property),
+                'page_url' => $mapping['page_url'],
+                'page_path' => $mapping['page_path'],
+                'metric_date' => $end->format('Y-m-d'),
+                'clicks' => (float) ($row['clicks'] ?? 0),
+                'impressions' => (float) ($row['impressions'] ?? 0),
+                'ctr' => (float) ($row['ctr'] ?? 0),
+                'position' => (float) ($row['position'] ?? 0),
+                'created_at' => $this->now(),
+            ]);
+            $inserted++;
+        }
+        return $inserted;
+    }
+
+    private function sync_gsc_query_metrics_for_client(object $client, int $range_days = 28, int $row_limit = 2500): int {
+        $access_token = $this->gsc_get_valid_access_token_for_client($client);
+        $end = new DateTimeImmutable('now', wp_timezone());
+        $start = $end->sub(new DateInterval('P' . max(1, $range_days) . 'D'));
+        $rows = $this->gsc_query_query_metrics((string) $client->gsc_property, $access_token, $start->format('Y-m-d'), $end->format('Y-m-d'), $row_limit, 0);
+        $inserted = 0;
+        foreach ($rows as $row) {
+            $query = sanitize_text_field((string) (($row['keys'][0] ?? '')));
+            if ($query === '') {
+                continue;
+            }
+            $this->db->insert($this->table('gsc_query_metrics'), [
+                'client_id' => (int) $client->id,
+                'site_id' => null,
+                'article_id' => null,
+                'property' => sanitize_text_field((string) $client->gsc_property),
+                'query' => $query,
+                'metric_date' => $end->format('Y-m-d'),
+                'clicks' => (float) ($row['clicks'] ?? 0),
+                'impressions' => (float) ($row['impressions'] ?? 0),
+                'ctr' => (float) ($row['ctr'] ?? 0),
+                'position' => (float) ($row['position'] ?? 0),
+                'created_at' => $this->now(),
+            ]);
+            $inserted++;
+        }
+        return $inserted;
+    }
+
+    private function sync_gsc_query_page_metrics_for_client(object $client, int $range_days = 28, int $row_limit = 2500): int {
+        $access_token = $this->gsc_get_valid_access_token_for_client($client);
+        $end = new DateTimeImmutable('now', wp_timezone());
+        $start = $end->sub(new DateInterval('P' . max(1, $range_days) . 'D'));
+        $rows = $this->gsc_query_query_page_metrics((string) $client->gsc_property, $access_token, $start->format('Y-m-d'), $end->format('Y-m-d'), $row_limit, 0);
+        $inserted = 0;
+        foreach ($rows as $row) {
+            $query = sanitize_text_field((string) (($row['keys'][0] ?? '')));
+            $page_url = (string) (($row['keys'][1] ?? ''));
+            $mapping = $this->infer_article_mapping((int) $client->id, $page_url);
+            if ($query === '' || $mapping['page_url'] === '') {
+                continue;
+            }
+            $this->db->insert($this->table('gsc_query_page_metrics'), [
+                'client_id' => (int) $client->id,
+                'site_id' => $mapping['site_id'] > 0 ? $mapping['site_id'] : null,
+                'article_id' => $mapping['article_id'] > 0 ? $mapping['article_id'] : null,
+                'property' => sanitize_text_field((string) $client->gsc_property),
+                'query' => $query,
+                'page_url' => $mapping['page_url'],
+                'page_path' => $mapping['page_path'],
+                'metric_date' => $end->format('Y-m-d'),
+                'clicks' => (float) ($row['clicks'] ?? 0),
+                'impressions' => (float) ($row['impressions'] ?? 0),
+                'ctr' => (float) ($row['ctr'] ?? 0),
+                'position' => (float) ($row['position'] ?? 0),
+                'matched_via' => $mapping['matched_via'],
+                'created_at' => $this->now(),
+            ]);
+            $inserted++;
+        }
+        return $inserted;
+    }
+
+    private function ga_run_page_report_for_client(object $client, string $start_date, string $end_date): array {
+        $access_token = $this->ga_get_valid_access_token_for_client($client);
+        $property_id = sanitize_text_field((string) ($client->ga_property_id ?? ''));
+        if ($property_id === '') {
+            throw new RuntimeException('GA property ontbreekt.');
+        }
+
+        $response = wp_remote_post('https://analyticsdata.googleapis.com/v1beta/properties/' . rawurlencode($property_id) . ':runReport', [
+            'timeout' => 30,
+            'headers' => ['Authorization' => 'Bearer ' . $access_token, 'Content-Type' => 'application/json'],
+            'body' => wp_json_encode([
+                'dateRanges' => [['startDate' => $start_date, 'endDate' => $end_date]],
+                'dimensions' => [['name' => 'date'], ['name' => 'pageLocation']],
+                'metrics' => [['name' => 'sessions'], ['name' => 'activeUsers'], ['name' => 'views'], ['name' => 'keyEvents'], ['name' => 'engagementRate'], ['name' => 'averageSessionDuration']],
+                'limit' => '100000',
+            ]),
+        ]);
+
+        if (is_wp_error($response)) {
+            throw new RuntimeException('GA4 report request mislukt: ' . $response->get_error_message());
+        }
+        $status = (int) wp_remote_retrieve_response_code($response);
+        $body = json_decode((string) wp_remote_retrieve_body($response), true);
+        if ($status < 200 || $status >= 300) {
+            throw new RuntimeException('GA4 report request mislukt: HTTP ' . $status);
+        }
+        return (array) ($body['rows'] ?? []);
+    }
+
+    private function ga_run_page_source_report_for_client(object $client, string $start_date, string $end_date): array {
+        $access_token = $this->ga_get_valid_access_token_for_client($client);
+        $property_id = sanitize_text_field((string) ($client->ga_property_id ?? ''));
+        $response = wp_remote_post('https://analyticsdata.googleapis.com/v1beta/properties/' . rawurlencode($property_id) . ':runReport', [
+            'timeout' => 30,
+            'headers' => ['Authorization' => 'Bearer ' . $access_token, 'Content-Type' => 'application/json'],
+            'body' => wp_json_encode([
+                'dateRanges' => [['startDate' => $start_date, 'endDate' => $end_date]],
+                'dimensions' => [['name' => 'date'], ['name' => 'pageLocation'], ['name' => 'sessionSourceMedium']],
+                'metrics' => [['name' => 'sessions'], ['name' => 'keyEvents']],
+                'dimensionFilter' => [
+                    'filter' => [
+                        'fieldName' => 'sessionSourceMedium',
+                        'stringFilter' => ['matchType' => 'CONTAINS', 'value' => 'google / organic'],
+                    ],
+                ],
+                'limit' => '100000',
+            ]),
+        ]);
+        if (is_wp_error($response)) {
+            throw new RuntimeException('GA4 source report request mislukt: ' . $response->get_error_message());
+        }
+        $status = (int) wp_remote_retrieve_response_code($response);
+        $body = json_decode((string) wp_remote_retrieve_body($response), true);
+        if ($status < 200 || $status >= 300) {
+            throw new RuntimeException('GA4 source report request mislukt: HTTP ' . $status);
+        }
+        return (array) ($body['rows'] ?? []);
+    }
+
+    private function sync_ga_page_metrics_for_client(object $client, int $range_days = 28): int {
+        $end = new DateTimeImmutable('now', wp_timezone());
+        $start = $end->sub(new DateInterval('P' . max(1, $range_days) . 'D'));
+        $rows = $this->ga_run_page_report_for_client($client, $start->format('Y-m-d'), $end->format('Y-m-d'));
+        $organic_rows = $this->ga_run_page_source_report_for_client($client, $start->format('Y-m-d'), $end->format('Y-m-d'));
+
+        $organic_index = [];
+        foreach ($organic_rows as $row) {
+            $dimensions = (array) ($row['dimensionValues'] ?? []);
+            $metrics = (array) ($row['metricValues'] ?? []);
+            $date = sanitize_text_field((string) ($dimensions[0]['value'] ?? ''));
+            $page_url = (string) ($dimensions[1]['value'] ?? '');
+            $key = $date . '|' . $this->normalize_page_url($page_url);
+            $organic_index[$key] = [
+                'sessions' => (float) ($metrics[0]['value'] ?? 0),
+                'key_events' => (float) ($metrics[1]['value'] ?? 0),
+            ];
+        }
+
+        $inserted = 0;
+        foreach ($rows as $row) {
+            $dimensions = (array) ($row['dimensionValues'] ?? []);
+            $metrics = (array) ($row['metricValues'] ?? []);
+            $metric_date_raw = sanitize_text_field((string) ($dimensions[0]['value'] ?? ''));
+            $metric_date = DateTimeImmutable::createFromFormat('Ymd', $metric_date_raw, wp_timezone());
+            if (!$metric_date) {
+                continue;
+            }
+            $page_url = (string) ($dimensions[1]['value'] ?? '');
+            $mapping = $this->infer_article_mapping((int) $client->id, $page_url);
+            if ($mapping['page_url'] === '') {
+                continue;
+            }
+            $organic_key = $metric_date_raw . '|' . $mapping['page_url'];
+            $organic = $organic_index[$organic_key] ?? ['sessions' => 0.0, 'key_events' => 0.0];
+
+            $this->db->insert($this->table('ga_page_metrics'), [
+                'client_id' => (int) $client->id,
+                'site_id' => $mapping['site_id'] > 0 ? $mapping['site_id'] : null,
+                'article_id' => $mapping['article_id'] > 0 ? $mapping['article_id'] : null,
+                'property_id' => sanitize_text_field((string) $client->ga_property_id),
+                'page_url' => $mapping['page_url'],
+                'page_path' => $mapping['page_path'],
+                'metric_date' => $metric_date->format('Y-m-d'),
+                'sessions' => (float) ($metrics[0]['value'] ?? 0),
+                'active_users' => (float) ($metrics[1]['value'] ?? 0),
+                'views' => (float) ($metrics[2]['value'] ?? 0),
+                'key_events' => (float) ($metrics[3]['value'] ?? 0),
+                'organic_sessions' => (float) ($organic['sessions'] ?? 0),
+                'organic_key_events' => (float) ($organic['key_events'] ?? 0),
+                'engagement_rate' => (float) ($metrics[4]['value'] ?? 0),
+                'avg_session_duration' => (float) ($metrics[5]['value'] ?? 0),
+                'matched_via' => $mapping['matched_via'],
+                'created_at' => $this->now(),
+            ]);
+            $inserted++;
+        }
+
+        $this->db->update($this->table('clients'), ['ga_last_synced_at' => $this->now(), 'updated_at' => $this->now()], ['id' => (int) $client->id]);
+        return $inserted;
+    }
+
+    private function aggregate_gsc_metrics_by_page(int $client_id, string $start_date, string $end_date): array {
+        $rows = $this->db->get_results($this->db->prepare(
+            "SELECT page_url, page_path, metric_date, MAX(site_id) AS site_id, MAX(article_id) AS article_id, SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(ctr) AS ctr, AVG(position) AS position
+             FROM {$this->table('gsc_page_metrics')}
+             WHERE client_id=%d AND metric_date BETWEEN %s AND %s
+             GROUP BY page_path, metric_date",
+            $client_id,
+            $start_date,
+            $end_date
+        ));
+        $out = [];
+        foreach ((array) $rows as $row) {
+            $key = $row->metric_date . '|' . $row->page_path;
+            $out[$key] = [
+                'page_url' => (string) $row->page_url,
+                'page_path' => (string) $row->page_path,
+                'metric_date' => (string) $row->metric_date,
+                'site_id' => (int) ($row->site_id ?? 0),
+                'article_id' => (int) ($row->article_id ?? 0),
+                'gsc_clicks' => (float) ($row->clicks ?? 0),
+                'gsc_impressions' => (float) ($row->impressions ?? 0),
+                'gsc_ctr' => (float) ($row->ctr ?? 0),
+                'gsc_position' => (float) ($row->position ?? 0),
+            ];
+        }
+
+        $query_counts = $this->db->get_results($this->db->prepare(
+            "SELECT page_path, metric_date, COUNT(DISTINCT query) AS query_count
+             FROM {$this->table('gsc_query_page_metrics')}
+             WHERE client_id=%d AND metric_date BETWEEN %s AND %s
+             GROUP BY page_path, metric_date",
+            $client_id,
+            $start_date,
+            $end_date
+        ));
+        foreach ((array) $query_counts as $row) {
+            $key = $row->metric_date . '|' . $row->page_path;
+            if (!isset($out[$key])) {
+                $out[$key] = ['page_url' => '', 'page_path' => (string) $row->page_path, 'metric_date' => (string) $row->metric_date, 'site_id' => 0, 'article_id' => 0, 'gsc_clicks' => 0.0, 'gsc_impressions' => 0.0, 'gsc_ctr' => 0.0, 'gsc_position' => 0.0];
+            }
+            $out[$key]['gsc_query_count'] = (int) ($row->query_count ?? 0);
+        }
+        return $out;
+    }
+
+    private function aggregate_ga_metrics_by_page(int $client_id, string $start_date, string $end_date): array {
+        $rows = $this->db->get_results($this->db->prepare(
+            "SELECT page_url, page_path, metric_date, MAX(site_id) AS site_id, MAX(article_id) AS article_id, SUM(sessions) AS sessions, SUM(active_users) AS active_users, SUM(views) AS views, SUM(key_events) AS key_events, SUM(organic_sessions) AS organic_sessions, SUM(organic_key_events) AS organic_key_events
+             FROM {$this->table('ga_page_metrics')}
+             WHERE client_id=%d AND metric_date BETWEEN %s AND %s
+             GROUP BY page_path, metric_date",
+            $client_id,
+            $start_date,
+            $end_date
+        ));
+        $out = [];
+        foreach ((array) $rows as $row) {
+            $key = $row->metric_date . '|' . $row->page_path;
+            $out[$key] = [
+                'page_url' => (string) $row->page_url,
+                'page_path' => (string) $row->page_path,
+                'metric_date' => (string) $row->metric_date,
+                'site_id' => (int) ($row->site_id ?? 0),
+                'article_id' => (int) ($row->article_id ?? 0),
+                'ga_sessions' => (float) ($row->sessions ?? 0),
+                'ga_active_users' => (float) ($row->active_users ?? 0),
+                'ga_views' => (float) ($row->views ?? 0),
+                'ga_key_events' => (float) ($row->key_events ?? 0),
+                'ga_organic_sessions' => (float) ($row->organic_sessions ?? 0),
+                'ga_organic_key_events' => (float) ($row->organic_key_events ?? 0),
+            ];
+        }
+        return $out;
+    }
+
+    private function overlay_row_from_sources(int $client_id, array $gsc_row, array $ga_row): array {
+        $page_url = (string) ($gsc_row['page_url'] ?? $ga_row['page_url'] ?? '');
+        $metric_date = (string) ($gsc_row['metric_date'] ?? $ga_row['metric_date'] ?? gmdate('Y-m-d'));
+        $mapping = $this->infer_article_mapping($client_id, $page_url);
+        return [
+            'client_id' => $client_id,
+            'site_id' => $mapping['site_id'] > 0 ? $mapping['site_id'] : null,
+            'article_id' => $mapping['article_id'] > 0 ? $mapping['article_id'] : null,
+            'page_url' => $mapping['page_url'] ?: (string) ($gsc_row['page_url'] ?? $ga_row['page_url'] ?? ''),
+            'page_path' => $mapping['page_path'] ?: (string) ($gsc_row['page_path'] ?? $ga_row['page_path'] ?? '/'),
+            'metric_date' => $metric_date,
+            'gsc_clicks' => (float) ($gsc_row['gsc_clicks'] ?? 0),
+            'gsc_impressions' => (float) ($gsc_row['gsc_impressions'] ?? 0),
+            'gsc_ctr' => (float) ($gsc_row['gsc_ctr'] ?? 0),
+            'gsc_position' => (float) ($gsc_row['gsc_position'] ?? 0),
+            'gsc_query_count' => (int) ($gsc_row['gsc_query_count'] ?? 0),
+            'ga_sessions' => (float) ($ga_row['ga_sessions'] ?? 0),
+            'ga_active_users' => (float) ($ga_row['ga_active_users'] ?? 0),
+            'ga_views' => (float) ($ga_row['ga_views'] ?? 0),
+            'ga_key_events' => (float) ($ga_row['ga_key_events'] ?? 0),
+            'ga_organic_sessions' => (float) ($ga_row['ga_organic_sessions'] ?? 0),
+            'ga_organic_key_events' => (float) ($ga_row['ga_organic_key_events'] ?? 0),
+            'matched_via' => $mapping['matched_via'],
+        ];
+    }
+
+    private function compute_overlay_summary_fields(array $overlay_row): array {
+        $overlay_row['overlay_json'] = wp_json_encode([
+            'opportunity_score' => $this->calculate_opportunity_score_from_overlay($overlay_row),
+            'has_traffic' => (float) ($overlay_row['ga_sessions'] ?? 0) > 0,
+            'has_visibility' => (float) ($overlay_row['gsc_impressions'] ?? 0) > 0,
+        ]);
+        return $overlay_row;
+    }
+
+    private function build_page_overlay_for_client(object $client, string $start_date, string $end_date): int {
+        $gsc_rows = $this->aggregate_gsc_metrics_by_page((int) $client->id, $start_date, $end_date);
+        $ga_rows = $this->aggregate_ga_metrics_by_page((int) $client->id, $start_date, $end_date);
+        $keys = array_unique(array_merge(array_keys($gsc_rows), array_keys($ga_rows)));
+        $written = 0;
+        foreach ($keys as $key) {
+            $row = $this->overlay_row_from_sources((int) $client->id, $gsc_rows[$key] ?? [], $ga_rows[$key] ?? []);
+            $row = $this->compute_overlay_summary_fields($row);
+            $existing_id = (int) $this->db->get_var($this->db->prepare(
+                "SELECT id FROM {$this->table('page_overlay_daily')} WHERE client_id=%d AND page_path=%s AND metric_date=%s LIMIT 1",
+                (int) $client->id,
+                (string) $row['page_path'],
+                (string) $row['metric_date']
+            ));
+
+            $payload = $row;
+            $payload['created_at'] = $this->now();
+            $payload['updated_at'] = $this->now();
+
+            if ($existing_id > 0) {
+                unset($payload['created_at']);
+                $this->db->update($this->table('page_overlay_daily'), $payload, ['id' => $existing_id]);
+            } else {
+                $this->db->insert($this->table('page_overlay_daily'), $payload);
+            }
+            $written++;
+        }
+
+        return $written;
+    }
+
+    private function rebuild_page_overlay_for_date_range(int $client_id, string $start_date, string $end_date): int {
+        $client = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('clients')} WHERE id=%d", $client_id));
+        if (!$client) {
+            return 0;
+        }
+        return $this->build_page_overlay_for_client($client, $start_date, $end_date);
+    }
+
+    private function calculate_signal_priority_score(array $context): float {
+        $impressions = (float) ($context['impressions'] ?? 0);
+        $ctr_gap = max(0, (float) ($context['ctr_gap'] ?? 0));
+        $decay = max(0, (float) ($context['decay_magnitude'] ?? 0));
+        $sessions = (float) ($context['sessions'] ?? 0);
+        $key_events = (float) ($context['key_events'] ?? 0);
+        $confidence = max(0.3, min(1.0, (float) ($context['confidence'] ?? 0.8)));
+        return round((($impressions * 0.03) + ($ctr_gap * 100) + ($decay * 2.5) + ($sessions * 0.04) + ($key_events * 0.12)) * $confidence, 4);
+    }
+
+    private function calculate_refresh_priority_score(array $overlay_row): float {
+        $context = [
+            'impressions' => (float) ($overlay_row['gsc_impressions'] ?? 0),
+            'ctr_gap' => max(0, 0.03 - (float) ($overlay_row['gsc_ctr'] ?? 0)),
+            'decay_magnitude' => max(0, 15 - (float) ($overlay_row['gsc_position'] ?? 0)),
+            'sessions' => (float) ($overlay_row['ga_sessions'] ?? 0),
+            'key_events' => (float) ($overlay_row['ga_key_events'] ?? 0),
+            'confidence' => 0.85,
+        ];
+        return $this->calculate_signal_priority_score($context);
+    }
+
+    private function calculate_opportunity_score_from_overlay(array $overlay_row): float {
+        return $this->calculate_signal_priority_score([
+            'impressions' => (float) ($overlay_row['gsc_impressions'] ?? 0),
+            'ctr_gap' => max(0, 0.05 - (float) ($overlay_row['gsc_ctr'] ?? 0)),
+            'sessions' => (float) ($overlay_row['ga_sessions'] ?? 0),
+            'key_events' => (float) ($overlay_row['ga_key_events'] ?? 0),
+            'confidence' => (float) (($overlay_row['gsc_query_count'] ?? 0) > 0 ? 1 : 0.6),
+        ]);
+    }
+
+    private function upsert_feedback_signal(array $signal): void {
+        $existing_id = (int) $this->db->get_var($this->db->prepare(
+            "SELECT id FROM {$this->table('feedback_signals')} WHERE client_id=%d AND signal_type=%s AND page_url=%s AND status IN ('open','ignored') ORDER BY id DESC LIMIT 1",
+            (int) $signal['client_id'],
+            (string) $signal['signal_type'],
+            (string) $signal['page_url']
+        ));
+
+        if ($existing_id > 0) {
+            $this->db->update($this->table('feedback_signals'), [
+                'severity' => $signal['severity'],
+                'priority_score' => $signal['priority_score'],
+                'title' => $signal['title'],
+                'description' => $signal['description'],
+                'recommended_action' => $signal['recommended_action'],
+                'evidence_json' => $signal['evidence_json'],
+                'last_detected_at' => $this->now(),
+                'updated_at' => $this->now(),
+            ], ['id' => $existing_id]);
+            return;
+        }
+
+        $signal['first_detected_at'] = $this->now();
+        $signal['last_detected_at'] = $this->now();
+        $signal['created_at'] = $this->now();
+        $signal['updated_at'] = $this->now();
+        $this->db->insert($this->table('feedback_signals'), $signal);
+    }
+
+    private function generate_feedback_signals_for_client(object $client): int {
+        $rows = $this->db->get_results($this->db->prepare("SELECT * FROM {$this->table('page_overlay_daily')} WHERE client_id=%d ORDER BY metric_date DESC LIMIT 3000", (int) $client->id));
+        $count = 0;
+        foreach ((array) $rows as $row) {
+            $impressions = (float) ($row->gsc_impressions ?? 0);
+            $position = (float) ($row->gsc_position ?? 0);
+            $ctr = (float) ($row->gsc_ctr ?? 0);
+            $sessions = (float) ($row->ga_sessions ?? 0);
+            $key_events = (float) ($row->ga_key_events ?? 0);
+
+            if ($impressions >= 200 && $position >= 2 && $position <= 12 && $ctr < 0.02) {
+                $this->upsert_feedback_signal([
+                    'client_id' => (int) $client->id,
+                    'site_id' => (int) ($row->site_id ?? 0) ?: null,
+                    'article_id' => (int) ($row->article_id ?? 0) ?: null,
+                    'page_url' => (string) $row->page_url,
+                    'signal_type' => 'low_ctr',
+                    'severity' => 'high',
+                    'status' => 'open',
+                    'priority_score' => $this->calculate_signal_priority_score(['impressions' => $impressions, 'ctr_gap' => 0.03 - $ctr, 'sessions' => $sessions]),
+                    'title' => 'Lage CTR op zichtbare pagina',
+                    'description' => 'Veel impressies, maar CTR blijft achter in een top-12 positieband.',
+                    'recommended_action' => 'optimize_title_meta',
+                    'evidence_json' => wp_json_encode(['metric_date' => $row->metric_date, 'impressions' => $impressions, 'ctr' => $ctr, 'position' => $position]),
+                ]);
+                $count++;
+            }
+
+            if ($position >= 6 && $position <= 20 && $impressions >= 150) {
+                $this->upsert_feedback_signal([
+                    'client_id' => (int) $client->id,
+                    'site_id' => (int) ($row->site_id ?? 0) ?: null,
+                    'article_id' => (int) ($row->article_id ?? 0) ?: null,
+                    'page_url' => (string) $row->page_url,
+                    'signal_type' => 'striking_distance',
+                    'severity' => 'medium',
+                    'status' => 'open',
+                    'priority_score' => $this->calculate_signal_priority_score(['impressions' => $impressions, 'ctr_gap' => 0.025 - $ctr, 'sessions' => $sessions]),
+                    'title' => 'Striking distance kans',
+                    'description' => 'Pagina staat dichtbij pagina-1 doorbraak en verdient een gerichte refresh.',
+                    'recommended_action' => 'refresh_article',
+                    'evidence_json' => wp_json_encode(['metric_date' => $row->metric_date, 'impressions' => $impressions, 'position' => $position]),
+                ]);
+                $count++;
+            }
+
+            if ($sessions > 0 && $key_events <= 0) {
+                $this->upsert_feedback_signal([
+                    'client_id' => (int) $client->id,
+                    'site_id' => (int) ($row->site_id ?? 0) ?: null,
+                    'article_id' => (int) ($row->article_id ?? 0) ?: null,
+                    'page_url' => (string) $row->page_url,
+                    'signal_type' => 'ranking_without_business_outcome',
+                    'severity' => 'medium',
+                    'status' => 'open',
+                    'priority_score' => $this->calculate_signal_priority_score(['sessions' => $sessions, 'key_events' => 0, 'confidence' => 0.7]),
+                    'title' => 'Traffic zonder business outcome',
+                    'description' => 'Pagina heeft verkeer maar geen key events.',
+                    'recommended_action' => 'conversion_review',
+                    'evidence_json' => wp_json_encode(['metric_date' => $row->metric_date, 'sessions' => $sessions, 'key_events' => $key_events]),
+                ]);
+                $count++;
+            }
+        }
+        return $count;
+    }
+
+    private function generate_refresh_candidates_for_client(object $client): int {
+        $rows = $this->db->get_results($this->db->prepare("SELECT * FROM {$this->table('page_overlay_daily')} WHERE client_id=%d AND article_id IS NOT NULL ORDER BY metric_date DESC LIMIT 1000", (int) $client->id));
+        $inserted = 0;
+        foreach ((array) $rows as $row) {
+            $priority = $this->calculate_refresh_priority_score((array) $row);
+            if ($priority < 30) {
+                continue;
+            }
+            $exists = (int) $this->db->get_var($this->db->prepare("SELECT id FROM {$this->table('refresh_candidates')} WHERE client_id=%d AND article_id=%d AND status IN ('queued','in_progress') LIMIT 1", (int) $client->id, (int) $row->article_id));
+            if ($exists > 0) {
+                continue;
+            }
+            $this->db->insert($this->table('refresh_candidates'), [
+                'client_id' => (int) $client->id,
+                'site_id' => (int) ($row->site_id ?? 0),
+                'article_id' => (int) ($row->article_id ?? 0),
+                'page_url' => (string) $row->page_url,
+                'priority_score' => $priority,
+                'reason_primary' => 'refresh_candidate',
+                'reason_secondary' => (float) ($row->gsc_ctr ?? 0) < 0.02 ? 'low_ctr' : 'decay',
+                'suggested_scope' => 'title_meta_intro_sections',
+                'recommendation_json' => wp_json_encode(['gsc_position' => (float) ($row->gsc_position ?? 0), 'gsc_impressions' => (float) ($row->gsc_impressions ?? 0), 'ga_sessions' => (float) ($row->ga_sessions ?? 0)]),
+                'status' => 'queued',
+                'created_at' => $this->now(),
+                'updated_at' => $this->now(),
+            ]);
+            $inserted++;
+        }
+        return $inserted;
+    }
+
+    public function mark_signal_resolved(): void {
+        $this->verify_admin_nonce('sch_mark_signal');
+        $id = (int) ($_POST['signal_id'] ?? 0);
+        if ($id > 0) {
+            $this->db->update($this->table('feedback_signals'), ['status' => 'resolved', 'resolved_at' => $this->now(), 'updated_at' => $this->now()], ['id' => $id]);
+        }
+        $this->redirect_with_message('sch-feedback', 'Signaal gemarkeerd als resolved.');
+    }
+
+    public function mark_signal_ignored(): void {
+        $this->verify_admin_nonce('sch_mark_signal');
+        $id = (int) ($_POST['signal_id'] ?? 0);
+        if ($id > 0) {
+            $this->db->update($this->table('feedback_signals'), ['status' => 'ignored', 'updated_at' => $this->now()], ['id' => $id]);
+        }
+        $this->redirect_with_message('sch-feedback', 'Signaal gemarkeerd als ignored.');
+    }
+
+    private function create_job_from_signal(int $client_id, int $article_id, string $job_type, array $payload): int {
+        $keyword_id = (int) $this->db->get_var($this->db->prepare("SELECT keyword_id FROM {$this->table('articles')} WHERE id=%d", $article_id));
+        if ($keyword_id <= 0) {
+            return 0;
+        }
+        $article = $this->db->get_row($this->db->prepare("SELECT site_id FROM {$this->table('articles')} WHERE id=%d", $article_id));
+        $ok = $this->db->insert($this->table('jobs'), [
+            'keyword_id' => $keyword_id,
+            'client_id' => $client_id,
+            'site_id' => (int) ($article->site_id ?? 0) ?: null,
+            'job_type' => $job_type,
+            'status' => 'queued',
+            'attempts' => 0,
+            'payload' => wp_json_encode($payload),
+            'created_at' => $this->now(),
+            'updated_at' => $this->now(),
+        ]);
+        return $ok ? (int) $this->db->insert_id : 0;
+    }
+
+    private function create_refresh_job_for_article(int $client_id, int $article_id, array $context = []): int { return $this->create_job_from_signal($client_id, $article_id, 'refresh_article', $context); }
+    private function create_title_meta_optimization_job(int $client_id, int $article_id, array $context = []): int { return $this->create_job_from_signal($client_id, $article_id, 'optimize_title_meta', $context); }
+    private function create_internal_linking_job(int $client_id, int $article_id, array $context = []): int { return $this->create_job_from_signal($client_id, $article_id, 'add_internal_links', $context); }
+    private function create_supporting_content_job_from_signal(int $client_id, int $article_id, array $context = []): int { return $this->create_job_from_signal($client_id, $article_id, 'create_supporting_content', $context); }
+
+    private function sync_all_feedback_data_for_client(object $client, int $range_days = 28): array {
+        $range_days = max(1, $range_days);
+        $start = (new DateTimeImmutable('now', wp_timezone()))->sub(new DateInterval('P' . $range_days . 'D'))->format('Y-m-d');
+        $end = (new DateTimeImmutable('now', wp_timezone()))->format('Y-m-d');
+
+        $gsc_page = $this->sync_gsc_page_metrics_for_client($client, $range_days, 2500);
+        $gsc_query = $this->sync_gsc_query_metrics_for_client($client, $range_days, 2500);
+        $gsc_query_page = $this->sync_gsc_query_page_metrics_for_client($client, $range_days, 2500);
+        $ga = 0;
+        if ($this->client_has_ga_connection($client) && !empty($client->ga_property_id)) {
+            $ga = $this->sync_ga_page_metrics_for_client($client, $range_days);
+        }
+        $overlay = $this->build_page_overlay_for_client($client, $start, $end);
+        $signals = $this->generate_feedback_signals_for_client($client);
+        $refresh = $this->generate_refresh_candidates_for_client($client);
+
+        return compact('gsc_page', 'gsc_query', 'gsc_query_page', 'ga', 'overlay', 'signals', 'refresh');
+    }
+
+    public function run_ga_auto_sync(): void {
+        if (!$this->is_ga_integration_enabled() || get_option(self::OPTION_GA_AUTO_SYNC, '0') !== '1') {
+            return;
+        }
+        $clients = $this->db->get_results("SELECT * FROM {$this->table('clients')} WHERE ga_property_id<>'' AND ga_token_data IS NOT NULL");
+        foreach ((array) $clients as $client) {
+            try {
+                $this->sync_ga_page_metrics_for_client($client, 28);
+            } catch (Throwable $e) {
+                $this->log('error', 'ga_sync', 'GA auto sync mislukt voor klant', ['client_id' => (int) $client->id, 'error' => $e->getMessage()]);
+            }
+        }
+    }
+
+    public function run_feedback_auto_sync(): void {
+        if (get_option(self::OPTION_FEEDBACK_AUTO_SYNC, '0') !== '1') {
+            return;
+        }
+        $clients = $this->db->get_results("SELECT * FROM {$this->table('clients')} WHERE gsc_property<>'' AND gsc_token_data IS NOT NULL");
+        foreach ((array) $clients as $client) {
+            try {
+                $this->sync_all_feedback_data_for_client($client, 28);
+            } catch (Throwable $e) {
+                $this->log('error', 'feedback_sync', 'Feedback auto sync mislukt voor klant', ['client_id' => (int) $client->id, 'error' => $e->getMessage()]);
+            }
+        }
+    }
+
+    public function render_performance(): void {
+        $client_id = (int) ($_GET['client_id'] ?? 0);
+        $period = max(7, min(180, (int) ($_GET['period'] ?? 28)));
+        $rows = [];
+        if ($client_id > 0) {
+            $rows = $this->db->get_results($this->db->prepare(
+                "SELECT page_url, page_path, SUM(gsc_clicks) AS gsc_clicks, SUM(gsc_impressions) AS gsc_impressions, AVG(gsc_ctr) AS gsc_ctr, AVG(gsc_position) AS gsc_position, SUM(ga_sessions) AS ga_sessions, SUM(ga_active_users) AS ga_active_users, SUM(ga_views) AS ga_views, SUM(ga_key_events) AS ga_key_events, SUM(ga_organic_sessions) AS ga_organic_sessions
+                 FROM {$this->table('page_overlay_daily')}
+                 WHERE client_id=%d AND metric_date>=DATE_SUB(CURDATE(), INTERVAL %d DAY)
+                 GROUP BY page_path ORDER BY ga_sessions DESC, gsc_clicks DESC LIMIT 500",
+                $client_id,
+                $period
+            ));
+        }
+        $clients = $this->db->get_results("SELECT id, name FROM {$this->table('clients')} ORDER BY name ASC");
+        ?>
+        <div class="wrap">
+            <h1>Performance</h1>
+            <?php $this->render_admin_notice(); ?>
+            <form method="get" style="margin-bottom:15px;">
+                <input type="hidden" name="page" value="sch-performance">
+                <select name="client_id"><option value="0">-- kies klant --</option><?php foreach ((array) $clients as $client) : ?><option value="<?php echo (int) $client->id; ?>" <?php selected($client_id, (int) $client->id); ?>><?php echo esc_html((string) $client->name); ?></option><?php endforeach; ?></select>
+                <select name="period"><?php foreach ([7, 28, 90, 180] as $p) : ?><option value="<?php echo (int) $p; ?>" <?php selected($period, $p); ?>><?php echo (int) $p; ?> dagen</option><?php endforeach; ?></select>
+                <button class="button button-primary">Filter</button>
+            </form>
+            <table class="widefat striped"><thead><tr><th>Pagina</th><th>Sessions</th><th>Active users</th><th>Views</th><th>Key events</th><th>Organic sessions</th><th>Clicks</th><th>Impr.</th><th>CTR</th><th>Positie</th></tr></thead><tbody>
+            <?php if ($rows) : foreach ($rows as $row) : ?><tr><td><code><?php echo esc_html((string) $row->page_path); ?></code></td><td><?php echo esc_html((string) round((float) $row->ga_sessions, 0)); ?></td><td><?php echo esc_html((string) round((float) $row->ga_active_users, 0)); ?></td><td><?php echo esc_html((string) round((float) $row->ga_views, 0)); ?></td><td><?php echo esc_html((string) round((float) $row->ga_key_events, 2)); ?></td><td><?php echo esc_html((string) round((float) $row->ga_organic_sessions, 0)); ?></td><td><?php echo esc_html((string) round((float) $row->gsc_clicks, 0)); ?></td><td><?php echo esc_html((string) round((float) $row->gsc_impressions, 0)); ?></td><td><?php echo esc_html((string) round((float) $row->gsc_ctr * 100, 2)); ?>%</td><td><?php echo esc_html((string) round((float) $row->gsc_position, 2)); ?></td></tr><?php endforeach; else : ?><tr><td colspan="10">Geen data voor selectie.</td></tr><?php endif; ?>
+            </tbody></table>
+        </div>
+        <?php
+    }
+
+    public function render_page_intelligence(): void {
+        $client_id = (int) ($_GET['client_id'] ?? 0);
+        $page_path = sanitize_text_field((string) ($_GET['page_path'] ?? ''));
+        $history = [];
+        $queries = [];
+        $mapping = null;
+        if ($client_id > 0 && $page_path !== '') {
+            $history = $this->db->get_results($this->db->prepare("SELECT * FROM {$this->table('page_overlay_daily')} WHERE client_id=%d AND page_path=%s ORDER BY metric_date DESC LIMIT 90", $client_id, $page_path));
+            $queries = $this->db->get_results($this->db->prepare("SELECT query, SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(position) AS position FROM {$this->table('gsc_query_page_metrics')} WHERE client_id=%d AND page_path=%s GROUP BY query ORDER BY impressions DESC LIMIT 50", $client_id, $page_path));
+            $mapping = $history ? $history[0] : null;
+        }
+        ?>
+        <div class="wrap"><h1>Page Intelligence</h1><?php $this->render_admin_notice(); ?>
+            <form method="get"><input type="hidden" name="page" value="sch-page-intelligence"><label>Klant ID <input type="number" name="client_id" value="<?php echo (int) $client_id; ?>"></label> <label>Page path <input type="text" name="page_path" value="<?php echo esc_attr($page_path); ?>" style="min-width:320px;"></label> <button class="button button-primary">Open</button></form>
+            <?php if ($mapping) : ?><p><strong>Linked article:</strong> <?php echo (int) ($mapping->article_id ?? 0); ?> | <strong>Matched via:</strong> <?php echo esc_html((string) ($mapping->matched_via ?? '')); ?></p><?php endif; ?>
+            <h2>Dagelijkse historie</h2><table class="widefat striped"><thead><tr><th>Datum</th><th>Clicks</th><th>Impressions</th><th>CTR</th><th>Positie</th><th>Sessions</th><th>Views</th><th>Key events</th></tr></thead><tbody><?php if ($history) : foreach ($history as $row) : ?><tr><td><?php echo esc_html((string) $row->metric_date); ?></td><td><?php echo esc_html((string) round((float) $row->gsc_clicks)); ?></td><td><?php echo esc_html((string) round((float) $row->gsc_impressions)); ?></td><td><?php echo esc_html((string) round((float) $row->gsc_ctr * 100, 2)); ?>%</td><td><?php echo esc_html((string) round((float) $row->gsc_position, 2)); ?></td><td><?php echo esc_html((string) round((float) $row->ga_sessions)); ?></td><td><?php echo esc_html((string) round((float) $row->ga_views)); ?></td><td><?php echo esc_html((string) round((float) $row->ga_key_events, 2)); ?></td></tr><?php endforeach; else : ?><tr><td colspan="8">Geen data.</td></tr><?php endif; ?></tbody></table>
+            <h2>Top queries</h2><table class="widefat striped"><thead><tr><th>Query</th><th>Clicks</th><th>Impressions</th><th>Positie</th></tr></thead><tbody><?php if ($queries) : foreach ($queries as $query) : ?><tr><td><?php echo esc_html((string) $query->query); ?></td><td><?php echo esc_html((string) round((float) $query->clicks)); ?></td><td><?php echo esc_html((string) round((float) $query->impressions)); ?></td><td><?php echo esc_html((string) round((float) $query->position, 2)); ?></td></tr><?php endforeach; else : ?><tr><td colspan="4">Geen query data.</td></tr><?php endif; ?></tbody></table>
+        </div>
+        <?php
+    }
+
+    public function render_feedback(): void {
+        $client_id = (int) ($_GET['client_id'] ?? 0);
+        $status = sanitize_key((string) ($_GET['status'] ?? 'open'));
+        if (!in_array($status, ['open', 'ignored', 'resolved'], true)) {
+            $status = 'open';
+        }
+        $sql = "SELECT * FROM {$this->table('feedback_signals')} WHERE status=%s";
+        $params = [$status];
+        if ($client_id > 0) {
+            $sql .= " AND client_id=%d";
+            $params[] = $client_id;
+        }
+        $sql .= " ORDER BY priority_score DESC, id DESC LIMIT 500";
+        $rows = $this->db->get_results($this->db->prepare($sql, ...$params));
+        ?>
+        <div class="wrap"><h1>Feedback</h1><?php $this->render_admin_notice(); ?>
+            <form method="get"><input type="hidden" name="page" value="sch-feedback"><label>Klant ID <input type="number" name="client_id" value="<?php echo (int) $client_id; ?>"></label> <label>Status <select name="status"><?php foreach (['open', 'ignored', 'resolved'] as $s) : ?><option value="<?php echo esc_attr($s); ?>" <?php selected($status, $s); ?>><?php echo esc_html($s); ?></option><?php endforeach; ?></select></label> <button class="button button-primary">Filter</button></form>
+            <table class="widefat striped"><thead><tr><th>Type</th><th>Severity</th><th>Status</th><th>Priority</th><th>Titel</th><th>Actie</th><th>Pagina</th><th>Actions</th></tr></thead><tbody>
+            <?php if ($rows) : foreach ($rows as $row) : ?><tr><td><?php echo esc_html((string) $row->signal_type); ?></td><td><?php echo esc_html((string) $row->severity); ?></td><td><?php echo esc_html((string) $row->status); ?></td><td><?php echo esc_html((string) $row->priority_score); ?></td><td><?php echo esc_html((string) $row->title); ?></td><td><?php echo esc_html((string) $row->recommended_action); ?></td><td><code><?php echo esc_html($this->normalize_page_path((string) $row->page_url)); ?></code></td><td>
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_signal'); ?><input type="hidden" name="action" value="sch_mark_signal_resolved"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button">Resolve</button></form>
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_signal'); ?><input type="hidden" name="action" value="sch_mark_signal_ignored"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button">Ignore</button></form>
+            </td></tr><?php endforeach; else : ?><tr><td colspan="8">Geen signalen gevonden.</td></tr><?php endif; ?></tbody></table>
+        </div>
+        <?php
+    }
+
+    public function render_refresh_queue(): void {
+        $client_id = (int) ($_GET['client_id'] ?? 0);
+        $sql = "SELECT * FROM {$this->table('refresh_candidates')}";
+        $params = [];
+        if ($client_id > 0) {
+            $sql .= " WHERE client_id=%d";
+            $params[] = $client_id;
+        }
+        $sql .= " ORDER BY priority_score DESC, id DESC LIMIT 500";
+        $rows = $params ? $this->db->get_results($this->db->prepare($sql, ...$params)) : $this->db->get_results($sql);
+        ?>
+        <div class="wrap"><h1>Refresh Queue</h1><?php $this->render_admin_notice(); ?>
+            <form method="get"><input type="hidden" name="page" value="sch-refresh-queue"><label>Klant ID <input type="number" name="client_id" value="<?php echo (int) $client_id; ?>"></label> <button class="button button-primary">Filter</button></form>
+            <table class="widefat striped"><thead><tr><th>Artikel</th><th>Pagina</th><th>Priority</th><th>Reason</th><th>Scope</th><th>Status</th></tr></thead><tbody><?php if ($rows) : foreach ($rows as $row) : ?><tr><td><?php echo (int) $row->article_id; ?></td><td><code><?php echo esc_html($this->normalize_page_path((string) $row->page_url)); ?></code></td><td><?php echo esc_html((string) $row->priority_score); ?></td><td><?php echo esc_html((string) $row->reason_primary . ' / ' . $row->reason_secondary); ?></td><td><?php echo esc_html((string) $row->suggested_scope); ?></td><td><?php echo esc_html((string) $row->status); ?></td></tr><?php endforeach; else : ?><tr><td colspan="6">Geen refresh candidates.</td></tr><?php endif; ?></tbody></table>
+        </div>
+        <?php
     }
 
     private function sanitize_gsc_range_days(int $range_days): int {
