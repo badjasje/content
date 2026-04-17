@@ -1383,12 +1383,12 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
     }
 
-    private function redirect_with_message(string $page, string $message, string $type = 'success'): void {
-        $url = add_query_arg([
+    private function redirect_with_message(string $page, string $message, string $type = 'success', array $extra_args = []): void {
+        $url = add_query_arg(array_merge([
             'page' => $page,
             'sch_message' => rawurlencode($message),
             'sch_message_type' => rawurlencode($type),
-        ], admin_url('admin.php'));
+        ], $extra_args), admin_url('admin.php'));
 
         wp_safe_redirect($url);
         exit;
@@ -1899,10 +1899,13 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 ]);
                 $this->redirect_with_message('sch-clients', 'Klant opslaan mislukt. Check logs.', 'error');
             }
+            $id = (int) $this->db->insert_id;
         }
 
         $this->vlog('client', 'Klant opgeslagen', $data);
-        $this->redirect_with_message('sch-clients', 'Klant opgeslagen.');
+        $this->redirect_with_message('sch-clients', 'Klant opgeslagen.', 'success', [
+            'edit' => $id,
+        ]);
     }
 
     public function handle_register_receiver_blog(): void {
