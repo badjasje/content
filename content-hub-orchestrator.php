@@ -143,6 +143,8 @@ final class SCH_Orchestrator {
         .sch-inline-form{display:inline}
         .sch-muted{color:#646970}
         .sch-code{font-family:monospace}
+        .sch-editorial-content{max-height:320px;overflow:auto;padding:10px;background:#fff;border:1px solid #dcdcde}
+        .sch-editorial-content details{margin:0}
         @media (max-width:1100px){.sch-two-col{grid-template-columns:1fr}.sch-grid-stats{grid-template-columns:1fr 1fr}}
         ';
         wp_register_style('sch-admin-inline', false);
@@ -1034,6 +1036,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 a.title,
                 a.slug,
                 a.meta_description,
+                a.content,
                 a.created_at,
                 a.updated_at,
                 a.site_id,
@@ -1069,6 +1072,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                         <th>Blog</th>
                         <th>Keyword</th>
                         <th>Omschrijving</th>
+                        <th>Content check</th>
                         <th>Aangemaakt</th>
                         <th>Actie</th>
                     </tr>
@@ -1096,13 +1100,23 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                             </td>
                             <td><?php echo esc_html((string) ($row->main_keyword ?: '')); ?></td>
                             <td><?php echo esc_html((string) $row->meta_description); ?></td>
+                            <td>
+                                <?php if (!empty($row->content)) : ?>
+                                    <details>
+                                        <summary>Bekijk artikel</summary>
+                                        <div class="sch-editorial-content"><?php echo wp_kses_post((string) $row->content); ?></div>
+                                    </details>
+                                <?php else : ?>
+                                    <span class="sch-muted">Geen content gevonden.</span>
+                                <?php endif; ?>
+                            </td>
                             <td><?php echo esc_html((string) $row->created_at); ?></td>
                             <td>
                                 <button class="button button-primary" type="submit" name="publish_now_article_id" value="<?php echo (int) $row->id; ?>">Publiceren</button>
                             </td>
                         </tr>
                     <?php endforeach; else : ?>
-                        <tr><td colspan="8">Geen artikelen die op redactionele approval wachten.</td></tr>
+                        <tr><td colspan="9">Geen artikelen die op redactionele approval wachten.</td></tr>
                     <?php endif; ?>
                     </tbody>
                 </table>
