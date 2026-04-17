@@ -13,9 +13,10 @@ if (!defined('ABSPATH')) {
 final class SCH_Orchestrator {
     const VERSION = '0.5.5';
     const CRON_HOOK = 'sch_orchestrator_minute_worker';
+    const GSC_CRON_HOOK = 'sch_orchestrator_gsc_sync_worker';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
-    const DB_VERSION = '0.5.8';
+    const DB_VERSION = '0.5.9';
     const EXACT_MATCH_THRESHOLD_PERCENT = 30;
 
     const OPTION_OPENAI_API_KEY = 'sch_openai_api_key';
@@ -38,6 +39,12 @@ final class SCH_Orchestrator {
     const OPTION_RANDOM_ONLY_ACTIVE_SITES = 'sch_random_only_active_sites';
     const OPTION_RANDOM_ALLOWED_CATEGORIES = 'sch_random_allowed_categories';
     const OPTION_RANDOM_DUPLICATE_WINDOW_DAYS = 'sch_random_duplicate_window_days';
+    const OPTION_GSC_ENABLED = 'sch_gsc_enabled';
+    const OPTION_GSC_CLIENT_ID = 'sch_gsc_client_id';
+    const OPTION_GSC_CLIENT_SECRET = 'sch_gsc_client_secret';
+    const OPTION_GSC_DEFAULT_SYNC_RANGE = 'sch_gsc_default_sync_range';
+    const OPTION_GSC_DEFAULT_ROW_LIMIT = 'sch_gsc_default_row_limit';
+    const OPTION_GSC_AUTO_SYNC = 'sch_gsc_auto_sync';
 
 
     private static ?SCH_Orchestrator $instance = null;
@@ -64,6 +71,7 @@ final class SCH_Orchestrator {
 
         add_filter('cron_schedules', [$this, 'add_cron_schedule']);
         add_action(self::CRON_HOOK, [$this, 'run_worker']);
+        add_action(self::GSC_CRON_HOOK, [$this, 'run_gsc_auto_sync']);
 
         add_action('admin_menu', [$this, 'admin_menu']);
         add_action('admin_post_sch_save_client', [$this, 'handle_save_client']);
@@ -80,19 +88,28 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_delete_site', [$this, 'handle_delete_site']);
         add_action('admin_post_sch_delete_keyword', [$this, 'handle_delete_keyword']);
         add_action('admin_post_sch_discover_keywords', [$this, 'handle_discover_keywords']);
+        add_action('admin_post_sch_gsc_connect', [$this, 'handle_gsc_connect']);
+        add_action('admin_post_sch_gsc_oauth_callback', [$this, 'handle_gsc_oauth_callback']);
+        add_action('admin_post_sch_gsc_disconnect', [$this, 'handle_gsc_disconnect']);
+        add_action('admin_post_sch_gsc_fetch_properties', [$this, 'handle_gsc_fetch_properties']);
+        add_action('admin_post_sch_gsc_save_property', [$this, 'handle_gsc_save_property']);
+        add_action('admin_post_sch_gsc_sync_keywords', [$this, 'handle_gsc_sync_keywords']);
         add_action('admin_post_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
         add_action('admin_post_nopriv_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
 
         add_action('admin_enqueue_scripts', [$this, 'admin_assets']);
+        $this->schedule_gsc_cron();
     }
 
     public function activate(): void {
         $this->create_tables();
         $this->schedule_cron();
+        $this->schedule_gsc_cron();
     }
 
     public function deactivate(): void {
         wp_clear_scheduled_hook(self::CRON_HOOK);
+        wp_clear_scheduled_hook(self::GSC_CRON_HOOK);
     }
 
     public function add_cron_schedule(array $schedules): array {
@@ -163,6 +180,12 @@ final class SCH_Orchestrator {
         }
     }
 
+    private function schedule_gsc_cron(): void {
+        if (!wp_next_scheduled(self::GSC_CRON_HOOK)) {
+            wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', self::GSC_CRON_HOOK);
+        }
+    }
+
     private function table(string $name): string {
         return $this->db->prefix . 'sch_' . $name;
     }
@@ -212,6 +235,11 @@ final class SCH_Orchestrator {
             link_targets LONGTEXT NULL,
             research_urls LONGTEXT NULL,
             max_posts_per_month INT UNSIGNED NOT NULL DEFAULT 0,
+            gsc_property VARCHAR(255) NOT NULL DEFAULT '',
+            gsc_token_data LONGTEXT NULL,
+            gsc_token_expires_at DATETIME NULL,
+            gsc_connected_email VARCHAR(191) NOT NULL DEFAULT '',
+            gsc_last_synced_at DATETIME NULL,
             is_active TINYINT(1) NOT NULL DEFAULT 1,
             created_at DATETIME NOT NULL,
             updated_at DATETIME NOT NULL,
@@ -335,6 +363,11 @@ final class SCH_Orchestrator {
 
         $this->maybe_add_column($clients, 'research_urls', "ALTER TABLE {$clients} ADD COLUMN research_urls LONGTEXT NULL AFTER link_targets");
         $this->maybe_add_column($clients, 'max_posts_per_month', "ALTER TABLE {$clients} ADD COLUMN max_posts_per_month INT UNSIGNED NOT NULL DEFAULT 0 AFTER research_urls");
+        $this->maybe_add_column($clients, 'gsc_property', "ALTER TABLE {$clients} ADD COLUMN gsc_property VARCHAR(255) NOT NULL DEFAULT '' AFTER max_posts_per_month");
+        $this->maybe_add_column($clients, 'gsc_token_data', "ALTER TABLE {$clients} ADD COLUMN gsc_token_data LONGTEXT NULL AFTER gsc_property");
+        $this->maybe_add_column($clients, 'gsc_token_expires_at', "ALTER TABLE {$clients} ADD COLUMN gsc_token_expires_at DATETIME NULL AFTER gsc_token_data");
+        $this->maybe_add_column($clients, 'gsc_connected_email', "ALTER TABLE {$clients} ADD COLUMN gsc_connected_email VARCHAR(191) NOT NULL DEFAULT '' AFTER gsc_token_expires_at");
+        $this->maybe_add_column($clients, 'gsc_last_synced_at', "ALTER TABLE {$clients} ADD COLUMN gsc_last_synced_at DATETIME NULL AFTER gsc_connected_email");
         $this->maybe_add_column($sites, 'default_status', "ALTER TABLE {$sites} ADD COLUMN default_status VARCHAR(20) NOT NULL DEFAULT 'draft' AFTER receiver_secret");
         $this->maybe_add_column($sites, 'default_category', "ALTER TABLE {$sites} ADD COLUMN default_category VARCHAR(191) NOT NULL DEFAULT '' AFTER default_status");
         $this->maybe_add_column($sites, 'max_posts_per_day', "ALTER TABLE {$sites} ADD COLUMN max_posts_per_day INT UNSIGNED NOT NULL DEFAULT 3 AFTER default_category");
@@ -365,6 +398,12 @@ final class SCH_Orchestrator {
         add_option(self::OPTION_RANDOM_ONLY_ACTIVE_SITES, '1');
         add_option(self::OPTION_RANDOM_ALLOWED_CATEGORIES, wp_json_encode([]));
         add_option(self::OPTION_RANDOM_DUPLICATE_WINDOW_DAYS, '30');
+        add_option(self::OPTION_GSC_ENABLED, '0');
+        add_option(self::OPTION_GSC_CLIENT_ID, '');
+        add_option(self::OPTION_GSC_CLIENT_SECRET, '');
+        add_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28');
+        add_option(self::OPTION_GSC_DEFAULT_ROW_LIMIT, '250');
+        add_option(self::OPTION_GSC_AUTO_SYNC, '0');
 
         update_option(self::OPTION_DB_VERSION, self::DB_VERSION);
     }
@@ -503,14 +542,85 @@ final class SCH_Orchestrator {
                             <p class="sch-muted">Deze pagina’s worden via GET opgehaald voor keyword discovery en diepere contentaansturing.</p>
                         </td>
                     </tr>
+                    <tr>
+                        <th>Google Search Console</th>
+                        <td>
+                            <?php if ($edit && $this->is_gsc_integration_enabled()) : ?>
+                                <p>
+                                    Status:
+                                    <?php if ($this->client_has_gsc_connection($edit)) : ?>
+                                        <strong>Verbonden</strong>
+                                        <?php if (!empty($edit->gsc_connected_email)) : ?>
+                                            (<?php echo esc_html((string) $edit->gsc_connected_email); ?>)
+                                        <?php endif; ?>
+                                    <?php else : ?>
+                                        <strong>Niet verbonden</strong>
+                                    <?php endif; ?>
+                                </p>
+                                <p>Property: <code><?php echo esc_html((string) ($edit->gsc_property ?: 'Nog niet geselecteerd')); ?></code></p>
+                                <p>Laatste sync: <?php echo esc_html((string) ($edit->gsc_last_synced_at ?: 'Nog nooit')); ?></p>
+                            <?php elseif (!$edit) : ?>
+                                <p class="description">Sla de klant eerst op om Search Console te koppelen.</p>
+                            <?php else : ?>
+                                <p class="description">Schakel eerst Google Search Console in bij Instellingen.</p>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
                 </table>
 
                 <p><button class="button button-primary"><?php echo $edit ? 'Klant bijwerken' : 'Klant opslaan'; ?></button></p>
             </form>
 
+            <?php if ($edit && $this->is_gsc_integration_enabled()) : ?>
+                <?php $properties_cache = $this->get_cached_gsc_properties_for_user((int) $edit->id); ?>
+                <div class="sch-card" style="margin-top:20px;">
+                    <h2 style="margin-top:0;">Google Search Console koppeling</h2>
+                    <p>Klant: <strong><?php echo esc_html((string) $edit->name); ?></strong></p>
+                    <p>
+                        <a class="button button-secondary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_gsc_connect&client_id=' . (int) $edit->id), 'sch_gsc_connect_' . (int) $edit->id)); ?>">Connect Google Search Console</a>
+                        <?php if ($this->client_has_gsc_connection($edit)) : ?>
+                            <a class="button" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_gsc_disconnect&client_id=' . (int) $edit->id), 'sch_gsc_disconnect_' . (int) $edit->id)); ?>" onclick="return confirm('Koppeling verbreken?');">Disconnect</a>
+                        <?php endif; ?>
+                    </p>
+
+                    <p>
+                        <a class="button" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_gsc_fetch_properties&client_id=' . (int) $edit->id), 'sch_gsc_fetch_properties_' . (int) $edit->id)); ?>">Fetch properties</a>
+                    </p>
+
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-top:15px;">
+                        <?php wp_nonce_field('sch_gsc_save_property'); ?>
+                        <input type="hidden" name="action" value="sch_gsc_save_property">
+                        <input type="hidden" name="client_id" value="<?php echo (int) $edit->id; ?>">
+                        <label for="sch-gsc-property"><strong>Selecteer property</strong></label><br>
+                        <select id="sch-gsc-property" name="gsc_property" style="min-width:360px;">
+                            <option value="">-- kies property --</option>
+                            <?php foreach ($properties_cache as $property) : ?>
+                                <option value="<?php echo esc_attr($property); ?>" <?php selected((string) $edit->gsc_property, (string) $property); ?>><?php echo esc_html($property); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                        <button class="button button-primary" type="submit">Property opslaan</button>
+                    </form>
+
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-top:15px;">
+                        <?php wp_nonce_field('sch_gsc_sync_keywords'); ?>
+                        <input type="hidden" name="action" value="sch_gsc_sync_keywords">
+                        <input type="hidden" name="client_id" value="<?php echo (int) $edit->id; ?>">
+                        <label><strong>Periode</strong></label>
+                        <select name="range_days">
+                            <?php foreach ([7, 28, 90] as $range_days) : ?>
+                                <option value="<?php echo (int) $range_days; ?>" <?php selected((string) $range_days, (string) get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28')); ?>>Laatste <?php echo (int) $range_days; ?> dagen</option>
+                            <?php endforeach; ?>
+                        </select>
+                        <label style="margin-left:12px;"><strong>Row limit</strong></label>
+                        <input type="number" name="row_limit" min="1" max="25000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_ROW_LIMIT, '250')); ?>">
+                        <button class="button button-primary" type="submit">Sync keywords</button>
+                    </form>
+                </div>
+            <?php endif; ?>
+
             <h2 style="margin-top:30px;">Bestaande klanten</h2>
             <table class="widefat striped">
-                <thead><tr><th>ID</th><th>Naam</th><th>Website</th><th>Max/maand</th><th>Research URLs</th><th>Links</th><th>Acties</th></tr></thead>
+                <thead><tr><th>ID</th><th>Naam</th><th>Website</th><th>Max/maand</th><th>Research URLs</th><th>GSC property</th><th>Links</th><th>Acties</th></tr></thead>
                 <tbody>
                 <?php if ($rows) : foreach ($rows as $row) : ?>
                     <?php $client_research = $this->get_client_research_urls($row); ?>
@@ -520,6 +630,7 @@ final class SCH_Orchestrator {
                         <td><?php echo esc_html($row->website_url); ?></td>
                         <td><?php echo (int) ($row->max_posts_per_month ?? 0); ?></td>
                         <td><?php echo esc_html(implode(' | ', array_map(static function ($v) { return (string) ($v['url'] ?? ''); }, $client_research))); ?></td>
+                        <td><code><?php echo esc_html((string) ($row->gsc_property ?: '-')); ?></code></td>
                         <td><?php echo esc_html($this->implode_target_strings($this->get_client_link_targets($row))); ?></td>
                         <td class="sch-actions">
                             <a href="<?php echo esc_url(admin_url('admin.php?page=sch-clients&edit=' . (int) $row->id)); ?>">Bewerken</a>
@@ -534,7 +645,7 @@ final class SCH_Orchestrator {
                         </td>
                     </tr>
                 <?php endforeach; else : ?>
-                    <tr><td colspan="6">Nog geen klanten.</td></tr>
+                    <tr><td colspan="8">Nog geen klanten.</td></tr>
                 <?php endif; ?>
                 </tbody>
             </table>
@@ -1163,6 +1274,13 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <tr><th>Max research pages</th><td><input type="number" name="max_research_pages" value="<?php echo esc_attr((string) get_option(self::OPTION_MAX_RESEARCH_PAGES, '5')); ?>" min="1" max="20"></td></tr>
                     <tr><th>Max discovery keywords</th><td><input type="number" name="max_discovery_keywords" value="<?php echo esc_attr((string) get_option(self::OPTION_MAX_DISCOVERY_KEYWORDS, '10')); ?>" min="1" max="50"></td></tr>
                     <tr><th>Verbose logs</th><td><label><input type="checkbox" name="enable_verbose_logs" value="1" <?php checked(get_option(self::OPTION_ENABLE_VERBOSE_LOGS, '1'), '1'); ?>> Veel extra logregels wegschrijven</label></td></tr>
+                    <tr><th colspan="2"><h2 style="margin:10px 0 0;">Google Search Console</h2></th></tr>
+                    <tr><th>Enable GSC integratie</th><td><label><input type="checkbox" name="gsc_enabled" value="1" <?php checked(get_option(self::OPTION_GSC_ENABLED, '0'), '1'); ?>> Inschakelen</label></td></tr>
+                    <tr><th>Google OAuth client ID</th><td><input type="text" name="gsc_client_id" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_CLIENT_ID, '')); ?>"></td></tr>
+                    <tr><th>Google OAuth client secret</th><td><input type="password" name="gsc_client_secret" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_CLIENT_SECRET, '')); ?>"></td></tr>
+                    <tr><th>Default sync range (dagen)</th><td><select name="gsc_default_sync_range"><option value="7" <?php selected(get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28'), '7'); ?>>7</option><option value="28" <?php selected(get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28'), '28'); ?>>28</option><option value="90" <?php selected(get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28'), '90'); ?>>90</option></select></td></tr>
+                    <tr><th>Default row limit</th><td><input type="number" name="gsc_default_row_limit" min="1" max="25000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_ROW_LIMIT, '250')); ?>"></td></tr>
+                    <tr><th>Auto sync</th><td><label><input type="checkbox" name="gsc_auto_sync" value="1" <?php checked(get_option(self::OPTION_GSC_AUTO_SYNC, '0'), '1'); ?>> Dagelijks gekoppelde klanten syncen</label></td></tr>
 
                     <tr><th colspan="2"><h2 style="margin:10px 0 0;">Random Content Machine</h2></th></tr>
                     <tr><th>Enable random content machine</th><td><label><input type="checkbox" name="random_machine_enabled" value="1" <?php checked(get_option(self::OPTION_RANDOM_MACHINE_ENABLED, '0'), '1'); ?>> Dagelijks automatisch random content jobs genereren</label></td></tr>
@@ -2146,6 +2264,215 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
     }
 
+    public function handle_gsc_connect(): void {
+        $client_id = (int) ($_GET['client_id'] ?? 0);
+        if ($client_id <= 0) {
+            $this->redirect_with_message('sch-clients', 'Geen geldige klant geselecteerd.', 'error');
+        }
+        if (!current_user_can('manage_options')) {
+            wp_die('Geen toegang.');
+        }
+        check_admin_referer('sch_gsc_connect_' . $client_id);
+
+        if (!$this->is_gsc_integration_enabled()) {
+            $this->redirect_with_message('sch-clients', 'Google Search Console integratie staat uit.', 'error');
+        }
+
+        $oauth_client_id = (string) get_option(self::OPTION_GSC_CLIENT_ID, '');
+        $oauth_client_secret = (string) get_option(self::OPTION_GSC_CLIENT_SECRET, '');
+        if ($oauth_client_id === '' || $oauth_client_secret === '') {
+            $this->redirect_with_message('sch-settings', 'Vul eerst Google OAuth client ID en secret in.', 'error');
+        }
+
+        $state_token = wp_generate_password(32, false, false);
+        set_transient('sch_gsc_state_' . $state_token, [
+            'client_id' => $client_id,
+            'user_id' => get_current_user_id(),
+        ], MINUTE_IN_SECONDS * 15);
+
+        $this->log('info', 'gsc_oauth', 'OAuth connect gestart', [
+            'client_id' => $client_id,
+            'user_id' => get_current_user_id(),
+        ]);
+
+        $auth_url = add_query_arg([
+            'client_id' => $oauth_client_id,
+            'redirect_uri' => $this->gsc_oauth_redirect_uri(),
+            'response_type' => 'code',
+            'scope' => 'https://www.googleapis.com/auth/webmasters.readonly https://www.googleapis.com/auth/userinfo.email',
+            'access_type' => 'offline',
+            'include_granted_scopes' => 'true',
+            'prompt' => 'consent',
+            'state' => $state_token,
+        ], 'https://accounts.google.com/o/oauth2/v2/auth');
+
+        wp_safe_redirect($auth_url);
+        exit;
+    }
+
+    public function handle_gsc_oauth_callback(): void {
+        if (!current_user_can('manage_options')) {
+            wp_die('Geen toegang.');
+        }
+
+        $state = sanitize_text_field((string) ($_GET['state'] ?? ''));
+        $code = sanitize_text_field((string) ($_GET['code'] ?? ''));
+        $error = sanitize_text_field((string) ($_GET['error'] ?? ''));
+        $state_payload = get_transient('sch_gsc_state_' . $state);
+        delete_transient('sch_gsc_state_' . $state);
+
+        if (!is_array($state_payload) || empty($state_payload['client_id']) || (int) ($state_payload['user_id'] ?? 0) !== get_current_user_id()) {
+            $this->redirect_with_message('sch-clients', 'OAuth state validatie mislukt.', 'error');
+        }
+
+        $client_id = (int) $state_payload['client_id'];
+        if ($error !== '') {
+            $this->log('error', 'gsc_oauth', 'OAuth connect mislukt', [
+                'client_id' => $client_id,
+                'error' => $error,
+            ]);
+            $this->redirect_with_message('sch-clients', 'Google autorisatie geannuleerd of mislukt.', 'error');
+        }
+
+        if ($code === '') {
+            $this->redirect_with_message('sch-clients', 'Geen OAuth code ontvangen.', 'error');
+        }
+
+        try {
+            $token = $this->gsc_exchange_code_for_token($code);
+            $email = $this->gsc_fetch_account_email((string) ($token['access_token'] ?? ''));
+
+            $token_payload = [
+                'access_token' => (string) ($token['access_token'] ?? ''),
+                'refresh_token' => (string) ($token['refresh_token'] ?? ''),
+                'token_type' => (string) ($token['token_type'] ?? 'Bearer'),
+                'scope' => (string) ($token['scope'] ?? ''),
+            ];
+
+            $expires_at = $this->gsc_expiry_time_from_token_response($token);
+
+            $this->db->update($this->table('clients'), [
+                'gsc_token_data' => $this->encrypt_sensitive_value(wp_json_encode($token_payload)),
+                'gsc_token_expires_at' => $expires_at,
+                'gsc_connected_email' => $email,
+                'updated_at' => $this->now(),
+            ], ['id' => $client_id]);
+
+            $this->log('info', 'gsc_oauth', 'OAuth connect geslaagd', [
+                'client_id' => $client_id,
+                'email' => $email,
+            ]);
+            $this->redirect_with_message('sch-clients', 'Google Search Console gekoppeld.');
+        } catch (Throwable $e) {
+            $this->log('error', 'gsc_oauth', 'OAuth connect mislukt', [
+                'client_id' => $client_id,
+                'error' => $e->getMessage(),
+            ]);
+            $this->redirect_with_message('sch-clients', 'Google koppeling mislukt. Check logs.', 'error');
+        }
+    }
+
+    public function handle_gsc_disconnect(): void {
+        $client_id = (int) ($_GET['client_id'] ?? 0);
+        if ($client_id <= 0) {
+            $this->redirect_with_message('sch-clients', 'Geen geldige klant geselecteerd.', 'error');
+        }
+        if (!current_user_can('manage_options')) {
+            wp_die('Geen toegang.');
+        }
+        check_admin_referer('sch_gsc_disconnect_' . $client_id);
+
+        $this->db->update($this->table('clients'), [
+            'gsc_token_data' => null,
+            'gsc_token_expires_at' => null,
+            'gsc_connected_email' => '',
+            'gsc_property' => '',
+            'updated_at' => $this->now(),
+        ], ['id' => $client_id]);
+
+        $this->log('info', 'gsc_oauth', 'Google Search Console koppeling verbroken', ['client_id' => $client_id]);
+        $this->redirect_with_message('sch-clients', 'Google Search Console koppeling verbroken.');
+    }
+
+    public function handle_gsc_fetch_properties(): void {
+        $client_id = (int) ($_GET['client_id'] ?? 0);
+        if ($client_id <= 0) {
+            $this->redirect_with_message('sch-clients', 'Geen geldige klant geselecteerd.', 'error');
+        }
+        if (!current_user_can('manage_options')) {
+            wp_die('Geen toegang.');
+        }
+        check_admin_referer('sch_gsc_fetch_properties_' . $client_id);
+
+        $client = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('clients')} WHERE id=%d", $client_id));
+        if (!$client) {
+            $this->redirect_with_message('sch-clients', 'Klant niet gevonden.', 'error');
+        }
+
+        try {
+            $properties = $this->gsc_list_properties_for_client($client);
+            set_transient($this->gsc_properties_cache_key($client_id), $properties, HOUR_IN_SECONDS);
+            $this->log('info', 'gsc_property', 'Property lijst opgehaald', [
+                'client_id' => $client_id,
+                'count' => count($properties),
+            ]);
+            $this->redirect_with_message('sch-clients', 'Properties opgehaald: ' . count($properties));
+        } catch (Throwable $e) {
+            $this->log('error', 'gsc_property', 'Property lijst ophalen mislukt', [
+                'client_id' => $client_id,
+                'error' => $e->getMessage(),
+            ]);
+            $this->redirect_with_message('sch-clients', 'Properties ophalen mislukt. Check logs.', 'error');
+        }
+    }
+
+    public function handle_gsc_save_property(): void {
+        $this->verify_admin_nonce('sch_gsc_save_property');
+        $client_id = (int) ($_POST['client_id'] ?? 0);
+        $property = sanitize_text_field((string) ($_POST['gsc_property'] ?? ''));
+        if ($client_id <= 0 || $property === '') {
+            $this->redirect_with_message('sch-clients', 'Klant en property zijn verplicht.', 'error');
+        }
+
+        $this->db->update($this->table('clients'), [
+            'gsc_property' => $property,
+            'updated_at' => $this->now(),
+        ], ['id' => $client_id]);
+
+        $this->log('info', 'gsc_property', 'Property gekoppeld aan klant', [
+            'client_id' => $client_id,
+            'property' => $property,
+        ]);
+        $this->redirect_with_message('sch-clients', 'Property gekoppeld aan klant.');
+    }
+
+    public function handle_gsc_sync_keywords(): void {
+        $this->verify_admin_nonce('sch_gsc_sync_keywords');
+        $client_id = (int) ($_POST['client_id'] ?? 0);
+        $range_days = $this->sanitize_gsc_range_days((int) ($_POST['range_days'] ?? (int) get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28')));
+        $row_limit = max(1, min(25000, (int) ($_POST['row_limit'] ?? (int) get_option(self::OPTION_GSC_DEFAULT_ROW_LIMIT, '250'))));
+
+        if ($client_id <= 0) {
+            $this->redirect_with_message('sch-clients', 'Geen geldige klant geselecteerd.', 'error');
+        }
+
+        $client = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('clients')} WHERE id=%d", $client_id));
+        if (!$client) {
+            $this->redirect_with_message('sch-clients', 'Klant niet gevonden.', 'error');
+        }
+
+        try {
+            $result = $this->sync_gsc_keywords_for_client($client, $range_days, $row_limit);
+            $this->redirect_with_message('sch-clients', sprintf('GSC sync klaar. Rows: %d, inserts: %d, updates: %d', $result['rows'], $result['inserted'], $result['updated']));
+        } catch (Throwable $e) {
+            $this->log('error', 'gsc_sync', 'Keyword sync mislukt', [
+                'client_id' => $client_id,
+                'error' => $e->getMessage(),
+            ]);
+            $this->redirect_with_message('sch-clients', 'GSC keyword sync mislukt. Check logs.', 'error');
+        }
+    }
+
     public function handle_save_settings(): void {
         $this->verify_admin_nonce('sch_save_settings');
 
@@ -2171,6 +2498,12 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $max_discovery_keywords = max(1, min(50, (int) ($_POST['max_discovery_keywords'] ?? 10)));
         update_option(self::OPTION_MAX_RESEARCH_PAGES, (string) $max_research_pages);
         update_option(self::OPTION_MAX_DISCOVERY_KEYWORDS, (string) $max_discovery_keywords);
+        update_option(self::OPTION_GSC_ENABLED, isset($_POST['gsc_enabled']) ? '1' : '0');
+        update_option(self::OPTION_GSC_CLIENT_ID, sanitize_text_field((string) ($_POST['gsc_client_id'] ?? '')));
+        update_option(self::OPTION_GSC_CLIENT_SECRET, sanitize_text_field((string) ($_POST['gsc_client_secret'] ?? '')));
+        update_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, (string) $this->sanitize_gsc_range_days((int) ($_POST['gsc_default_sync_range'] ?? 28)));
+        update_option(self::OPTION_GSC_DEFAULT_ROW_LIMIT, (string) max(1, min(25000, (int) ($_POST['gsc_default_row_limit'] ?? 250))));
+        update_option(self::OPTION_GSC_AUTO_SYNC, isset($_POST['gsc_auto_sync']) ? '1' : '0');
 
         update_option(self::OPTION_RANDOM_MACHINE_ENABLED, isset($_POST['random_machine_enabled']) ? '1' : '0');
         update_option(self::OPTION_RANDOM_DAILY_MAX, (string) max(1, min(100, (int) ($_POST['random_daily_max'] ?? 10))));
@@ -4591,6 +4924,387 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
 
         return $fallback_category;
+    }
+
+    public function run_gsc_auto_sync(): void {
+        if (get_option(self::OPTION_GSC_ENABLED, '0') !== '1' || get_option(self::OPTION_GSC_AUTO_SYNC, '0') !== '1') {
+            return;
+        }
+
+        $range_days = $this->sanitize_gsc_range_days((int) get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28'));
+        $row_limit = max(1, min(25000, (int) get_option(self::OPTION_GSC_DEFAULT_ROW_LIMIT, '250')));
+        $clients = $this->db->get_results("SELECT * FROM {$this->table('clients')} WHERE gsc_property <> '' AND gsc_token_data IS NOT NULL");
+        foreach ((array) $clients as $client) {
+            try {
+                $this->sync_gsc_keywords_for_client($client, $range_days, $row_limit);
+            } catch (Throwable $e) {
+                $this->log('error', 'gsc_sync', 'Auto sync mislukt voor klant', [
+                    'client_id' => (int) $client->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+    }
+
+    private function sync_gsc_keywords_for_client(object $client, int $range_days, int $row_limit): array {
+        $client_id = (int) ($client->id ?? 0);
+        $property = sanitize_text_field((string) ($client->gsc_property ?? ''));
+        if ($client_id <= 0 || $property === '') {
+            throw new RuntimeException('Geen geldige klant/property voor GSC sync.');
+        }
+
+        $this->log('info', 'gsc_sync', 'Keyword sync gestart', [
+            'client_id' => $client_id,
+            'property' => $property,
+            'range_days' => $range_days,
+            'row_limit' => $row_limit,
+        ]);
+
+        $access_token = $this->gsc_get_valid_access_token_for_client($client);
+        $end = new DateTimeImmutable('now', wp_timezone());
+        $start = $end->sub(new DateInterval('P' . max(1, $range_days) . 'D'));
+        $rows = $this->gsc_query_keywords($property, $access_token, $start->format('Y-m-d'), $end->format('Y-m-d'), $row_limit);
+
+        $site_ids = $this->get_default_target_site_ids();
+        $inserted = 0;
+        $updated = 0;
+
+        foreach ($rows as $row) {
+            $query = $this->normalize_keyword_term((string) ($row['query'] ?? ''));
+            if ($query === '') {
+                continue;
+            }
+
+            $source_context = wp_json_encode([
+                'source' => 'google_search_console',
+                'property' => $property,
+                'range_days' => $range_days,
+                'clicks' => (float) ($row['clicks'] ?? 0),
+                'impressions' => (float) ($row['impressions'] ?? 0),
+                'ctr' => (float) ($row['ctr'] ?? 0),
+                'position' => (float) ($row['position'] ?? 0),
+                'last_synced_at' => $this->now(),
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+            $existing_id = (int) $this->db->get_var($this->db->prepare(
+                "SELECT id FROM {$this->table('keywords')} WHERE client_id=%d AND main_keyword=%s AND source='google_search_console' LIMIT 1",
+                $client_id,
+                $query
+            ));
+
+            $data = [
+                'client_id' => $client_id,
+                'main_keyword' => $query,
+                'secondary_keywords' => wp_json_encode([]),
+                'target_site_ids' => wp_json_encode($site_ids),
+                'target_site_categories' => wp_json_encode([]),
+                'content_type' => 'pillar',
+                'tone_of_voice' => 'deskundig maar menselijk',
+                'target_word_count' => 1200,
+                'priority' => 10,
+                'status' => 'queued',
+                'source' => 'google_search_console',
+                'source_context' => $source_context,
+                'updated_at' => $this->now(),
+            ];
+
+            if ($existing_id > 0) {
+                $ok = $this->db->update($this->table('keywords'), $data, ['id' => $existing_id]);
+                if ($ok !== false) {
+                    $updated++;
+                }
+            } else {
+                $data['created_at'] = $this->now();
+                $ok = $this->db->insert($this->table('keywords'), $data);
+                if ($ok) {
+                    $inserted++;
+                }
+            }
+        }
+
+        $this->db->update($this->table('clients'), [
+            'gsc_last_synced_at' => $this->now(),
+            'updated_at' => $this->now(),
+        ], ['id' => $client_id]);
+
+        $this->log('info', 'gsc_sync', 'Keyword sync geslaagd', [
+            'client_id' => $client_id,
+            'property' => $property,
+            'rows' => count($rows),
+            'inserted' => $inserted,
+            'updated' => $updated,
+        ]);
+
+        return [
+            'rows' => count($rows),
+            'inserted' => $inserted,
+            'updated' => $updated,
+        ];
+    }
+
+    private function gsc_query_keywords(string $property, string $access_token, string $start_date, string $end_date, int $row_limit): array {
+        $encoded_property = rawurlencode($property);
+        $response = wp_remote_post('https://www.googleapis.com/webmasters/v3/sites/' . $encoded_property . '/searchAnalytics/query', [
+            'timeout' => 30,
+            'headers' => [
+                'Authorization' => 'Bearer ' . $access_token,
+                'Content-Type' => 'application/json',
+            ],
+            'body' => wp_json_encode([
+                'startDate' => $start_date,
+                'endDate' => $end_date,
+                'dimensions' => ['query'],
+                'rowLimit' => max(1, min(25000, $row_limit)),
+            ]),
+        ]);
+
+        if (is_wp_error($response)) {
+            throw new RuntimeException('Search Analytics request mislukt: ' . $response->get_error_message());
+        }
+
+        $status = (int) wp_remote_retrieve_response_code($response);
+        $body = json_decode((string) wp_remote_retrieve_body($response), true);
+        if ($status < 200 || $status >= 300) {
+            throw new RuntimeException('Search Analytics fout: HTTP ' . $status);
+        }
+
+        $rows = [];
+        foreach ((array) ($body['rows'] ?? []) as $item) {
+            $rows[] = [
+                'query' => (string) (($item['keys'][0] ?? '')),
+                'clicks' => (float) ($item['clicks'] ?? 0),
+                'impressions' => (float) ($item['impressions'] ?? 0),
+                'ctr' => (float) ($item['ctr'] ?? 0),
+                'position' => (float) ($item['position'] ?? 0),
+            ];
+        }
+
+        $this->log('info', 'gsc_sync', 'Rows opgehaald uit Search Console', [
+            'property' => $property,
+            'start_date' => $start_date,
+            'end_date' => $end_date,
+            'row_count' => count($rows),
+        ]);
+
+        return $rows;
+    }
+
+    private function gsc_list_properties_for_client(object $client): array {
+        $access_token = $this->gsc_get_valid_access_token_for_client($client);
+        $response = wp_remote_get('https://www.googleapis.com/webmasters/v3/sites', [
+            'timeout' => 30,
+            'headers' => ['Authorization' => 'Bearer ' . $access_token],
+        ]);
+
+        if (is_wp_error($response)) {
+            throw new RuntimeException('Properties ophalen mislukt: ' . $response->get_error_message());
+        }
+
+        $status = (int) wp_remote_retrieve_response_code($response);
+        $body = json_decode((string) wp_remote_retrieve_body($response), true);
+        if ($status < 200 || $status >= 300) {
+            throw new RuntimeException('Properties ophalen mislukt: HTTP ' . $status);
+        }
+
+        $properties = [];
+        foreach ((array) ($body['siteEntry'] ?? []) as $entry) {
+            $site_url = sanitize_text_field((string) ($entry['siteUrl'] ?? ''));
+            if ($site_url !== '') {
+                $properties[] = $site_url;
+            }
+        }
+
+        return array_values(array_unique($properties));
+    }
+
+    private function gsc_get_valid_access_token_for_client(object $client): string {
+        $token_data = $this->gsc_get_token_payload_for_client($client);
+        $access_token = (string) ($token_data['access_token'] ?? '');
+        $refresh_token = (string) ($token_data['refresh_token'] ?? '');
+        $expires_at = (string) ($client->gsc_token_expires_at ?? '');
+
+        if ($access_token !== '' && $expires_at !== '' && strtotime($expires_at) > time() + 60) {
+            return $access_token;
+        }
+
+        if ($refresh_token === '') {
+            throw new RuntimeException('Geen refresh token aanwezig voor klant.');
+        }
+
+        $oauth_client_id = (string) get_option(self::OPTION_GSC_CLIENT_ID, '');
+        $oauth_client_secret = (string) get_option(self::OPTION_GSC_CLIENT_SECRET, '');
+        if ($oauth_client_id === '' || $oauth_client_secret === '') {
+            throw new RuntimeException('Google OAuth instellingen ontbreken.');
+        }
+
+        $response = wp_remote_post('https://oauth2.googleapis.com/token', [
+            'timeout' => 30,
+            'body' => [
+                'client_id' => $oauth_client_id,
+                'client_secret' => $oauth_client_secret,
+                'grant_type' => 'refresh_token',
+                'refresh_token' => $refresh_token,
+            ],
+        ]);
+
+        if (is_wp_error($response)) {
+            throw new RuntimeException('Token refresh mislukt: ' . $response->get_error_message());
+        }
+
+        $status = (int) wp_remote_retrieve_response_code($response);
+        $body = json_decode((string) wp_remote_retrieve_body($response), true);
+        if ($status < 200 || $status >= 300 || !is_array($body)) {
+            throw new RuntimeException('Token refresh gaf HTTP ' . $status);
+        }
+
+        $token_data['access_token'] = (string) ($body['access_token'] ?? '');
+        if (!empty($body['refresh_token'])) {
+            $token_data['refresh_token'] = (string) $body['refresh_token'];
+        }
+        $expires_at_new = $this->gsc_expiry_time_from_token_response($body);
+
+        $this->db->update($this->table('clients'), [
+            'gsc_token_data' => $this->encrypt_sensitive_value(wp_json_encode($token_data)),
+            'gsc_token_expires_at' => $expires_at_new,
+            'updated_at' => $this->now(),
+        ], ['id' => (int) $client->id]);
+
+        $this->log('info', 'gsc_oauth', 'Refresh token hergebruikt', [
+            'client_id' => (int) $client->id,
+            'expires_at' => $expires_at_new,
+        ]);
+
+        return (string) $token_data['access_token'];
+    }
+
+    private function gsc_get_token_payload_for_client(object $client): array {
+        $encrypted = (string) ($client->gsc_token_data ?? '');
+        if ($encrypted === '') {
+            throw new RuntimeException('Geen token data gevonden voor klant.');
+        }
+        $json = $this->decrypt_sensitive_value($encrypted);
+        $decoded = json_decode($json, true);
+        if (!is_array($decoded)) {
+            throw new RuntimeException('Token data kon niet worden gelezen.');
+        }
+        return $decoded;
+    }
+
+    private function gsc_exchange_code_for_token(string $code): array {
+        $response = wp_remote_post('https://oauth2.googleapis.com/token', [
+            'timeout' => 30,
+            'body' => [
+                'code' => $code,
+                'client_id' => (string) get_option(self::OPTION_GSC_CLIENT_ID, ''),
+                'client_secret' => (string) get_option(self::OPTION_GSC_CLIENT_SECRET, ''),
+                'redirect_uri' => $this->gsc_oauth_redirect_uri(),
+                'grant_type' => 'authorization_code',
+            ],
+        ]);
+
+        if (is_wp_error($response)) {
+            throw new RuntimeException('OAuth token exchange mislukt: ' . $response->get_error_message());
+        }
+
+        $status = (int) wp_remote_retrieve_response_code($response);
+        $body = json_decode((string) wp_remote_retrieve_body($response), true);
+        if ($status < 200 || $status >= 300 || !is_array($body)) {
+            throw new RuntimeException('OAuth token exchange gaf HTTP ' . $status);
+        }
+        if (empty($body['access_token'])) {
+            throw new RuntimeException('OAuth token response bevat geen access token.');
+        }
+
+        return $body;
+    }
+
+    private function gsc_fetch_account_email(string $access_token): string {
+        if ($access_token === '') {
+            return '';
+        }
+        $response = wp_remote_get('https://www.googleapis.com/oauth2/v2/userinfo', [
+            'timeout' => 20,
+            'headers' => ['Authorization' => 'Bearer ' . $access_token],
+        ]);
+        if (is_wp_error($response)) {
+            return '';
+        }
+        $body = json_decode((string) wp_remote_retrieve_body($response), true);
+        return sanitize_email((string) ($body['email'] ?? ''));
+    }
+
+    private function gsc_expiry_time_from_token_response(array $token_response): string {
+        $expires_in = max(300, (int) ($token_response['expires_in'] ?? HOUR_IN_SECONDS));
+        return gmdate('Y-m-d H:i:s', time() + $expires_in);
+    }
+
+    private function gsc_oauth_redirect_uri(): string {
+        return admin_url('admin-post.php?action=sch_gsc_oauth_callback');
+    }
+
+    private function is_gsc_integration_enabled(): bool {
+        return get_option(self::OPTION_GSC_ENABLED, '0') === '1';
+    }
+
+    private function client_has_gsc_connection(object $client): bool {
+        return !empty($client->gsc_token_data);
+    }
+
+    private function gsc_properties_cache_key(int $client_id): string {
+        return 'sch_gsc_props_' . get_current_user_id() . '_' . $client_id;
+    }
+
+    private function get_cached_gsc_properties_for_user(int $client_id): array {
+        $properties = get_transient($this->gsc_properties_cache_key($client_id));
+        if (!is_array($properties)) {
+            return [];
+        }
+        return array_values(array_filter(array_map('sanitize_text_field', $properties)));
+    }
+
+    private function sanitize_gsc_range_days(int $range_days): int {
+        if (in_array($range_days, [7, 28, 90], true)) {
+            return $range_days;
+        }
+        return 28;
+    }
+
+    private function get_default_target_site_ids(): array {
+        $site_ids = $this->db->get_col("SELECT id FROM {$this->table('sites')} WHERE is_active=1 ORDER BY id ASC");
+        $site_ids = array_map('intval', (array) $site_ids);
+        return array_values(array_filter($site_ids));
+    }
+
+    private function encrypt_sensitive_value(string $value): string {
+        if ($value === '') {
+            return '';
+        }
+
+        $key = hash('sha256', wp_salt('auth'), true);
+        $iv = random_bytes(16);
+        $cipher = openssl_encrypt($value, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
+        if ($cipher === false) {
+            return base64_encode($value);
+        }
+
+        return base64_encode($iv . $cipher);
+    }
+
+    private function decrypt_sensitive_value(string $encoded): string {
+        $binary = base64_decode($encoded, true);
+        if ($binary === false) {
+            return '';
+        }
+
+        if (strlen($binary) < 17) {
+            return $binary;
+        }
+
+        $key = hash('sha256', wp_salt('auth'), true);
+        $iv = substr($binary, 0, 16);
+        $cipher = substr($binary, 16);
+        $plain = openssl_decrypt($cipher, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
+        return is_string($plain) && $plain !== '' ? $plain : $binary;
     }
 
     private function sanitize_blog_categories(array $categories): array {
