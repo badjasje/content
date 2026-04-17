@@ -44,6 +44,8 @@ final class SCH_Orchestrator {
     const OPTION_GSC_CLIENT_SECRET = 'sch_gsc_client_secret';
     const OPTION_GSC_DEFAULT_SYNC_RANGE = 'sch_gsc_default_sync_range';
     const OPTION_GSC_DEFAULT_ROW_LIMIT = 'sch_gsc_default_row_limit';
+    const OPTION_GSC_DEFAULT_TOP_N_CLICKS = 'sch_gsc_default_top_n_clicks';
+    const OPTION_GSC_DEFAULT_MIN_IMPRESSIONS = 'sch_gsc_default_min_impressions';
     const OPTION_GSC_AUTO_SYNC = 'sch_gsc_auto_sync';
 
 
@@ -619,6 +621,10 @@ final class SCH_Orchestrator {
                         </select>
                         <label style="margin-left:12px;"><strong>Row limit</strong></label>
                         <input type="number" name="row_limit" min="1" max="25000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_ROW_LIMIT, '250')); ?>">
+                        <label style="margin-left:12px;"><strong>Top N op clicks</strong></label>
+                        <input type="number" name="top_n_clicks" min="0" max="25000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_TOP_N_CLICKS, '0')); ?>">
+                        <label style="margin-left:12px;"><strong>Min. impressions</strong></label>
+                        <input type="number" name="min_impressions" min="0" max="100000000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_MIN_IMPRESSIONS, '0')); ?>">
                         <button class="button button-primary" type="submit">Sync keywords</button>
                     </form>
                 </div>
@@ -881,15 +887,29 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
             <h2 style="margin-top:30px;">Bestaande keywords</h2>
             <table class="widefat striped">
-                <thead><tr><th>ID</th><th>Klant</th><th>Keyword</th><th>Type</th><th>Bron</th><th>Status</th><th>Acties</th></tr></thead>
+                <thead><tr><th>ID</th><th>Klant</th><th>Keyword</th><th>Type</th><th>Bron</th><th>Impressions</th><th>Clicks</th><th>CTR</th><th>Positie</th><th>Status</th><th>Acties</th></tr></thead>
                 <tbody>
                 <?php if ($rows) : foreach ($rows as $row) : ?>
+                    <?php
+                    $metrics = ['impressions' => null, 'clicks' => null, 'ctr' => null, 'position' => null];
+                    $context = json_decode((string) ($row->source_context ?? ''), true);
+                    if (is_array($context)) {
+                        $metrics['impressions'] = isset($context['impressions']) ? (float) $context['impressions'] : null;
+                        $metrics['clicks'] = isset($context['clicks']) ? (float) $context['clicks'] : null;
+                        $metrics['ctr'] = isset($context['ctr']) ? (float) $context['ctr'] : null;
+                        $metrics['position'] = isset($context['position']) ? (float) $context['position'] : null;
+                    }
+                    ?>
                     <tr>
                         <td><?php echo (int) $row->id; ?></td>
                         <td><?php echo esc_html($row->client_name ?: ''); ?></td>
                         <td><?php echo esc_html($row->main_keyword); ?></td>
                         <td><?php echo esc_html($row->content_type); ?></td>
                         <td><?php echo esc_html($row->source ?: 'manual'); ?></td>
+                        <td><?php echo $metrics['impressions'] === null ? '&mdash;' : esc_html(number_format_i18n($metrics['impressions'], 0)); ?></td>
+                        <td><?php echo $metrics['clicks'] === null ? '&mdash;' : esc_html(number_format_i18n($metrics['clicks'], 0)); ?></td>
+                        <td><?php echo $metrics['ctr'] === null ? '&mdash;' : esc_html(number_format_i18n($metrics['ctr'] * 100, 2) . '%'); ?></td>
+                        <td><?php echo $metrics['position'] === null ? '&mdash;' : esc_html(number_format_i18n($metrics['position'], 2)); ?></td>
                         <td><?php echo esc_html($row->status); ?></td>
                         <td class="sch-actions">
                             <a href="<?php echo esc_url(admin_url('admin.php?page=sch-keywords&edit=' . (int) $row->id)); ?>">Bewerken</a>
@@ -897,7 +917,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                         </td>
                     </tr>
                 <?php endforeach; else : ?>
-                    <tr><td colspan="7">Nog geen keywords.</td></tr>
+                    <tr><td colspan="11">Nog geen keywords.</td></tr>
                 <?php endif; ?>
                 </tbody>
             </table>
@@ -1319,6 +1339,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <tr><th>Google OAuth client secret</th><td><input type="password" name="gsc_client_secret" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_CLIENT_SECRET, '')); ?>"></td></tr>
                     <tr><th>Default sync range (dagen)</th><td><select name="gsc_default_sync_range"><option value="7" <?php selected(get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28'), '7'); ?>>7</option><option value="28" <?php selected(get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28'), '28'); ?>>28</option><option value="90" <?php selected(get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28'), '90'); ?>>90</option></select></td></tr>
                     <tr><th>Default row limit</th><td><input type="number" name="gsc_default_row_limit" min="1" max="25000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_ROW_LIMIT, '250')); ?>"></td></tr>
+                    <tr><th>Default top N op clicks</th><td><input type="number" name="gsc_default_top_n_clicks" min="0" max="25000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_TOP_N_CLICKS, '0')); ?>"><p class="description">0 = uitgeschakeld (alle rows binnen row limit).</p></td></tr>
+                    <tr><th>Default min impressions</th><td><input type="number" name="gsc_default_min_impressions" min="0" max="100000000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_MIN_IMPRESSIONS, '0')); ?>"></td></tr>
                     <tr><th>Auto sync</th><td><label><input type="checkbox" name="gsc_auto_sync" value="1" <?php checked(get_option(self::OPTION_GSC_AUTO_SYNC, '0'), '1'); ?>> Dagelijks gekoppelde klanten syncen</label></td></tr>
 
                     <tr><th colspan="2"><h2 style="margin:10px 0 0;">Random Content Machine</h2></th></tr>
@@ -2505,6 +2527,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $client_id = (int) ($_POST['client_id'] ?? 0);
         $range_days = $this->sanitize_gsc_range_days((int) ($_POST['range_days'] ?? (int) get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28')));
         $row_limit = max(1, min(25000, (int) ($_POST['row_limit'] ?? (int) get_option(self::OPTION_GSC_DEFAULT_ROW_LIMIT, '250'))));
+        $top_n_clicks = $this->sanitize_gsc_top_n_clicks((int) ($_POST['top_n_clicks'] ?? (int) get_option(self::OPTION_GSC_DEFAULT_TOP_N_CLICKS, '0')));
+        $min_impressions = $this->sanitize_gsc_min_impressions((int) ($_POST['min_impressions'] ?? (int) get_option(self::OPTION_GSC_DEFAULT_MIN_IMPRESSIONS, '0')));
 
         if ($client_id <= 0) {
             $this->redirect_with_message('sch-clients', 'Geen geldige klant geselecteerd.', 'error');
@@ -2516,7 +2540,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
 
         try {
-            $result = $this->sync_gsc_keywords_for_client($client, $range_days, $row_limit);
+            $result = $this->sync_gsc_keywords_for_client($client, $range_days, $row_limit, $top_n_clicks, $min_impressions);
             $this->redirect_with_message('sch-clients', sprintf('GSC sync klaar. Rows: %d, inserts: %d, updates: %d', $result['rows'], $result['inserted'], $result['updated']));
         } catch (Throwable $e) {
             $this->log('error', 'gsc_sync', 'Keyword sync mislukt', [
@@ -2557,6 +2581,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         update_option(self::OPTION_GSC_CLIENT_SECRET, sanitize_text_field((string) ($_POST['gsc_client_secret'] ?? '')));
         update_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, (string) $this->sanitize_gsc_range_days((int) ($_POST['gsc_default_sync_range'] ?? 28)));
         update_option(self::OPTION_GSC_DEFAULT_ROW_LIMIT, (string) max(1, min(25000, (int) ($_POST['gsc_default_row_limit'] ?? 250))));
+        update_option(self::OPTION_GSC_DEFAULT_TOP_N_CLICKS, (string) $this->sanitize_gsc_top_n_clicks((int) ($_POST['gsc_default_top_n_clicks'] ?? 0)));
+        update_option(self::OPTION_GSC_DEFAULT_MIN_IMPRESSIONS, (string) $this->sanitize_gsc_min_impressions((int) ($_POST['gsc_default_min_impressions'] ?? 0)));
         update_option(self::OPTION_GSC_AUTO_SYNC, isset($_POST['gsc_auto_sync']) ? '1' : '0');
 
         update_option(self::OPTION_RANDOM_MACHINE_ENABLED, isset($_POST['random_machine_enabled']) ? '1' : '0');
@@ -5031,10 +5057,12 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
         $range_days = $this->sanitize_gsc_range_days((int) get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28'));
         $row_limit = max(1, min(25000, (int) get_option(self::OPTION_GSC_DEFAULT_ROW_LIMIT, '250')));
+        $top_n_clicks = $this->sanitize_gsc_top_n_clicks((int) get_option(self::OPTION_GSC_DEFAULT_TOP_N_CLICKS, '0'));
+        $min_impressions = $this->sanitize_gsc_min_impressions((int) get_option(self::OPTION_GSC_DEFAULT_MIN_IMPRESSIONS, '0'));
         $clients = $this->db->get_results("SELECT * FROM {$this->table('clients')} WHERE gsc_property <> '' AND gsc_token_data IS NOT NULL");
         foreach ((array) $clients as $client) {
             try {
-                $this->sync_gsc_keywords_for_client($client, $range_days, $row_limit);
+                $this->sync_gsc_keywords_for_client($client, $range_days, $row_limit, $top_n_clicks, $min_impressions);
             } catch (Throwable $e) {
                 $this->log('error', 'gsc_sync', 'Auto sync mislukt voor klant', [
                     'client_id' => (int) $client->id,
@@ -5044,7 +5072,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
     }
 
-    private function sync_gsc_keywords_for_client(object $client, int $range_days, int $row_limit): array {
+    private function sync_gsc_keywords_for_client(object $client, int $range_days, int $row_limit, int $top_n_clicks = 0, int $min_impressions = 0): array {
         $client_id = (int) ($client->id ?? 0);
         $property = sanitize_text_field((string) ($client->gsc_property ?? ''));
         if ($client_id <= 0 || $property === '') {
@@ -5056,12 +5084,28 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'property' => $property,
             'range_days' => $range_days,
             'row_limit' => $row_limit,
+            'top_n_clicks' => $top_n_clicks,
+            'min_impressions' => $min_impressions,
         ]);
 
         $access_token = $this->gsc_get_valid_access_token_for_client($client);
         $end = new DateTimeImmutable('now', wp_timezone());
         $start = $end->sub(new DateInterval('P' . max(1, $range_days) . 'D'));
         $rows = $this->gsc_query_keywords($property, $access_token, $start->format('Y-m-d'), $end->format('Y-m-d'), $row_limit);
+
+        if ($min_impressions > 0) {
+            $rows = array_values(array_filter($rows, static function (array $row) use ($min_impressions): bool {
+                return (float) ($row['impressions'] ?? 0) >= $min_impressions;
+            }));
+        }
+
+        usort($rows, static function (array $a, array $b): int {
+            return ((float) ($b['clicks'] ?? 0)) <=> ((float) ($a['clicks'] ?? 0));
+        });
+
+        if ($top_n_clicks > 0 && count($rows) > $top_n_clicks) {
+            $rows = array_slice($rows, 0, $top_n_clicks);
+        }
 
         $site_ids = $this->get_default_target_site_ids();
         $inserted = 0;
@@ -5129,6 +5173,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'client_id' => $client_id,
             'property' => $property,
             'rows' => count($rows),
+            'top_n_clicks' => $top_n_clicks,
+            'min_impressions' => $min_impressions,
             'inserted' => $inserted,
             'updated' => $updated,
         ]);
@@ -5365,6 +5411,14 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             return $range_days;
         }
         return 28;
+    }
+
+    private function sanitize_gsc_top_n_clicks(int $top_n_clicks): int {
+        return max(0, min(25000, $top_n_clicks));
+    }
+
+    private function sanitize_gsc_min_impressions(int $min_impressions): int {
+        return max(0, $min_impressions);
     }
 
     private function get_default_target_site_ids(): array {
