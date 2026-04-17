@@ -2,7 +2,7 @@
 /*
 Plugin Name: Shortcut Content Hub Orchestrator
 Description: Centrale content orchestrator voor klanten, keyword discovery, jobs en distributie naar externe WordPress blogs via een receiver plugin. Inclusief AI schrijf- en redactieflow, website research, Unsplash featured images en bulk blog import.
-Version: 0.5.5
+Version: 0.5.6
 Author: OpenAI
 */
 
@@ -11,12 +11,12 @@ if (!defined('ABSPATH')) {
 }
 
 final class SCH_Orchestrator {
-    const VERSION = '0.5.5';
+    const VERSION = '0.5.6';
     const CRON_HOOK = 'sch_orchestrator_minute_worker';
     const GSC_CRON_HOOK = 'sch_orchestrator_gsc_sync_worker';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
-    const DB_VERSION = '0.5.9';
+    const DB_VERSION = '0.6.0';
     const EXACT_MATCH_THRESHOLD_PERCENT = 30;
 
     const OPTION_OPENAI_API_KEY = 'sch_openai_api_key';
@@ -89,6 +89,8 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_delete_client', [$this, 'handle_delete_client']);
         add_action('admin_post_sch_delete_site', [$this, 'handle_delete_site']);
         add_action('admin_post_sch_delete_keyword', [$this, 'handle_delete_keyword']);
+        add_action('admin_post_sch_trash_keyword', [$this, 'handle_trash_keyword']);
+        add_action('admin_post_sch_restore_keyword', [$this, 'handle_restore_keyword']);
         add_action('admin_post_sch_discover_keywords', [$this, 'handle_discover_keywords']);
         add_action('admin_post_sch_gsc_connect', [$this, 'handle_gsc_connect']);
         add_action('admin_post_sch_gsc_oauth_callback', [$this, 'handle_gsc_oauth_callback']);
@@ -280,13 +282,17 @@ final class SCH_Orchestrator {
             status VARCHAR(50) NOT NULL DEFAULT 'queued',
             source VARCHAR(50) NOT NULL DEFAULT 'manual',
             source_context LONGTEXT NULL,
+            lifecycle_status VARCHAR(20) NOT NULL DEFAULT 'active',
+            lifecycle_note TEXT NULL,
+            reviewed_at DATETIME NULL,
             last_processed_at DATETIME NULL,
             created_at DATETIME NOT NULL,
             updated_at DATETIME NOT NULL,
             PRIMARY KEY (id),
             KEY client_id (client_id),
             KEY status (status),
-            KEY source (source)
+            KEY source (source),
+            KEY lifecycle_status (lifecycle_status)
         ) {$charset};");
 
         dbDelta("CREATE TABLE {$jobs} (
@@ -379,6 +385,9 @@ final class SCH_Orchestrator {
         $this->maybe_add_column($sites, 'is_active', "ALTER TABLE {$sites} ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER publish_priority");
         $this->maybe_add_column($keywords, 'source', "ALTER TABLE {$keywords} ADD COLUMN source VARCHAR(50) NOT NULL DEFAULT 'manual' AFTER status");
         $this->maybe_add_column($keywords, 'source_context', "ALTER TABLE {$keywords} ADD COLUMN source_context LONGTEXT NULL AFTER source");
+        $this->maybe_add_column($keywords, 'lifecycle_status', "ALTER TABLE {$keywords} ADD COLUMN lifecycle_status VARCHAR(20) NOT NULL DEFAULT 'active' AFTER source_context");
+        $this->maybe_add_column($keywords, 'lifecycle_note', "ALTER TABLE {$keywords} ADD COLUMN lifecycle_note TEXT NULL AFTER lifecycle_status");
+        $this->maybe_add_column($keywords, 'reviewed_at', "ALTER TABLE {$keywords} ADD COLUMN reviewed_at DATETIME NULL AFTER lifecycle_note");
         $this->maybe_add_column($keywords, 'target_site_categories', "ALTER TABLE {$keywords} ADD COLUMN target_site_categories LONGTEXT NULL AFTER target_site_ids");
         $this->maybe_add_column($jobs, 'attempts', "ALTER TABLE {$jobs} ADD COLUMN attempts INT UNSIGNED NOT NULL DEFAULT 0 AFTER status");
         $this->maybe_add_column($articles, 'backlinks_data', "ALTER TABLE {$articles} ADD COLUMN backlinks_data LONGTEXT NULL AFTER publish_status");
@@ -832,7 +841,28 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
         $selected_site_ids = $edit ? $this->decode_json_array($edit->target_site_ids) : [];
         $selected_site_categories = $edit ? $this->decode_json_array($edit->target_site_categories) : [];
-        $rows = $this->db->get_results("SELECT k.*, c.name AS client_name FROM {$this->table('keywords')} k LEFT JOIN {$this->table('clients')} c ON c.id = k.client_id ORDER BY k.id DESC");
+        $view = sanitize_key((string) ($_GET['view'] ?? 'active'));
+        if (!in_array($view, ['active', 'trash', 'all'], true)) {
+            $view = 'active';
+        }
+
+        $where_sql = '';
+        if ($view === 'active') {
+            $where_sql = "WHERE k.lifecycle_status='active'";
+        } elseif ($view === 'trash') {
+            $where_sql = "WHERE k.lifecycle_status='trash'";
+        }
+
+        $rows = $this->db->get_results("
+            SELECT k.*, c.name AS client_name
+            FROM {$this->table('keywords')} k
+            LEFT JOIN {$this->table('clients')} c ON c.id = k.client_id
+            {$where_sql}
+            ORDER BY k.id DESC
+        ");
+        $active_count = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('keywords')} WHERE lifecycle_status='active'");
+        $trash_count = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('keywords')} WHERE lifecycle_status='trash'");
+        $all_count = $active_count + $trash_count;
         ?>
         <div class="wrap">
             <h1>Keywords</h1>
@@ -886,8 +916,13 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             </form>
 
             <h2 style="margin-top:30px;">Bestaande keywords</h2>
+            <p>
+                <a href="<?php echo esc_url(admin_url('admin.php?page=sch-keywords&view=active')); ?>" <?php if ($view === 'active') { echo 'style="font-weight:700;"'; } ?>>Actief (<?php echo (int) $active_count; ?>)</a> |
+                <a href="<?php echo esc_url(admin_url('admin.php?page=sch-keywords&view=trash')); ?>" <?php if ($view === 'trash') { echo 'style="font-weight:700;"'; } ?>>Prullenbak (<?php echo (int) $trash_count; ?>)</a> |
+                <a href="<?php echo esc_url(admin_url('admin.php?page=sch-keywords&view=all')); ?>" <?php if ($view === 'all') { echo 'style="font-weight:700;"'; } ?>>Alles (<?php echo (int) $all_count; ?>)</a>
+            </p>
             <table class="widefat striped">
-                <thead><tr><th>ID</th><th>Klant</th><th>Keyword</th><th>Type</th><th>Bron</th><th>Impressions</th><th>Clicks</th><th>CTR</th><th>Positie</th><th>Status</th><th>Acties</th></tr></thead>
+                <thead><tr><th>ID</th><th>Klant</th><th>Keyword</th><th>Type</th><th>Bron</th><th>Impressions</th><th>Clicks</th><th>CTR</th><th>Positie</th><th>Status</th><th>Review</th><th>Acties</th></tr></thead>
                 <tbody>
                 <?php if ($rows) : foreach ($rows as $row) : ?>
                     <?php
@@ -911,13 +946,24 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                         <td><?php echo $metrics['ctr'] === null ? '&mdash;' : esc_html(number_format_i18n($metrics['ctr'] * 100, 2) . '%'); ?></td>
                         <td><?php echo $metrics['position'] === null ? '&mdash;' : esc_html(number_format_i18n($metrics['position'], 2)); ?></td>
                         <td><?php echo esc_html($row->status); ?></td>
+                        <td>
+                            <?php echo esc_html((string) ($row->lifecycle_status ?? 'active')); ?>
+                            <?php if (!empty($row->lifecycle_note)) : ?>
+                                <br><span class="sch-muted"><?php echo esc_html(wp_trim_words((string) $row->lifecycle_note, 18)); ?></span>
+                            <?php endif; ?>
+                        </td>
                         <td class="sch-actions">
                             <a href="<?php echo esc_url(admin_url('admin.php?page=sch-keywords&edit=' . (int) $row->id)); ?>">Bewerken</a>
+                            <?php if ((string) ($row->lifecycle_status ?? 'active') === 'trash') : ?>
+                                <a href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_restore_keyword&id=' . (int) $row->id), 'sch_restore_keyword')); ?>">Herstellen</a>
+                            <?php else : ?>
+                                <a href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_trash_keyword&id=' . (int) $row->id), 'sch_trash_keyword')); ?>" onclick="return confirm('Keyword naar prullenbak verplaatsen?');">Naar prullenbak</a>
+                            <?php endif; ?>
                             <a href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_delete_keyword&id=' . (int) $row->id), 'sch_delete_keyword')); ?>" onclick="return confirm('Zeker weten?');">Verwijderen</a>
                         </td>
                     </tr>
                 <?php endforeach; else : ?>
-                    <tr><td colspan="11">Nog geen keywords.</td></tr>
+                    <tr><td colspan="12">Nog geen keywords.</td></tr>
                 <?php endif; ?>
                 </tbody>
             </table>
@@ -2352,6 +2398,9 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'priority'           => (int) ($_POST['priority'] ?? 10),
             'status'             => 'queued',
             'source'             => 'manual',
+            'lifecycle_status'   => 'active',
+            'lifecycle_note'     => null,
+            'reviewed_at'        => $this->now(),
             'updated_at'         => $this->now(),
         ];
 
@@ -2639,7 +2688,17 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
         try {
             $result = $this->sync_gsc_keywords_for_client($client, $range_days, $row_limit, $top_n_clicks, $min_impressions);
-            $this->redirect_with_message('sch-clients', sprintf('GSC sync klaar. Rows: %d, inserts: %d, updates: %d', $result['rows'], $result['inserted'], $result['updated']));
+            $this->redirect_with_message(
+                'sch-clients',
+                sprintf(
+                    'GSC sync klaar. Rows: %d, inserts: %d, updates: %d, actief: %d, prullenbak: %d',
+                    $result['rows'],
+                    $result['inserted'],
+                    $result['updated'],
+                    $result['review_active'],
+                    $result['review_trash']
+                )
+            );
         } catch (Throwable $e) {
             $this->log('error', 'gsc_sync', 'Keyword sync mislukt', [
                 'client_id' => $client_id,
@@ -2840,6 +2899,40 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $this->redirect_with_message('sch-keywords', 'Keyword verwijderd.');
     }
 
+    public function handle_trash_keyword(): void {
+        $this->verify_admin_nonce('sch_trash_keyword');
+        $id = (int) ($_GET['id'] ?? 0);
+        if ($id > 0) {
+            $this->delete_jobs_for_keyword($id);
+            $this->db->update($this->table('keywords'), [
+                'lifecycle_status' => 'trash',
+                'lifecycle_note' => 'Handmatig naar prullenbak verplaatst.',
+                'reviewed_at' => $this->now(),
+                'updated_at' => $this->now(),
+            ], ['id' => $id]);
+            $this->vlog('keyword', 'Keyword naar prullenbak verplaatst', ['keyword_id' => $id]);
+        }
+        $this->redirect_with_message('sch-keywords', 'Keyword verplaatst naar prullenbak.');
+    }
+
+    public function handle_restore_keyword(): void {
+        $this->verify_admin_nonce('sch_restore_keyword');
+        $id = (int) ($_GET['id'] ?? 0);
+        if ($id > 0) {
+            $this->db->update($this->table('keywords'), [
+                'lifecycle_status' => 'active',
+                'reviewed_at' => $this->now(),
+                'updated_at' => $this->now(),
+            ], ['id' => $id]);
+            $created_jobs = $this->create_jobs_for_keyword($id);
+            $this->vlog('keyword', 'Keyword hersteld uit prullenbak', [
+                'keyword_id' => $id,
+                'created_jobs' => $created_jobs,
+            ]);
+        }
+        $this->redirect_with_message('sch-keywords', 'Keyword hersteld uit prullenbak.');
+    }
+
     private function delete_jobs_for_keyword(int $keyword_id): void {
         $deleted = $this->db->query($this->db->prepare("DELETE FROM {$this->table('jobs')} WHERE keyword_id=%d", $keyword_id));
         $this->vlog('jobs', 'Jobs verwijderd voor keyword', [
@@ -2858,6 +2951,14 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         if (!$keyword) {
             $this->log('error', 'jobs', 'Geen jobs aangemaakt: keyword niet gevonden', [
                 'keyword_id' => $keyword_id,
+            ]);
+            return 0;
+        }
+
+        if (($keyword->lifecycle_status ?? 'active') !== 'active') {
+            $this->vlog('jobs', 'Geen jobs aangemaakt: keyword staat in prullenbak', [
+                'keyword_id' => $keyword_id,
+                'lifecycle_status' => (string) ($keyword->lifecycle_status ?? ''),
             ]);
             return 0;
         }
@@ -5337,12 +5438,17 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $site_ids = $this->get_default_target_site_ids();
         $inserted = 0;
         $updated = 0;
+        $review_counts = ['active' => 0, 'trash' => 0];
+        $client_context = $this->build_client_keyword_review_context($client);
 
         foreach ($rows as $row) {
             $query = $this->normalize_keyword_term((string) ($row['query'] ?? ''));
             if ($query === '') {
                 continue;
             }
+
+            $review = $this->assess_gsc_keyword_relevance($query, $row, $client_context);
+            $review_counts[$review['lifecycle_status']] = ($review_counts[$review['lifecycle_status']] ?? 0) + 1;
 
             $source_context = wp_json_encode([
                 'source' => 'google_search_console',
@@ -5374,6 +5480,9 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'status' => 'queued',
                 'source' => 'google_search_console',
                 'source_context' => $source_context,
+                'lifecycle_status' => $review['lifecycle_status'],
+                'lifecycle_note' => $review['note'],
+                'reviewed_at' => $this->now(),
                 'updated_at' => $this->now(),
             ];
 
@@ -5404,12 +5513,16 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'min_impressions' => $min_impressions,
             'inserted' => $inserted,
             'updated' => $updated,
+            'review_active' => (int) ($review_counts['active'] ?? 0),
+            'review_trash' => (int) ($review_counts['trash'] ?? 0),
         ]);
 
         return [
             'rows' => count($rows),
             'inserted' => $inserted,
             'updated' => $updated,
+            'review_active' => (int) ($review_counts['active'] ?? 0),
+            'review_trash' => (int) ($review_counts['trash'] ?? 0),
         ];
     }
 
@@ -5458,6 +5571,110 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         ]);
 
         return $rows;
+    }
+
+    private function build_client_keyword_review_context(object $client): array {
+        $website_url = esc_url_raw((string) ($client->website_url ?? ''));
+        $page_title = '';
+        $page_text = '';
+
+        if ($website_url !== '') {
+            try {
+                $page = $this->fetch_and_extract_page($website_url);
+                $page_title = sanitize_text_field((string) ($page['title'] ?? ''));
+                $page_text = sanitize_text_field((string) ($page['text'] ?? ''));
+            } catch (Throwable $e) {
+                $this->log('warning', 'gsc_keyword_review', 'Website context ophalen mislukt, fallback op klantnaam.', [
+                    'client_id' => (int) ($client->id ?? 0),
+                    'website_url' => $website_url,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        return [
+            'client_id' => (int) ($client->id ?? 0),
+            'client_name' => sanitize_text_field((string) ($client->name ?? '')),
+            'website_url' => $website_url,
+            'page_title' => mb_substr($page_title, 0, 200),
+            'page_text' => mb_substr($page_text, 0, 2500),
+        ];
+    }
+
+    private function assess_gsc_keyword_relevance(string $query, array $row, array $client_context): array {
+        try {
+            $result = $this->openai_json_call(
+                'gsc_keyword_relevance',
+                [
+                    'role' => 'Je bent een strenge SEO-assistent die Search Console keywords beoordeelt op zakelijke relevantie.',
+                    'goal' => 'Classificeer elk keyword als actief of prullenbak op basis van klantwebsite-context.',
+                ],
+                [
+                    'client' => [
+                        'name' => (string) ($client_context['client_name'] ?? ''),
+                        'website_url' => (string) ($client_context['website_url'] ?? ''),
+                        'page_title' => (string) ($client_context['page_title'] ?? ''),
+                        'page_text' => (string) ($client_context['page_text'] ?? ''),
+                    ],
+                    'keyword' => $query,
+                    'metrics' => [
+                        'clicks' => (float) ($row['clicks'] ?? 0),
+                        'impressions' => (float) ($row['impressions'] ?? 0),
+                        'ctr' => (float) ($row['ctr'] ?? 0),
+                        'position' => (float) ($row['position'] ?? 0),
+                    ],
+                    'rules' => [
+                        'Gebruik de klantcontext als hoofdbron voor relevantie.',
+                        'Kies alleen "active" als het keyword een realistische contentkans is voor deze klant.',
+                        'Kies "trash" voor irrelevante, spammy, navigational of mismatch keywords.',
+                    ],
+                ],
+                [
+                    'type' => 'object',
+                    'additionalProperties' => false,
+                    'properties' => [
+                        'lifecycle_status' => [
+                            'type' => 'string',
+                            'enum' => ['active', 'trash'],
+                        ],
+                        'note' => [
+                            'type' => 'string',
+                            'maxLength' => 280,
+                        ],
+                    ],
+                    'required' => ['lifecycle_status', 'note'],
+                ]
+            );
+
+            $status = sanitize_key((string) ($result['lifecycle_status'] ?? 'active'));
+            $note = sanitize_text_field((string) ($result['note'] ?? ''));
+
+            if (!in_array($status, ['active', 'trash'], true)) {
+                $status = 'active';
+            }
+
+            if ($note === '') {
+                $note = $status === 'trash'
+                    ? 'Automatisch afgekeurd door AI-review op basis van website-context.'
+                    : 'Automatisch goedgekeurd door AI-review op basis van website-context.';
+            }
+
+            return [
+                'lifecycle_status' => $status,
+                'note' => $note,
+            ];
+        } catch (Throwable $e) {
+            $this->log('warning', 'gsc_keyword_review', 'AI review mislukt, keyword op actief gezet.', [
+                'keyword' => $query,
+                'client_id' => (int) ($client_context['client_id'] ?? 0),
+                'error' => $e->getMessage(),
+            ]);
+
+            return [
+                'lifecycle_status' => 'active',
+                'note' => 'AI review mislukt; keyword is als actief behouden.',
+            ];
+        }
     }
 
     private function gsc_list_properties_for_client(object $client): array {
