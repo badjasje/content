@@ -677,6 +677,77 @@ final class SCH_Orchestrator {
         if ($message !== '') {
             echo '<div class="' . esc_attr($notice_class) . '"><p>' . esc_html($message) . '</p></div>';
         }
+
+        $this->render_page_explanation();
+    }
+
+    private function render_page_explanation(): void {
+        $page = isset($_GET['page']) ? sanitize_key(wp_unslash($_GET['page'])) : 'sch-content-hub';
+        $explanations = [
+            'sch-content-hub' => [
+                'title' => 'Dashboard',
+                'text' => 'Hier zie je direct de status van de pipeline: hoeveel jobs in de wachtrij staan, draaien, op redactie wachten, gepubliceerd zijn of zijn mislukt. Je kunt vanaf deze pagina ook direct de worker handmatig starten.',
+            ],
+            'sch-clients' => [
+                'title' => 'Klanten',
+                'text' => 'Op deze pagina beheer je klantprofielen, link targets, research-URL’s en maandlimieten. Je koppelt hier per klant ook Google Search Console en Google Analytics 4 om data-gedreven contentsturing mogelijk te maken.',
+            ],
+            'sch-sites' => [
+                'title' => 'Blogs',
+                'text' => 'Hier beheer je alle aangesloten blogs/receivers per klant. Je voegt sites toe, past instellingen aan (zoals categorieën en status) en bepaalt zo naar welke websites content gepubliceerd mag worden.',
+            ],
+            'sch-keywords' => [
+                'title' => 'Keywords',
+                'text' => 'Deze pagina is voor keywordbeheer: handmatig toevoegen, opschonen en herstellen van keywords, plus keyword discovery starten. Dit vormt de basis voor nieuwe contentjobs.',
+            ],
+            'sch-jobs' => [
+                'title' => 'Jobs',
+                'text' => 'Hier volg je de voortgang van alle contentjobs van queued tot published of failed. Je kunt jobs herstarten of handmatig acties uitvoeren wanneer iets vastloopt.',
+            ],
+            'sch-conflicts' => [
+                'title' => 'Conflicten',
+                'text' => 'Op deze pagina zie je conflicten zoals mogelijke duplicaten, overlap of kwaliteitswaarschuwingen. Je gebruikt dit overzicht om te beslissen wat door mag en wat eerst aangepast moet worden.',
+            ],
+            'sch-editorial' => [
+                'title' => 'Redactie',
+                'text' => 'Hier behandel je content die op redactionele goedkeuring wacht. Je beoordeelt output, voert verbeteringen door en keurt publicatie goed wanneer de content klaar is.',
+            ],
+            'sch-reporting' => [
+                'title' => 'Rapportage',
+                'text' => 'Deze pagina geeft inzicht in output en prestaties over tijd. Je gebruikt rapportages om productievolume, publicatiekwaliteit en effectiviteit van je contentstrategie te monitoren.',
+            ],
+            'sch-performance' => [
+                'title' => 'Performance',
+                'text' => 'Hier bekijk je performance-signalen uit gekoppelde databronnen om kansen en dalingen te spotten. Dit helpt je prioriteren welke onderwerpen of pagina’s extra aandacht nodig hebben.',
+            ],
+            'sch-page-intelligence' => [
+                'title' => 'Page Intelligence',
+                'text' => 'Op deze pagina verzamel je pagina-inzichten om contentbeslissingen te verbeteren. Je gebruikt de analyses om te bepalen welke pagina’s geüpdatet, uitgebreid of opnieuw gepositioneerd moeten worden.',
+            ],
+            'sch-feedback' => [
+                'title' => 'Feedback',
+                'text' => 'Hier verzamel en beheer je feedbacksignalen op gepubliceerde content. Je markeert items als opgelost of genegeerd en voedt zo de continue verbeterloop van het systeem.',
+            ],
+            'sch-refresh-queue' => [
+                'title' => 'Refresh Queue',
+                'text' => 'Deze pagina toont de vernieuwingswachtrij voor bestaande content. Je ziet welke items klaarstaan voor refresh en bewaakt hiermee de lifecycle van eerder gepubliceerde artikelen.',
+            ],
+            'sch-logs' => [
+                'title' => 'Logs',
+                'text' => 'In Logs vind je technische en functionele gebeurtenissen van de orchestrator. Deze pagina gebruik je voor troubleshooting, auditing en het analyseren van fouten of onverwacht gedrag.',
+            ],
+            'sch-settings' => [
+                'title' => 'Instellingen',
+                'text' => 'Hier configureer je alle systeeminstellingen, waaronder API-sleutels, AI-gedrag, automatische syncs en publicatiegedrag. Dit is de centrale plek voor beheer van de orchestrator.',
+            ],
+        ];
+
+        if (!isset($explanations[$page])) {
+            return;
+        }
+
+        $explanation = $explanations[$page];
+        echo '<div class="sch-notice"><strong>Wat kan je op deze pagina doen (' . esc_html($explanation['title']) . ')?</strong><br>' . esc_html($explanation['text']) . '</div>';
     }
 
     public function render_dashboard(): void {
