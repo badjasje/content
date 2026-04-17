@@ -1346,7 +1346,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
             <h2 style="margin-top:24px;">Artikelen met backlinks</h2>
             <table class="widefat striped">
-                <thead><tr><th>Datum</th><th>Klant</th><th>Blog</th><th>Keyword</th><th>Titel</th><th>Backlinks</th></tr></thead>
+                <thead><tr><th>Datum</th><th>Klant</th><th>Blog</th><th>Keyword</th><th>Titel</th><th>Artikel URL</th><th>Backlinks</th></tr></thead>
                 <tbody>
                 <?php if ($articles) : foreach ($articles as $article) : ?>
                     <?php $backlinks = $this->decode_json_array($article->backlinks_data); ?>
@@ -1356,10 +1356,17 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                         <td><?php echo esc_html((string) ($article->site_name ?: '')); ?></td>
                         <td><?php echo esc_html((string) ($article->main_keyword ?: '')); ?></td>
                         <td><?php echo esc_html((string) $article->title); ?></td>
+                        <td>
+                            <?php if (!empty($article->remote_url)) : ?>
+                                <a href="<?php echo esc_url((string) $article->remote_url); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html((string) $article->remote_url); ?></a>
+                            <?php else : ?>
+                                <span class="sch-muted">Nog niet gepubliceerd</span>
+                            <?php endif; ?>
+                        </td>
                         <td><?php echo esc_html($this->implode_target_strings($backlinks)); ?></td>
                     </tr>
                 <?php endforeach; else : ?>
-                    <tr><td colspan="6">Geen artikelen gevonden voor deze selectie.</td></tr>
+                    <tr><td colspan="7">Geen artikelen gevonden voor deze selectie.</td></tr>
                 <?php endif; ?>
                 </tbody>
             </table>
