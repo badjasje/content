@@ -1160,6 +1160,43 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $month_start = $selected_month . '-01 00:00:00';
         $month_end = gmdate('Y-m-d H:i:s', strtotime($selected_month . '-01 +1 month'));
         $clients = $this->db->get_results("SELECT id, name FROM {$this->table('clients')} ORDER BY name ASC");
+        $clients_by_id = [];
+        $clients_by_name = [];
+        foreach ($clients as $client) {
+            $clients_by_id[(int) $client->id] = (string) $client->name;
+            $clients_by_name[(string) $client->name] = (int) $client->id;
+        }
+
+        $trend_months = [];
+        for ($i = 11; $i >= 0; $i--) {
+            $month_key = gmdate('Y-m', strtotime($selected_month . '-01 -' . $i . ' month'));
+            $trend_months[] = [
+                'key' => $month_key,
+                'label' => gmdate('M Y', strtotime($month_key . '-01')),
+            ];
+        }
+        $trend_start = $trend_months[0]['key'] . '-01 00:00:00';
+        $trend_end = gmdate('Y-m-d H:i:s', strtotime($trend_months[count($trend_months) - 1]['key'] . '-01 +1 month'));
+
+        $trend_query = "
+            SELECT a.client_id, DATE_FORMAT(a.created_at, '%%Y-%%m') AS month_key, COUNT(*) AS article_count
+            FROM {$this->table('articles')} a
+            WHERE a.created_at >= %s AND a.created_at < %s
+            GROUP BY a.client_id, DATE_FORMAT(a.created_at, '%%Y-%%m')
+        ";
+        $trend_rows = $this->db->get_results($this->db->prepare($trend_query, $trend_start, $trend_end));
+        $trend_by_client = [];
+        foreach ($trend_rows as $trend_row) {
+            $trend_client_id = (int) ($trend_row->client_id ?? 0);
+            if ($trend_client_id <= 0 || !isset($clients_by_id[$trend_client_id])) {
+                continue;
+            }
+
+            if (!isset($trend_by_client[$trend_client_id])) {
+                $trend_by_client[$trend_client_id] = [];
+            }
+            $trend_by_client[$trend_client_id][(string) $trend_row->month_key] = (int) $trend_row->article_count;
+        }
 
         $query = "
             SELECT a.*, c.name AS client_name, s.name AS site_name, k.main_keyword
@@ -1227,16 +1264,67 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
             <h2>Overzicht per klant</h2>
             <table class="widefat striped">
-                <thead><tr><th>Klant</th><th>Artikelen</th><th>Backlinks</th></tr></thead>
+                <thead><tr><th>Klant</th><th>Artikelen</th><th>Backlinks</th><th>Rapport</th></tr></thead>
                 <tbody>
                 <?php if ($by_client) : foreach ($by_client as $client_name => $stats) : ?>
                     <tr>
                         <td><?php echo esc_html($client_name); ?></td>
                         <td><?php echo (int) $stats['count']; ?></td>
                         <td><?php echo (int) $stats['backlinks']; ?></td>
+                        <td>
+                            <?php if (isset($clients_by_name[$client_name])) : ?>
+                                <a href="<?php echo esc_url(admin_url('admin.php?page=sch-reporting&month=' . rawurlencode($selected_month) . '&client_id=' . (int) $clients_by_name[$client_name])); ?>">Open klantrapport</a>
+                            <?php else : ?>
+                                <span class="sch-muted">n.v.t.</span>
+                            <?php endif; ?>
+                        </td>
                     </tr>
                 <?php endforeach; else : ?>
-                    <tr><td colspan="3">Geen artikelen gevonden voor deze selectie.</td></tr>
+                    <tr><td colspan="4">Geen artikelen gevonden voor deze selectie.</td></tr>
+                <?php endif; ?>
+                </tbody>
+            </table>
+
+            <h2 style="margin-top:24px;">Per klant per maand (laatste 12 maanden)</h2>
+            <table class="widefat striped">
+                <thead>
+                <tr>
+                    <th>Klant</th>
+                    <?php foreach ($trend_months as $trend_month) : ?>
+                        <th><?php echo esc_html($trend_month['label']); ?></th>
+                    <?php endforeach; ?>
+                    <th>Totaal</th>
+                </tr>
+                </thead>
+                <tbody>
+                <?php if ($clients) : foreach ($clients as $client) : ?>
+                    <?php
+                    $client_month_counts = $trend_by_client[(int) $client->id] ?? [];
+                    $client_total = 0;
+                    ?>
+                    <tr>
+                        <td>
+                            <strong><?php echo esc_html((string) $client->name); ?></strong><br>
+                            <a href="<?php echo esc_url(admin_url('admin.php?page=sch-reporting&month=' . rawurlencode($selected_month) . '&client_id=' . (int) $client->id)); ?>">Klantrapport openen</a>
+                        </td>
+                        <?php foreach ($trend_months as $trend_month) : ?>
+                            <?php
+                            $month_key = (string) $trend_month['key'];
+                            $month_count = (int) ($client_month_counts[$month_key] ?? 0);
+                            $client_total += $month_count;
+                            ?>
+                            <td>
+                                <?php if ($month_count > 0) : ?>
+                                    <a href="<?php echo esc_url(admin_url('admin.php?page=sch-reporting&month=' . rawurlencode($month_key) . '&client_id=' . (int) $client->id)); ?>"><?php echo (int) $month_count; ?></a>
+                                <?php else : ?>
+                                    0
+                                <?php endif; ?>
+                            </td>
+                        <?php endforeach; ?>
+                        <td><strong><?php echo (int) $client_total; ?></strong></td>
+                    </tr>
+                <?php endforeach; else : ?>
+                    <tr><td colspan="<?php echo (int) (count($trend_months) + 2); ?>">Nog geen klanten gevonden.</td></tr>
                 <?php endif; ?>
                 </tbody>
             </table>
