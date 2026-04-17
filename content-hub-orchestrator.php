@@ -1179,6 +1179,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                             <td><?php echo esc_html((string) $row->created_at); ?></td>
                             <td>
                                 <button class="button button-primary" type="submit" name="publish_now_article_id" value="<?php echo (int) $row->id; ?>">Publiceren</button>
+                                <button class="button button-link-delete" type="submit" name="delete_article_id" value="<?php echo (int) $row->id; ?>" onclick="return confirm('Weet je zeker dat je dit artikel wilt verwijderen?');">Verwijderen</button>
                             </td>
                         </tr>
                     <?php endforeach; else : ?>
@@ -1189,6 +1190,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 <?php if ($rows) : ?>
                     <p style="margin-top:12px;">
                         <button class="button button-primary" type="submit">Geselecteerde artikelen publiceren</button>
+                        <button class="button button-secondary" type="submit" name="bulk_delete_articles" value="1" onclick="return confirm('Weet je zeker dat je de geselecteerde artikelen wilt verwijderen?');">Geselecteerde artikelen verwijderen</button>
                     </p>
                 <?php endif; ?>
             </form>
@@ -2819,14 +2821,21 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
     public function handle_bulk_approve_publish(): void {
         $this->verify_admin_nonce('sch_bulk_approve_publish');
+
+        $single_delete_article_id = (int) ($_POST['delete_article_id'] ?? 0);
+        if ($single_delete_article_id > 0) {
+            $deleted = $this->delete_editorial_article($single_delete_article_id);
+            if (!$deleted) {
+                $this->redirect_with_message('sch-editorial', 'Artikel niet gevonden of al verwijderd.', 'error');
+            }
+            $this->redirect_with_message('sch-editorial', 'Artikel verwijderd.');
+        }
+
+        $bulk_delete_articles = isset($_POST['bulk_delete_articles']);
         $article_ids = array_map('intval', (array) ($_POST['article_ids'] ?? []));
         $article_ids = array_values(array_filter($article_ids, static function (int $id): bool {
             return $id > 0;
         }));
-
-        if (!$article_ids) {
-            $this->redirect_with_message('sch-editorial', 'Geen artikelen geselecteerd.', 'error');
-        }
 
         $single_publish_article_id = (int) ($_POST['publish_now_article_id'] ?? 0);
         if ($single_publish_article_id > 0) {
@@ -2842,6 +2851,37 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 ]);
                 $this->redirect_with_message('sch-editorial', 'Publiceren mislukt. Check logs.', 'error');
             }
+        }
+
+        if (!$article_ids) {
+            $this->redirect_with_message('sch-editorial', 'Geen artikelen geselecteerd.', 'error');
+        }
+
+        if ($bulk_delete_articles) {
+            $deleted = 0;
+            $failed = 0;
+            foreach ($article_ids as $article_id) {
+                try {
+                    $did_delete = $this->delete_editorial_article($article_id);
+                    if ($did_delete) {
+                        $deleted++;
+                    } else {
+                        $failed++;
+                    }
+                } catch (Throwable $e) {
+                    $failed++;
+                    $this->log('error', 'editorial', 'Bulk verwijderen mislukt voor artikel', [
+                        'article_id' => $article_id,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
+
+            if ($failed > 0) {
+                $this->redirect_with_message('sch-editorial', "Klaar. Verwijderd: {$deleted}, mislukt: {$failed}.", 'error');
+            }
+
+            $this->redirect_with_message('sch-editorial', "Klaar. Verwijderd: {$deleted}.");
         }
 
         $published = 0;
@@ -2866,6 +2906,53 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
 
         $this->redirect_with_message('sch-editorial', "Klaar. Gepubliceerd: {$published}.");
+    }
+
+    private function delete_editorial_article(int $article_id): bool {
+        $article = $this->db->get_row($this->db->prepare(
+            "SELECT id, job_id FROM {$this->table('articles')} WHERE id=%d",
+            $article_id
+        ));
+
+        if (!$article) {
+            return false;
+        }
+
+        $deleted = $this->db->delete($this->table('articles'), ['id' => $article_id], ['%d']);
+        if ($deleted === false) {
+            throw new RuntimeException('Kon artikel niet verwijderen.');
+        }
+
+        $job_id = (int) $article->job_id;
+        if ($job_id > 0) {
+            $job_updated = $this->db->update(
+                $this->table('jobs'),
+                [
+                    'status' => 'failed',
+                    'last_error' => 'Artikel handmatig verwijderd in redactie.',
+                    'finished_at' => $this->now(),
+                    'updated_at' => $this->now(),
+                ],
+                ['id' => $job_id],
+                ['%s', '%s', '%s', '%s'],
+                ['%d']
+            );
+            if ($job_updated === false) {
+                $this->log('error', 'editorial', 'Status van job niet bijgewerkt na verwijderen artikel', [
+                    'article_id' => $article_id,
+                    'job_id' => $job_id,
+                    'db_error' => $this->db->last_error,
+                ]);
+            }
+        }
+
+        $this->vlog('editorial', 'Artikel verwijderd vanuit redactie', [
+            'article_id' => $article_id,
+            'job_id' => $job_id,
+            'deleted' => $deleted,
+        ]);
+
+        return $deleted > 0;
     }
 
     public function handle_delete_client(): void {
