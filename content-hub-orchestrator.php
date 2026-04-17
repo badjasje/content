@@ -3905,6 +3905,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             $draft = $this->agent_write($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $plan, $research_bundle, $anchor_plan);
             $edited = $this->agent_edit($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $plan, $draft, $research_bundle, $anchor_plan);
             $reviewed = $this->agent_review($keyword, $client, $site, $primary_target, $secondary_keywords, $link_targets, $plan, $edited, $research_bundle, $anchor_plan);
+            $reviewed = $this->ensure_title_variation($reviewed, $keyword, $client, $site);
             return $reviewed;
         } catch (Throwable $e) {
             if ($this->is_openai_quota_error($e)) {
@@ -4295,7 +4296,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         array $research_bundle,
         array $anchor_plan
     ): array {
-        $previous_variants = $this->get_recent_article_variants((int) $client->id, (int) $site->id, (string) $keyword->main_keyword);
+        $previous_variants = $this->get_recent_article_variants((int) $client->id, (string) $keyword->main_keyword);
 
         return [
             'main_keyword'       => (string) $keyword->main_keyword,
@@ -4315,6 +4316,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'desired_angle' => 'Praktisch en toepasbaar met voldoende technische diepgang waar relevant.',
                 'forbidden_repetitions' => [
                     'Gebruik geen titel die semantisch gelijk is aan eerdere varianten.',
+                    'Start de titel met een andere formulering dan eerdere varianten (vermijd dezelfde eerste 4 woorden).',
                     'Gebruik geen intro met vrijwel dezelfde openingszin als eerdere varianten.',
                     'Kopieer geen H2-structuur van eerdere varianten.',
                     'Hergebruik geen identieke CTA-formulering uit eerdere varianten.',
@@ -4324,18 +4326,17 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         ];
     }
 
-    private function get_recent_article_variants(int $client_id, int $site_id, string $main_keyword, int $limit = 5): array {
+    private function get_recent_article_variants(int $client_id, string $main_keyword, int $limit = 8): array {
         $rows = $this->db->get_results($this->db->prepare(
-            "SELECT a.title, a.content
+            "SELECT a.title, a.content, s.name AS site_name
              FROM {$this->table('articles')} a
              INNER JOIN {$this->table('keywords')} k ON k.id = a.keyword_id
+             INNER JOIN {$this->table('sites')} s ON s.id = a.site_id
              WHERE a.client_id = %d
-               AND a.site_id = %d
                AND k.main_keyword = %s
              ORDER BY a.id DESC
              LIMIT %d",
             $client_id,
-            $site_id,
             $main_keyword,
             max(1, $limit)
         ));
@@ -4351,6 +4352,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             $variants[] = [
                 'title' => sanitize_text_field((string) ($row->title ?? '')),
                 'intro_excerpt' => $intro,
+                'site_name' => sanitize_text_field((string) ($row->site_name ?? '')),
             ];
         }
 
@@ -4546,6 +4548,133 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             ],
             'required' => ['title', 'slug', 'content', 'meta_title', 'meta_description', 'canonical_url', 'article_type'],
         ];
+    }
+
+    private function ensure_title_variation(array $article, object $keyword, object $client, object $site): array {
+        $recent_titles = $this->get_recent_titles_for_keyword((int) $client->id, (string) $keyword->main_keyword);
+        $current_title = sanitize_text_field((string) ($article['title'] ?? ''));
+
+        if ($current_title === '' || !$this->is_title_too_close_to_existing($current_title, $recent_titles)) {
+            return $article;
+        }
+
+        $this->log('info', 'title_variation', 'Titel te vergelijkbaar met eerdere varianten; herschrijven gestart', [
+            'client_id' => (int) $client->id,
+            'site_id' => (int) $site->id,
+            'keyword' => (string) $keyword->main_keyword,
+            'current_title' => $current_title,
+        ]);
+
+        try {
+            $variation = $this->openai_json_call(
+                'title_variation',
+                [
+                    'role' => 'Nederlandse SEO copy chief met focus op titeldiversiteit.',
+                    'goal' => 'Herschrijf title, slug en meta_title zodat de nieuwe titel duidelijk verschilt van eerdere varianten voor hetzelfde keyword. Geef alleen JSON terug.',
+                ],
+                [
+                    'main_keyword' => (string) $keyword->main_keyword,
+                    'site_name' => (string) $site->name,
+                    'current_title' => $current_title,
+                    'current_slug' => (string) ($article['slug'] ?? ''),
+                    'current_meta_title' => (string) ($article['meta_title'] ?? ''),
+                    'recent_titles_same_keyword' => $recent_titles,
+                    'rules' => [
+                        'keyword_moet_in_titel_blijven' => true,
+                        'nieuwe_opening_en_andere_woordvolgorde' => true,
+                        'vermijd_woordelijke_of_semantische_dubbels' => true,
+                    ],
+                ],
+                [
+                    'type' => 'object',
+                    'additionalProperties' => false,
+                    'properties' => [
+                        'title' => ['type' => 'string'],
+                        'slug' => ['type' => 'string'],
+                        'meta_title' => ['type' => 'string'],
+                    ],
+                    'required' => ['title', 'slug', 'meta_title'],
+                ]
+            );
+
+            $candidate_title = sanitize_text_field((string) ($variation['title'] ?? ''));
+            if ($candidate_title !== '' && !$this->is_title_too_close_to_existing($candidate_title, $recent_titles, 60.0)) {
+                $article['title'] = $candidate_title;
+                $article['slug'] = sanitize_title((string) ($variation['slug'] ?? ($article['slug'] ?? '')));
+                $article['meta_title'] = sanitize_text_field((string) ($variation['meta_title'] ?? ($article['meta_title'] ?? $candidate_title)));
+            }
+        } catch (Throwable $e) {
+            $this->log('warning', 'title_variation', 'Titelvariatie herschrijving mislukt', [
+                'client_id' => (int) $client->id,
+                'site_id' => (int) $site->id,
+                'keyword' => (string) $keyword->main_keyword,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        return $article;
+    }
+
+    private function get_recent_titles_for_keyword(int $client_id, string $main_keyword, int $limit = 20): array {
+        $rows = $this->db->get_results($this->db->prepare(
+            "SELECT a.title
+             FROM {$this->table('articles')} a
+             INNER JOIN {$this->table('keywords')} k ON k.id = a.keyword_id
+             WHERE a.client_id = %d
+               AND k.main_keyword = %s
+             ORDER BY a.id DESC
+             LIMIT %d",
+            $client_id,
+            $main_keyword,
+            max(1, $limit)
+        ));
+
+        $titles = [];
+        foreach ((array) $rows as $row) {
+            $title = sanitize_text_field((string) ($row->title ?? ''));
+            if ($title !== '') {
+                $titles[] = $title;
+            }
+        }
+
+        return $titles;
+    }
+
+    private function is_title_too_close_to_existing(string $candidate, array $existing_titles, float $threshold = 64.0): bool {
+        $normalized_candidate = $this->normalize_title_for_similarity($candidate);
+        if ($normalized_candidate === '') {
+            return false;
+        }
+
+        foreach ($existing_titles as $existing_title) {
+            $normalized_existing = $this->normalize_title_for_similarity((string) $existing_title);
+            if ($normalized_existing === '') {
+                continue;
+            }
+
+            similar_text($normalized_candidate, $normalized_existing, $percent);
+            if ($percent >= $threshold) {
+                return true;
+            }
+
+            $candidate_words = preg_split('/\s+/u', $normalized_candidate) ?: [];
+            $existing_words = preg_split('/\s+/u', $normalized_existing) ?: [];
+            $candidate_prefix = implode(' ', array_slice($candidate_words, 0, 4));
+            $existing_prefix = implode(' ', array_slice($existing_words, 0, 4));
+            if ($candidate_prefix !== '' && $candidate_prefix === $existing_prefix) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function normalize_title_for_similarity(string $title): string {
+        $normalized = mb_strtolower(wp_strip_all_tags($title));
+        $normalized = preg_replace('/[^\p{L}\p{N}\s]+/u', ' ', (string) $normalized);
+        $normalized = preg_replace('/\s+/u', ' ', (string) $normalized);
+
+        return trim((string) $normalized);
     }
 
     private function openai_json_call(string $name, array $system_context, array $user_payload, array $schema): array {
