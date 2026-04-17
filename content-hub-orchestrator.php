@@ -59,6 +59,7 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_save_client', [$this, 'handle_save_client']);
         add_action('admin_post_sch_save_site', [$this, 'handle_save_site']);
         add_action('admin_post_sch_bulk_save_sites', [$this, 'handle_bulk_save_sites']);
+        add_action('admin_post_sch_bulk_update_sites_status', [$this, 'handle_bulk_update_sites_status']);
         add_action('admin_post_sch_save_keyword', [$this, 'handle_save_keyword']);
         add_action('admin_post_sch_save_settings', [$this, 'handle_save_settings']);
         add_action('admin_post_sch_run_now', [$this, 'handle_run_now']);
@@ -631,6 +632,25 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <p><button class="button button-primary">Bulk blogs verwerken</button></p>
                 </form>
             </div>
+
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-card" style="margin-top:20px;max-width:620px;">
+                <h2 style="margin-top:0;">Bestaande blogs in bulk bijwerken</h2>
+                <?php wp_nonce_field('sch_bulk_update_sites_status'); ?>
+                <input type="hidden" name="action" value="sch_bulk_update_sites_status">
+                <p>Pas in één keer de default status van alle bestaande blogs aan.</p>
+                <table class="form-table">
+                    <tr>
+                        <th>Nieuwe status</th>
+                        <td>
+                            <select name="default_status">
+                                <option value="draft">draft</option>
+                                <option value="publish">publish</option>
+                            </select>
+                        </td>
+                    </tr>
+                </table>
+                <p><button class="button">Status voor alle blogs bijwerken</button></p>
+            </form>
 
             <h2 style="margin-top:30px;">Bestaande blogs</h2>
             <table class="widefat striped">
@@ -1950,6 +1970,34 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         set_transient('sch_bulk_sites_result_' . get_current_user_id(), $result, MINUTE_IN_SECONDS * 5);
         wp_safe_redirect(admin_url('admin.php?page=sch-sites'));
         exit;
+    }
+
+    public function handle_bulk_update_sites_status(): void {
+        $this->verify_admin_nonce('sch_bulk_update_sites_status');
+
+        $status = sanitize_key((string) ($_POST['default_status'] ?? 'draft'));
+        if (!$this->is_valid_default_status($status)) {
+            $status = 'draft';
+        }
+
+        $updated = $this->db->query($this->db->prepare(
+            "UPDATE {$this->table('sites')} SET default_status=%s, updated_at=%s",
+            $status,
+            $this->now()
+        ));
+
+        if ($updated === false) {
+            $this->log('error', 'site_bulk', 'Bulk status update mislukt', [
+                'status' => $status,
+                'db_error' => $this->db->last_error,
+            ]);
+            $this->redirect_with_message('sch-sites', 'Bulk status update mislukt. Check logs.', 'error');
+        }
+
+        $this->redirect_with_message(
+            'sch-sites',
+            sprintf('Default status bijgewerkt naar "%s" voor %d blogs.', $status, (int) $updated)
+        );
     }
 
     public function handle_save_keyword(): void {
