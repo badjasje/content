@@ -1101,6 +1101,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 a.id,
                 a.title,
                 a.slug,
+                a.meta_title,
                 a.meta_description,
                 a.content,
                 a.created_at,
@@ -1178,6 +1179,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                             </td>
                             <td><?php echo esc_html((string) $row->created_at); ?></td>
                             <td>
+                                <button class="button button-secondary" type="submit" name="rewrite_content_article_id" value="<?php echo (int) $row->id; ?>">Herschrijf content</button>
+                                <button class="button button-secondary" type="submit" name="rewrite_full_article_id" value="<?php echo (int) $row->id; ?>">Herschrijf compleet</button>
                                 <button class="button button-primary" type="submit" name="publish_now_article_id" value="<?php echo (int) $row->id; ?>">Publiceren</button>
                                 <button class="button button-link-delete" type="submit" name="delete_article_id" value="<?php echo (int) $row->id; ?>" onclick="return confirm('Weet je zeker dat je dit artikel wilt verwijderen?');">Verwijderen</button>
                             </td>
@@ -2822,6 +2825,34 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     public function handle_bulk_approve_publish(): void {
         $this->verify_admin_nonce('sch_bulk_approve_publish');
 
+        $single_rewrite_content_article_id = (int) ($_POST['rewrite_content_article_id'] ?? 0);
+        if ($single_rewrite_content_article_id > 0) {
+            try {
+                $this->rewrite_editorial_article($single_rewrite_content_article_id, 'content');
+                $this->redirect_with_message('sch-editorial', 'Artikelcontent herschreven.');
+            } catch (Throwable $e) {
+                $this->log('error', 'editorial', 'Content herschrijven mislukt', [
+                    'article_id' => $single_rewrite_content_article_id,
+                    'error' => $e->getMessage(),
+                ]);
+                $this->redirect_with_message('sch-editorial', 'Herschrijven mislukt. Check logs.', 'error');
+            }
+        }
+
+        $single_rewrite_full_article_id = (int) ($_POST['rewrite_full_article_id'] ?? 0);
+        if ($single_rewrite_full_article_id > 0) {
+            try {
+                $this->rewrite_editorial_article($single_rewrite_full_article_id, 'full');
+                $this->redirect_with_message('sch-editorial', 'Compleet artikel herschreven.');
+            } catch (Throwable $e) {
+                $this->log('error', 'editorial', 'Volledig artikel herschrijven mislukt', [
+                    'article_id' => $single_rewrite_full_article_id,
+                    'error' => $e->getMessage(),
+                ]);
+                $this->redirect_with_message('sch-editorial', 'Herschrijven mislukt. Check logs.', 'error');
+            }
+        }
+
         $single_delete_article_id = (int) ($_POST['delete_article_id'] ?? 0);
         if ($single_delete_article_id > 0) {
             $deleted = $this->delete_editorial_article($single_delete_article_id);
@@ -2906,6 +2937,119 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
 
         $this->redirect_with_message('sch-editorial', "Klaar. Gepubliceerd: {$published}.");
+    }
+
+    private function rewrite_editorial_article(int $article_id, string $scope): void {
+        $article = $this->db->get_row($this->db->prepare(
+            "SELECT a.id, a.title, a.slug, a.meta_title, a.meta_description, a.content, k.main_keyword, s.name AS site_name
+             FROM {$this->table('articles')} a
+             LEFT JOIN {$this->table('keywords')} k ON k.id = a.keyword_id
+             LEFT JOIN {$this->table('sites')} s ON s.id = a.site_id
+             WHERE a.id=%d
+             LIMIT 1",
+            $article_id
+        ));
+
+        if (!$article) {
+            throw new RuntimeException('Artikel niet gevonden.');
+        }
+
+        $safe_scope = $scope === 'full' ? 'full' : 'content';
+        if ($safe_scope === 'full') {
+            $result = $this->openai_json_call(
+                'editorial_rewrite_full',
+                [
+                    'role' => 'Je bent een senior Nederlandse eindredacteur voor SEO-artikelen.',
+                    'goal' => 'Herschrijf het volledige artikel (titel, slug, meta title, meta description en content) met behoud van onderwerp en intentie. Geef alleen JSON terug.',
+                ],
+                [
+                    'mode' => 'full',
+                    'main_keyword' => sanitize_text_field((string) ($article->main_keyword ?? '')),
+                    'site_name' => sanitize_text_field((string) ($article->site_name ?? '')),
+                    'article' => [
+                        'title' => sanitize_text_field((string) $article->title),
+                        'slug' => sanitize_title((string) $article->slug),
+                        'meta_title' => sanitize_text_field((string) $article->meta_title),
+                        'meta_description' => sanitize_textarea_field((string) $article->meta_description),
+                        'content' => (string) $article->content,
+                    ],
+                    'requirements' => [
+                        'language' => 'nl',
+                        'keep_same_topic_and_search_intent' => true,
+                        'keep_html_content_structure' => true,
+                        'no_h1_in_content' => true,
+                        'natural_tone' => true,
+                    ],
+                ],
+                [
+                    'type' => 'object',
+                    'additionalProperties' => false,
+                    'properties' => [
+                        'title' => ['type' => 'string'],
+                        'slug' => ['type' => 'string'],
+                        'meta_title' => ['type' => 'string'],
+                        'meta_description' => ['type' => 'string'],
+                        'content' => ['type' => 'string'],
+                    ],
+                    'required' => ['title', 'slug', 'meta_title', 'meta_description', 'content'],
+                ]
+            );
+
+            $updated = $this->db->update($this->table('articles'), [
+                'title' => sanitize_text_field((string) ($result['title'] ?? $article->title)),
+                'slug' => sanitize_title((string) ($result['slug'] ?? $article->slug)),
+                'meta_title' => sanitize_text_field((string) ($result['meta_title'] ?? $article->meta_title)),
+                'meta_description' => sanitize_textarea_field((string) ($result['meta_description'] ?? $article->meta_description)),
+                'content' => wp_kses_post((string) ($result['content'] ?? $article->content)),
+                'updated_at' => $this->now(),
+            ], ['id' => $article_id]);
+
+            if ($updated === false) {
+                throw new RuntimeException('Opslaan van herschreven artikel mislukt.');
+            }
+
+            return;
+        }
+
+        $result = $this->openai_json_call(
+            'editorial_rewrite_content',
+            [
+                'role' => 'Je bent een senior Nederlandse eindredacteur voor SEO-artikelen.',
+                'goal' => 'Herschrijf uitsluitend de artikelcontent zodat deze vloeiender, scherper en beter leesbaar wordt. Geef alleen JSON terug.',
+            ],
+            [
+                'mode' => 'content_only',
+                'main_keyword' => sanitize_text_field((string) ($article->main_keyword ?? '')),
+                'site_name' => sanitize_text_field((string) ($article->site_name ?? '')),
+                'title' => sanitize_text_field((string) $article->title),
+                'meta_description' => sanitize_textarea_field((string) $article->meta_description),
+                'content' => (string) $article->content,
+                'requirements' => [
+                    'language' => 'nl',
+                    'keep_same_topic_and_search_intent' => true,
+                    'keep_html_content_structure' => true,
+                    'no_h1_in_content' => true,
+                    'preserve_title_and_meta' => true,
+                ],
+            ],
+            [
+                'type' => 'object',
+                'additionalProperties' => false,
+                'properties' => [
+                    'content' => ['type' => 'string'],
+                ],
+                'required' => ['content'],
+            ]
+        );
+
+        $updated = $this->db->update($this->table('articles'), [
+            'content' => wp_kses_post((string) ($result['content'] ?? $article->content)),
+            'updated_at' => $this->now(),
+        ], ['id' => $article_id]);
+
+        if ($updated === false) {
+            throw new RuntimeException('Opslaan van herschreven content mislukt.');
+        }
     }
 
     private function delete_editorial_article(int $article_id): bool {
