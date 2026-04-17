@@ -21,9 +21,9 @@ final class SCH_Receiver {
     const REGISTRATION_TIMEOUT = 20;
     const DEFAULT_TRUSTED_SOURCE_DOMAIN = 'https://shortcut.nl';
 
-    private static ?SCH_Receiver $instance = null;
+    private static $instance = null;
 
-    public static function instance(): self {
+    public static function instance() {
         if (!self::$instance) {
             self::$instance = new self();
         }
@@ -38,16 +38,16 @@ final class SCH_Receiver {
         add_action('admin_post_sch_receiver_save_settings', [$this, 'handle_save_settings']);
     }
 
-    public static function handle_activation(): void {
+    public static function handle_activation() {
         $instance = self::instance();
         $instance->notify_orchestrator_about_receiver();
     }
 
-    public function admin_menu(): void {
+    public function admin_menu() {
         add_options_page('Content Hub Receiver', 'Content Hub Receiver', 'manage_options', 'sch-receiver', [$this, 'render_settings']);
     }
 
-    public function render_settings(): void {
+    public function render_settings() {
         ?>
         <div class="wrap">
             <h1>Content Hub Receiver</h1>
@@ -69,7 +69,7 @@ final class SCH_Receiver {
         <?php
     }
 
-    public function handle_save_settings(): void {
+    public function handle_save_settings() {
         if (!current_user_can('manage_options')) {
             wp_die('Geen toegang.');
         }
@@ -84,7 +84,7 @@ final class SCH_Receiver {
         exit;
     }
 
-    public function handle_receive(): void {
+    public function handle_receive() {
         if (!$this->is_trusted_request()) {
             $this->json_response(['success' => false, 'message' => 'Request is niet afkomstig van trusted source domein.'], 403);
         }
@@ -112,7 +112,7 @@ final class SCH_Receiver {
         }
     }
 
-    private function upsert_post(array $payload): int {
+    private function upsert_post($payload) {
         $external_article_id = (int) ($payload['external_article_id'] ?? 0);
         if ($external_article_id <= 0) {
             throw new RuntimeException('external_article_id ontbreekt.');
@@ -193,7 +193,7 @@ final class SCH_Receiver {
         return $post_id;
     }
 
-    private function apply_internal_links(int $post_id, array $payload): void {
+    private function apply_internal_links($post_id, $payload) {
         $terms = $this->extract_link_terms($payload);
         $related_posts = $this->find_related_posts($post_id, $terms, 4);
 
@@ -201,7 +201,9 @@ final class SCH_Receiver {
             $fallback = get_posts([
                 'post_type' => 'post',
                 'post_status' => 'publish',
-                'post__not_in' => array_merge([$post_id], array_map(static fn(array $item): int => (int) $item['ID'], $related_posts)),
+                'post__not_in' => array_merge([$post_id], array_map(function ($item) {
+                    return (int) $item['ID'];
+                }, $related_posts)),
                 'posts_per_page' => 4,
                 'orderby' => 'date',
                 'order' => 'DESC',
@@ -272,7 +274,7 @@ final class SCH_Receiver {
         update_post_meta($post_id, '_sch_internal_link_terms', $terms);
     }
 
-    private function extract_link_terms(array $payload): array {
+    private function extract_link_terms($payload) {
         $candidate_text = implode(' ', [
             (string) ($payload['keyword'] ?? ''),
             (string) ($payload['title'] ?? ''),
@@ -304,7 +306,7 @@ final class SCH_Receiver {
         return array_keys($terms);
     }
 
-    private function find_related_posts(int $post_id, array $terms, int $limit = 4): array {
+    private function find_related_posts($post_id, $terms, $limit = 4) {
         if (empty($terms)) {
             return [];
         }
@@ -329,7 +331,7 @@ final class SCH_Receiver {
             $text = mb_strtolower(wp_strip_all_tags((string) $candidate->post_title . ' ' . (string) $candidate->post_excerpt));
             $score = 0;
             foreach ($terms as $term) {
-                if (str_contains($text, $term)) {
+                if (strpos($text, $term) !== false) {
                     $score++;
                 }
             }
@@ -346,7 +348,13 @@ final class SCH_Receiver {
             ];
         }
 
-        usort($scored, static fn(array $a, array $b): int => $b['score'] <=> $a['score']);
+        usort($scored, function ($a, $b) {
+            if ($a['score'] === $b['score']) {
+                return 0;
+            }
+
+            return ($a['score'] < $b['score']) ? 1 : -1;
+        });
 
         $unique = [];
         foreach ($scored as $item) {
@@ -366,7 +374,7 @@ final class SCH_Receiver {
         return array_values($unique);
     }
 
-    private function build_safe_anchor(string $title): string {
+    private function build_safe_anchor($title) {
         $normalized_title = trim(sanitize_text_field(wp_strip_all_tags($title)));
         if ($normalized_title === '') {
             return '';
@@ -397,7 +405,7 @@ final class SCH_Receiver {
         return implode(' ', $selected);
     }
 
-    private function update_seo_meta(int $post_id, array $payload): void {
+    private function update_seo_meta($post_id, $payload) {
         $meta_title = sanitize_text_field((string) ($payload['meta_title'] ?? ''));
         $meta_description = sanitize_textarea_field((string) ($payload['meta_description'] ?? ''));
 
@@ -410,7 +418,7 @@ final class SCH_Receiver {
     /**
      * @param array<string, mixed>|int|string $term
      */
-    private function extract_term_id($term): int {
+    private function extract_term_id($term) {
         if (is_array($term) && !empty($term['term_id'])) {
             return (int) $term['term_id'];
         }
@@ -421,7 +429,7 @@ final class SCH_Receiver {
         return 0;
     }
 
-    private function ensure_featured_image(int $post_id, array $image): int {
+    private function ensure_featured_image($post_id, $image) {
         require_once ABSPATH . 'wp-admin/includes/media.php';
         require_once ABSPATH . 'wp-admin/includes/file.php';
         require_once ABSPATH . 'wp-admin/includes/image.php';
@@ -475,7 +483,7 @@ final class SCH_Receiver {
         return (int) $attachment_id;
     }
 
-    private function get_trusted_source_domain(): string {
+    private function get_trusted_source_domain() {
         $saved = $this->normalize_site_url((string) get_option(self::OPTION_TRUSTED_SOURCE_DOMAIN, self::DEFAULT_TRUSTED_SOURCE_DOMAIN));
         if ($saved === '') {
             return self::DEFAULT_TRUSTED_SOURCE_DOMAIN;
@@ -483,7 +491,7 @@ final class SCH_Receiver {
         return $saved;
     }
 
-    private function normalize_site_url(string $url): string {
+    private function normalize_site_url($url) {
         $url = trim($url);
         if ($url === '') {
             return '';
@@ -498,12 +506,12 @@ final class SCH_Receiver {
         return untrailingslashit($normalized);
     }
 
-    private function normalize_host(string $url): string {
+    private function normalize_host($url) {
         $host = wp_parse_url($url, PHP_URL_HOST);
         return strtolower((string) $host);
     }
 
-    private function is_trusted_request(): bool {
+    private function is_trusted_request() {
         $trusted_host = $this->normalize_host($this->get_trusted_source_domain());
         if ($trusted_host === '') {
             return false;
@@ -523,24 +531,26 @@ final class SCH_Receiver {
     /**
      * @return string[]
      */
-    private function request_source_candidates(): array {
+    private function request_source_candidates() {
         $headers = [
             isset($_SERVER['HTTP_X_SCH_SOURCE_SITE']) ? (string) $_SERVER['HTTP_X_SCH_SOURCE_SITE'] : '',
             isset($_SERVER['HTTP_ORIGIN']) ? (string) $_SERVER['HTTP_ORIGIN'] : '',
             isset($_SERVER['HTTP_REFERER']) ? (string) $_SERVER['HTTP_REFERER'] : '',
         ];
 
-        return array_values(array_filter($headers, static fn(string $header): bool => $header !== ''));
+        return array_values(array_filter($headers, function ($header) {
+            return $header !== '';
+        }));
     }
 
-    private function json_response(array $data, int $status_code): void {
+    private function json_response($data, $status_code) {
         status_header($status_code);
         header('Content-Type: application/json; charset=' . get_bloginfo('charset'));
         echo wp_json_encode($data);
         exit;
     }
 
-    private function notify_orchestrator_about_receiver(): void {
+    private function notify_orchestrator_about_receiver() {
         $trusted_source_domain = $this->get_trusted_source_domain();
         $url = untrailingslashit($trusted_source_domain) . '/wp-admin/admin-post.php?action=' . self::REGISTRATION_ACTION;
 
