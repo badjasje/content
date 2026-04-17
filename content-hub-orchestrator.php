@@ -29,6 +29,16 @@ final class SCH_Orchestrator {
     const OPTION_MAX_DISCOVERY_KEYWORDS = 'sch_max_discovery_keywords';
     const OPTION_ENABLE_VERBOSE_LOGS = 'sch_enable_verbose_logs';
     const OPTION_TRUSTED_SOURCE_DOMAIN = 'sch_trusted_source_domain';
+    const OPTION_RANDOM_MACHINE_ENABLED = 'sch_random_machine_enabled';
+    const OPTION_RANDOM_DAILY_MAX = 'sch_random_daily_max';
+    const OPTION_RANDOM_STATUS = 'sch_random_status';
+    const OPTION_RANDOM_MIN_WORDS = 'sch_random_min_words';
+    const OPTION_RANDOM_MAX_WORDS = 'sch_random_max_words';
+    const OPTION_RANDOM_MAX_PER_SITE_PER_DAY = 'sch_random_max_per_site_per_day';
+    const OPTION_RANDOM_ONLY_ACTIVE_SITES = 'sch_random_only_active_sites';
+    const OPTION_RANDOM_ALLOWED_CATEGORIES = 'sch_random_allowed_categories';
+    const OPTION_RANDOM_DUPLICATE_WINDOW_DAYS = 'sch_random_duplicate_window_days';
+
 
     private static ?SCH_Orchestrator $instance = null;
     private wpdb $db;
@@ -345,6 +355,15 @@ final class SCH_Orchestrator {
         add_option(self::OPTION_MAX_DISCOVERY_KEYWORDS, '10');
         add_option(self::OPTION_ENABLE_VERBOSE_LOGS, '1');
         add_option(self::OPTION_TRUSTED_SOURCE_DOMAIN, 'https://shortcut.nl');
+        add_option(self::OPTION_RANDOM_MACHINE_ENABLED, '0');
+        add_option(self::OPTION_RANDOM_DAILY_MAX, '10');
+        add_option(self::OPTION_RANDOM_STATUS, 'draft');
+        add_option(self::OPTION_RANDOM_MIN_WORDS, '900');
+        add_option(self::OPTION_RANDOM_MAX_WORDS, '1400');
+        add_option(self::OPTION_RANDOM_MAX_PER_SITE_PER_DAY, '2');
+        add_option(self::OPTION_RANDOM_ONLY_ACTIVE_SITES, '1');
+        add_option(self::OPTION_RANDOM_ALLOWED_CATEGORIES, wp_json_encode([]));
+        add_option(self::OPTION_RANDOM_DUPLICATE_WINDOW_DAYS, '30');
 
         update_option(self::OPTION_DB_VERSION, self::DB_VERSION);
     }
@@ -1124,6 +1143,25 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <tr><th>Max research pages</th><td><input type="number" name="max_research_pages" value="<?php echo esc_attr((string) get_option(self::OPTION_MAX_RESEARCH_PAGES, '5')); ?>" min="1" max="20"></td></tr>
                     <tr><th>Max discovery keywords</th><td><input type="number" name="max_discovery_keywords" value="<?php echo esc_attr((string) get_option(self::OPTION_MAX_DISCOVERY_KEYWORDS, '10')); ?>" min="1" max="50"></td></tr>
                     <tr><th>Verbose logs</th><td><label><input type="checkbox" name="enable_verbose_logs" value="1" <?php checked(get_option(self::OPTION_ENABLE_VERBOSE_LOGS, '1'), '1'); ?>> Veel extra logregels wegschrijven</label></td></tr>
+
+                    <tr><th colspan="2"><h2 style="margin:10px 0 0;">Random Content Machine</h2></th></tr>
+                    <tr><th>Enable random content machine</th><td><label><input type="checkbox" name="random_machine_enabled" value="1" <?php checked(get_option(self::OPTION_RANDOM_MACHINE_ENABLED, '0'), '1'); ?>> Dagelijks automatisch random content jobs genereren</label></td></tr>
+                    <tr><th>Max random articles per day</th><td><input type="number" name="random_daily_max" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_DAILY_MAX, '10')); ?>" min="1" max="100"></td></tr>
+                    <tr><th>Random content status</th><td><select name="random_status"><option value="draft" <?php selected((string) get_option(self::OPTION_RANDOM_STATUS, 'draft'), 'draft'); ?>>draft</option><option value="publish" <?php selected((string) get_option(self::OPTION_RANDOM_STATUS, 'draft'), 'publish'); ?>>publish</option></select></td></tr>
+                    <tr><th>Min word count</th><td><input type="number" name="random_min_words" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_MIN_WORDS, '900')); ?>" min="400" max="5000"></td></tr>
+                    <tr><th>Max word count</th><td><input type="number" name="random_max_words" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_MAX_WORDS, '1400')); ?>" min="500" max="6000"></td></tr>
+                    <tr><th>Max articles per site per day</th><td><input type="number" name="random_max_per_site_per_day" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_MAX_PER_SITE_PER_DAY, '2')); ?>" min="1" max="20"></td></tr>
+                    <tr><th>Only active sites meenemen</th><td><label><input type="checkbox" name="random_only_active_sites" value="1" <?php checked(get_option(self::OPTION_RANDOM_ONLY_ACTIVE_SITES, '1'), '1'); ?>> Alleen actieve blogs gebruiken</label></td></tr>
+                    <tr><th>Allowed categories (optioneel)</th><td>
+                        <?php $random_allowed_categories = $this->sanitize_blog_categories($this->decode_json_array(get_option(self::OPTION_RANDOM_ALLOWED_CATEGORIES, wp_json_encode([])))); ?>
+                        <select name="random_allowed_categories[]" multiple size="8" style="min-width:260px;">
+                            <?php foreach ($this->allowed_blog_categories() as $category) : ?>
+                                <option value="<?php echo esc_attr($category); ?>" <?php selected(in_array($category, $random_allowed_categories, true)); ?>><?php echo esc_html($category); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                        <p class="description">Leeg laten = geen categorie-filter.</p>
+                    </td></tr>
+                    <tr><th>Exclude recent topic duplicates window (dagen)</th><td><input type="number" name="random_duplicate_window_days" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_DUPLICATE_WINDOW_DAYS, '30')); ?>" min="1" max="365"></td></tr>
                 </table>
                 <p><button class="button button-primary">Instellingen opslaan</button></p>
                 <p>Gebruik hier je eigen sleutels. Hardcode ze niet in de plugin.</p>
@@ -2086,6 +2124,30 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         update_option(self::OPTION_MAX_RESEARCH_PAGES, (string) $max_research_pages);
         update_option(self::OPTION_MAX_DISCOVERY_KEYWORDS, (string) $max_discovery_keywords);
 
+        update_option(self::OPTION_RANDOM_MACHINE_ENABLED, isset($_POST['random_machine_enabled']) ? '1' : '0');
+        update_option(self::OPTION_RANDOM_DAILY_MAX, (string) max(1, min(100, (int) ($_POST['random_daily_max'] ?? 10))));
+
+        $random_status = sanitize_key((string) ($_POST['random_status'] ?? 'draft'));
+        if (!in_array($random_status, ['draft', 'publish'], true)) {
+            $random_status = 'draft';
+        }
+        update_option(self::OPTION_RANDOM_STATUS, $random_status);
+
+        $random_min_words = max(400, min(5000, (int) ($_POST['random_min_words'] ?? 900)));
+        $random_max_words = max(500, min(6000, (int) ($_POST['random_max_words'] ?? 1400)));
+        if ($random_max_words < $random_min_words) {
+            $random_max_words = $random_min_words;
+        }
+
+        update_option(self::OPTION_RANDOM_MIN_WORDS, (string) $random_min_words);
+        update_option(self::OPTION_RANDOM_MAX_WORDS, (string) $random_max_words);
+        update_option(self::OPTION_RANDOM_MAX_PER_SITE_PER_DAY, (string) max(1, min(20, (int) ($_POST['random_max_per_site_per_day'] ?? 2))));
+        update_option(self::OPTION_RANDOM_ONLY_ACTIVE_SITES, isset($_POST['random_only_active_sites']) ? '1' : '0');
+
+        $random_allowed_categories = $this->sanitize_blog_categories((array) ($_POST['random_allowed_categories'] ?? []));
+        update_option(self::OPTION_RANDOM_ALLOWED_CATEGORIES, wp_json_encode($random_allowed_categories));
+        update_option(self::OPTION_RANDOM_DUPLICATE_WINDOW_DAYS, (string) max(1, min(365, (int) ($_POST['random_duplicate_window_days'] ?? 30))));
+
         $this->redirect_with_message('sch-settings', 'Instellingen opgeslagen.');
     }
 
@@ -2482,6 +2544,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
     public function run_worker(): void {
         $this->log('info', 'worker', 'run_worker gestart');
+        $this->maybe_prepare_random_content_jobs();
 
         $job = $this->db->get_row("SELECT * FROM {$this->table('jobs')} WHERE status='queued' ORDER BY id ASC LIMIT 1");
 
@@ -2553,6 +2616,534 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
     }
 
+
+    private function maybe_prepare_random_content_jobs(): void {
+        if (get_option(self::OPTION_RANDOM_MACHINE_ENABLED, '0') !== '1') {
+            return;
+        }
+
+        $daily_max = max(1, (int) get_option(self::OPTION_RANDOM_DAILY_MAX, '10'));
+        $already_today = (int) $this->db->get_var($this->db->prepare(
+            "SELECT COUNT(*) FROM {$this->table('jobs')} WHERE job_type=%s AND DATE(created_at)=CURDATE()",
+            'random_fresh_content'
+        ));
+
+        $remaining = max(0, $daily_max - $already_today);
+
+        $this->log('info', 'random_machine', 'Random content machine gestart', [
+            'daily_max' => $daily_max,
+            'already_today' => $already_today,
+            'remaining' => $remaining,
+        ]);
+
+        if ($remaining <= 0) {
+            $this->log('info', 'random_machine', 'Daily cap bereikt', [
+                'daily_max' => $daily_max,
+                'already_today' => $already_today,
+            ]);
+            return;
+        }
+
+        $sites = $this->get_random_machine_candidate_sites();
+        if (!$sites) {
+            $this->log('warning', 'random_machine', 'Geen geschikte sites gevonden voor random machine');
+            return;
+        }
+
+        $duplicate_window_days = max(1, (int) get_option(self::OPTION_RANDOM_DUPLICATE_WINDOW_DAYS, '30'));
+        $created = 0;
+        $attempts = 0;
+        $max_attempts = max(6, $remaining * 6);
+
+        while ($created < $remaining && $attempts < $max_attempts) {
+            $attempts++;
+            $site = $this->pick_random_machine_site($sites);
+            if (!$site) {
+                break;
+            }
+
+            $site_today_count = $this->count_random_jobs_for_site_today((int) $site->id);
+            $site_daily_max = max(1, (int) get_option(self::OPTION_RANDOM_MAX_PER_SITE_PER_DAY, '2'));
+            if ($site_today_count >= $site_daily_max) {
+                $this->vlog('random_machine', 'Site overgeslagen door per-site daglimiet', [
+                    'site_id' => (int) $site->id,
+                    'site_today_count' => $site_today_count,
+                    'site_daily_max' => $site_daily_max,
+                ]);
+                continue;
+            }
+
+            try {
+                $research = $this->research_random_topic_for_site($site, $duplicate_window_days);
+            } catch (Throwable $e) {
+                $this->log('warning', 'random_machine', 'Research stap mislukt voor site', [
+                    'site_id' => (int) $site->id,
+                    'error' => $e->getMessage(),
+                ]);
+                continue;
+            }
+
+            if (!$research) {
+                continue;
+            }
+
+            $job_id = $this->create_random_machine_job($site, $research);
+            if ($job_id > 0) {
+                $created++;
+            }
+        }
+
+        $this->log('info', 'random_machine', 'Random content machine afgerond', [
+            'created_jobs' => $created,
+            'attempts' => $attempts,
+            'remaining_slots_at_start' => $remaining,
+        ]);
+    }
+
+    private function get_random_machine_candidate_sites(): array {
+        $only_active = get_option(self::OPTION_RANDOM_ONLY_ACTIVE_SITES, '1') === '1';
+        $allowed_categories = $this->sanitize_blog_categories($this->decode_json_array((string) get_option(self::OPTION_RANDOM_ALLOWED_CATEGORIES, wp_json_encode([]))));
+
+        $where = [];
+        if ($only_active) {
+            $where[] = 'is_active=1';
+        }
+        if (!empty($allowed_categories)) {
+            $in = implode(', ', array_fill(0, count($allowed_categories), '%s'));
+            $where[] = "default_category IN ({$in})";
+        }
+
+        $sql = "SELECT * FROM {$this->table('sites')}";
+        if ($where) {
+            $sql .= ' WHERE ' . implode(' AND ', $where);
+        }
+        $sql .= ' ORDER BY publish_priority ASC, id ASC';
+
+        if (!empty($allowed_categories)) {
+            return (array) $this->db->get_results($this->db->prepare($sql, ...$allowed_categories));
+        }
+
+        return (array) $this->db->get_results($sql);
+    }
+
+    private function pick_random_machine_site(array $sites): ?object {
+        if (!$sites) {
+            return null;
+        }
+
+        usort($sites, function ($a, $b) {
+            $a_count = $this->count_random_jobs_for_site_today((int) $a->id);
+            $b_count = $this->count_random_jobs_for_site_today((int) $b->id);
+            if ($a_count === $b_count) {
+                return ((int) $a->publish_priority <=> (int) $b->publish_priority);
+            }
+            return $a_count <=> $b_count;
+        });
+
+        return $sites[0] ?? null;
+    }
+
+    private function count_random_jobs_for_site_today(int $site_id): int {
+        return (int) $this->db->get_var($this->db->prepare(
+            "SELECT COUNT(*) FROM {$this->table('jobs')} WHERE job_type=%s AND site_id=%d AND DATE(created_at)=CURDATE()",
+            'random_fresh_content',
+            $site_id
+        ));
+    }
+
+    private function research_random_topic_for_site(object $site, int $duplicate_window_days): array {
+        $this->log('info', 'random_machine', 'OpenAI research gestart', [
+            'site_id' => (int) $site->id,
+            'site_name' => (string) $site->name,
+        ]);
+
+        $site_page = [];
+        try {
+            $site_page = $this->fetch_and_extract_page((string) $site->base_url);
+        } catch (Throwable $e) {
+            $this->vlog('random_machine', 'Site homepage analyse overgeslagen', [
+                'site_id' => (int) $site->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        $recent_rows = $this->db->get_results($this->db->prepare(
+            "SELECT a.title, a.meta_description, a.created_at, k.main_keyword
+             FROM {$this->table('articles')} a
+             LEFT JOIN {$this->table('keywords')} k ON k.id = a.keyword_id
+             WHERE a.site_id=%d
+             ORDER BY a.id DESC
+             LIMIT 14",
+            (int) $site->id
+        ));
+
+        $recent_topics = [];
+        foreach ((array) $recent_rows as $row) {
+            $recent_topics[] = [
+                'title' => sanitize_text_field((string) ($row->title ?? '')),
+                'main_keyword' => sanitize_text_field((string) ($row->main_keyword ?? '')),
+                'created_at' => sanitize_text_field((string) ($row->created_at ?? '')),
+            ];
+        }
+
+        $result = $this->openai_json_call(
+            'random_topic_research',
+            [
+                'role' => 'Je bent een Nederlandse content researcher voor blogs.',
+                'goal' => 'Bepaal één vers, niche-passend onderwerp met keywordset en intent voor een linkloos artikel. Geef alleen JSON terug.',
+            ],
+            [
+                'site' => [
+                    'id' => (int) $site->id,
+                    'name' => (string) $site->name,
+                    'base_url' => (string) $site->base_url,
+                    'default_category' => (string) $site->default_category,
+                    'homepage_title' => (string) ($site_page['title'] ?? ''),
+                    'homepage_text_excerpt' => (string) mb_substr((string) ($site_page['text'] ?? ''), 0, 4000),
+                ],
+                'recent_topics' => $recent_topics,
+                'requirements' => [
+                    'language' => 'nl',
+                    'must_fit_existing_blog_niche' => true,
+                    'no_links_required' => true,
+                    'fresh_angle' => true,
+                    'secondary_keywords_min' => 3,
+                    'secondary_keywords_max' => 8,
+                    'avoid_overlap_with_recent_topics' => true,
+                ],
+            ],
+            [
+                'type' => 'object',
+                'additionalProperties' => false,
+                'properties' => [
+                    'primary_keyword' => ['type' => 'string'],
+                    'secondary_keywords' => ['type' => 'array', 'items' => ['type' => 'string']],
+                    'topic_angle' => ['type' => 'string'],
+                    'target_category' => ['type' => 'string'],
+                    'search_intent' => ['type' => 'string'],
+                    'proposed_title' => ['type' => 'string'],
+                ],
+                'required' => ['primary_keyword', 'secondary_keywords', 'topic_angle', 'target_category', 'search_intent', 'proposed_title'],
+            ]
+        );
+
+        $primary_keyword = sanitize_text_field((string) ($result['primary_keyword'] ?? ''));
+        if ($primary_keyword === '') {
+            throw new RuntimeException('Research gaf geen primary keyword terug.');
+        }
+
+        $secondary_keywords = array_values(array_filter(array_map('sanitize_text_field', (array) ($result['secondary_keywords'] ?? []))));
+        $secondary_keywords = array_slice(array_values(array_unique($secondary_keywords)), 0, 8);
+        if (count($secondary_keywords) < 3) {
+            throw new RuntimeException('Research gaf te weinig secondary keywords terug.');
+        }
+
+        $research = [
+            'primary_keyword' => $primary_keyword,
+            'secondary_keywords' => $secondary_keywords,
+            'topic_angle' => sanitize_text_field((string) ($result['topic_angle'] ?? '')),
+            'target_category' => $this->sanitize_blog_category((string) ($result['target_category'] ?? '')),
+            'search_intent' => sanitize_text_field((string) ($result['search_intent'] ?? 'informerend')),
+            'proposed_title' => sanitize_text_field((string) ($result['proposed_title'] ?? '')),
+            'duplicate_fingerprint' => md5(strtolower($primary_keyword . '|' . (string) ($result['topic_angle'] ?? ''))),
+        ];
+
+        if ($this->is_random_topic_duplicate($site, $research, $duplicate_window_days)) {
+            $this->log('info', 'random_machine', 'Onderwerp afgekeurd wegens overlap', [
+                'site_id' => (int) $site->id,
+                'primary_keyword' => $research['primary_keyword'],
+                'proposed_title' => $research['proposed_title'],
+                'window_days' => $duplicate_window_days,
+            ]);
+            return [];
+        }
+
+        $this->log('info', 'random_machine', 'OpenAI research geslaagd', [
+            'site_id' => (int) $site->id,
+            'primary_keyword' => $research['primary_keyword'],
+            'topic_angle' => $research['topic_angle'],
+        ]);
+
+        return $research;
+    }
+
+    private function is_random_topic_duplicate(object $site, array $research, int $window_days): bool {
+        $since = gmdate('Y-m-d H:i:s', time() - DAY_IN_SECONDS * max(1, $window_days));
+
+        $rows = $this->db->get_results($this->db->prepare(
+            "SELECT k.main_keyword, k.source_context, a.title
+             FROM {$this->table('keywords')} k
+             LEFT JOIN {$this->table('articles')} a ON a.keyword_id = k.id
+             WHERE k.source='random_machine'
+               AND k.created_at >= %s
+               AND (a.site_id = %d OR a.site_id IS NULL)",
+            $since,
+            (int) $site->id
+        ));
+
+        $current_fingerprint = (string) ($research['duplicate_fingerprint'] ?? '');
+        $current_keyword = strtolower((string) ($research['primary_keyword'] ?? ''));
+        $current_title = strtolower((string) ($research['proposed_title'] ?? ''));
+
+        foreach ((array) $rows as $row) {
+            $ctx = $this->decode_json_array((string) ($row->source_context ?? ''));
+            $existing_fingerprint = strtolower((string) ($ctx['duplicate_fingerprint'] ?? ''));
+            $existing_keyword = strtolower((string) ($row->main_keyword ?? ''));
+            $existing_title = strtolower((string) ($row->title ?? ''));
+
+            if ($current_fingerprint !== '' && $existing_fingerprint !== '' && $current_fingerprint === $existing_fingerprint) {
+                return true;
+            }
+
+            if ($current_keyword !== '' && $existing_keyword !== '' && $current_keyword === $existing_keyword) {
+                return true;
+            }
+
+            if ($current_title !== '' && $existing_title !== '' && similar_text($current_title, $existing_title, $percent) && $percent >= 72) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function ensure_random_machine_client_id(): int {
+        $client = $this->db->get_row($this->db->prepare(
+            "SELECT * FROM {$this->table('clients')} WHERE website_url=%s LIMIT 1",
+            'https://system.local/random-machine'
+        ));
+
+        if ($client) {
+            return (int) $client->id;
+        }
+
+        $inserted = $this->db->insert($this->table('clients'), [
+            'name' => 'Random Content Machine',
+            'website_url' => 'https://system.local/random-machine',
+            'default_anchor' => 'Random Content Machine',
+            'link_targets' => wp_json_encode([]),
+            'research_urls' => wp_json_encode([]),
+            'max_posts_per_month' => 0,
+            'is_active' => 1,
+            'created_at' => $this->now(),
+            'updated_at' => $this->now(),
+        ]);
+
+        if (!$inserted) {
+            throw new RuntimeException('System client kon niet worden aangemaakt: ' . $this->db->last_error);
+        }
+
+        return (int) $this->db->insert_id;
+    }
+
+    private function create_random_machine_job(object $site, array $research): int {
+        $client_id = $this->ensure_random_machine_client_id();
+        $min_words = max(400, (int) get_option(self::OPTION_RANDOM_MIN_WORDS, '900'));
+        $max_words = max($min_words, (int) get_option(self::OPTION_RANDOM_MAX_WORDS, '1400'));
+        $target_word_count = wp_rand($min_words, $max_words);
+
+        $secondary_payload = [];
+        foreach ((array) ($research['secondary_keywords'] ?? []) as $term) {
+            $term = sanitize_text_field((string) $term);
+            if ($term !== '') {
+                $secondary_payload[] = ['keyword' => $term];
+            }
+        }
+
+        $keyword_insert = $this->db->insert($this->table('keywords'), [
+            'client_id' => $client_id,
+            'main_keyword' => sanitize_text_field((string) ($research['primary_keyword'] ?? '')),
+            'secondary_keywords' => wp_json_encode($secondary_payload),
+            'target_site_ids' => wp_json_encode([(int) $site->id]),
+            'target_site_categories' => wp_json_encode([]),
+            'content_type' => 'random_fresh_content',
+            'tone_of_voice' => 'natuurlijk en informatief',
+            'target_word_count' => $target_word_count,
+            'priority' => 50,
+            'status' => 'queued',
+            'source' => 'random_machine',
+            'source_context' => wp_json_encode($research, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            'created_at' => $this->now(),
+            'updated_at' => $this->now(),
+        ]);
+
+        if (!$keyword_insert) {
+            $this->log('error', 'random_machine', 'Keyword insert mislukt voor random machine', [
+                'site_id' => (int) $site->id,
+                'db_error' => $this->db->last_error,
+            ]);
+            return 0;
+        }
+
+        $keyword_id = (int) $this->db->insert_id;
+        $payload = [
+            'random_machine' => true,
+            'linkless' => true,
+            'publish_status' => (string) get_option(self::OPTION_RANDOM_STATUS, 'draft'),
+            'target_category' => (string) ($research['target_category'] ?? ''),
+            'research' => $research,
+        ];
+
+        $job_insert = $this->db->insert($this->table('jobs'), [
+            'keyword_id' => $keyword_id,
+            'client_id' => $client_id,
+            'site_id' => (int) $site->id,
+            'job_type' => 'random_fresh_content',
+            'status' => 'queued',
+            'attempts' => 0,
+            'payload' => wp_json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            'created_at' => $this->now(),
+            'updated_at' => $this->now(),
+        ]);
+
+        if (!$job_insert) {
+            $this->log('error', 'random_machine', 'Job insert mislukt voor random machine', [
+                'keyword_id' => $keyword_id,
+                'site_id' => (int) $site->id,
+                'db_error' => $this->db->last_error,
+            ]);
+            return 0;
+        }
+
+        $job_id = (int) $this->db->insert_id;
+        $this->log('info', 'random_machine', 'Random content job aangemaakt', [
+            'job_id' => $job_id,
+            'keyword_id' => $keyword_id,
+            'site_id' => (int) $site->id,
+            'primary_keyword' => (string) ($research['primary_keyword'] ?? ''),
+        ]);
+
+        return $job_id;
+    }
+
+    private function process_random_fresh_content_job(object $job, object $keyword, object $client, object $site): void {
+        $payload = $this->decode_json_array((string) ($job->payload ?? ''));
+        $research = is_array($payload['research'] ?? null) ? $payload['research'] : [];
+
+        $this->log('info', 'random_machine', 'Random content job verwerking gestart', [
+            'job_id' => (int) $job->id,
+            'site_id' => (int) $site->id,
+            'keyword_id' => (int) $keyword->id,
+        ]);
+
+        $article = $this->generate_random_article($site, $keyword, $research);
+        $article_id = $this->store_article($job, $keyword, $client, $site, $article, null, false);
+
+        $publish_status = sanitize_key((string) ($payload['publish_status'] ?? get_option(self::OPTION_RANDOM_STATUS, 'draft')));
+        if (!in_array($publish_status, ['draft', 'publish'], true)) {
+            $publish_status = 'draft';
+        }
+        $target_category = $this->sanitize_blog_category((string) ($payload['target_category'] ?? ''));
+
+        $publishable_article = [
+            'title' => (string) $article['title'],
+            'slug' => (string) $article['slug'],
+            'content' => (string) $article['content'],
+            'meta_title' => (string) $article['meta_title'],
+            'meta_description' => (string) $article['meta_description'],
+            'canonical_url' => '',
+            'article_type' => 'random_fresh_content',
+            'backlinks' => [],
+        ];
+
+        $publish_result = $this->publish_to_remote_site($site, $publishable_article, null, $job, $keyword, $client, $article_id, $target_category, $publish_status);
+
+        $this->db->update($this->table('articles'), [
+            'remote_post_id' => sanitize_text_field((string) ($publish_result['remote_post_id'] ?? '')),
+            'remote_url' => esc_url_raw((string) ($publish_result['remote_url'] ?? '')),
+            'publish_status' => sanitize_text_field((string) ($publish_result['status'] ?? $publish_status)),
+            'updated_at' => $this->now(),
+        ], ['id' => $article_id]);
+
+        $this->db->update($this->table('jobs'), [
+            'status' => 'published',
+            'result' => wp_json_encode($publish_result),
+            'finished_at' => $this->now(),
+            'updated_at' => $this->now(),
+        ], ['id' => (int) $job->id]);
+
+        $this->db->update($this->table('keywords'), [
+            'status' => 'processed',
+            'last_processed_at' => $this->now(),
+            'updated_at' => $this->now(),
+        ], ['id' => (int) $keyword->id]);
+
+        $this->log('info', 'random_machine', 'Random artikel gegenereerd en gedistribueerd', [
+            'job_id' => (int) $job->id,
+            'article_id' => $article_id,
+            'site_id' => (int) $site->id,
+            'status' => (string) ($publish_result['status'] ?? $publish_status),
+        ]);
+    }
+
+    private function generate_random_article(object $site, object $keyword, array $research): array {
+        $result = $this->openai_json_call(
+            'random_writer',
+            [
+                'role' => 'Je bent een Nederlandse SEO copywriter voor blogs.',
+                'goal' => 'Schrijf een sterk, direct publiceerbaar blogartikel zonder links. Geef alleen JSON terug.',
+            ],
+            [
+                'site' => [
+                    'name' => (string) $site->name,
+                    'base_url' => (string) $site->base_url,
+                    'category' => (string) $site->default_category,
+                ],
+                'topic_research' => $research,
+                'main_keyword' => (string) $keyword->main_keyword,
+                'secondary_keywords' => $this->get_secondary_keywords_list($keyword),
+                'target_word_count' => (int) $keyword->target_word_count,
+                'requirements' => [
+                    'language' => 'nl',
+                    'html_content' => true,
+                    'use_h2_h3' => true,
+                    'intro_body_conclusion' => true,
+                    'no_external_links' => true,
+                    'no_internal_links' => true,
+                    'no_urls_or_sources' => true,
+                    'no_read_more_click_here' => true,
+                    'no_markdown_links' => true,
+                    'no_html_anchors' => true,
+                    'no_h1_in_content' => true,
+                    'seo_but_natural' => true,
+                    'non_generic_site_specific_angle' => true,
+                ],
+            ],
+            [
+                'type' => 'object',
+                'additionalProperties' => false,
+                'properties' => [
+                    'title' => ['type' => 'string'],
+                    'slug' => ['type' => 'string'],
+                    'content' => ['type' => 'string'],
+                    'meta_title' => ['type' => 'string'],
+                    'meta_description' => ['type' => 'string'],
+                ],
+                'required' => ['title', 'slug', 'content', 'meta_title', 'meta_description'],
+            ]
+        );
+
+        $clean_content = $this->sanitize_linkless_content((string) ($result['content'] ?? ''));
+
+        return [
+            'title' => sanitize_text_field((string) ($result['title'] ?? '')),
+            'slug' => sanitize_title((string) ($result['slug'] ?? (string) $keyword->main_keyword)),
+            'content' => $clean_content,
+            'meta_title' => sanitize_text_field((string) ($result['meta_title'] ?? '')),
+            'meta_description' => sanitize_textarea_field((string) ($result['meta_description'] ?? '')),
+            'canonical_url' => '',
+            'article_type' => 'random_fresh_content',
+        ];
+    }
+
+    private function sanitize_linkless_content(string $content): string {
+        $content = preg_replace('/<a\b[^>]*>(.*?)<\/a>/is', '$1', $content);
+        $content = preg_replace('~https?://\S+~i', '', (string) $content);
+        $content = preg_replace('~www\.\S+~i', '', (string) $content);
+        $content = preg_replace('/\blees ook\b|\bklik hier\b|\bbron:\b/iu', '', (string) $content);
+        return wp_kses_post((string) $content);
+    }
+
     private function maybe_run_auto_discovery(): void {
         $client = $this->db->get_row("SELECT * FROM {$this->table('clients')} WHERE is_active=1 ORDER BY updated_at ASC LIMIT 1");
         if (!$client) {
@@ -2594,6 +3185,11 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'site_id' => (int) $site->id,
             'keyword' => (string) $keyword->main_keyword,
         ]);
+
+        if ((string) $job->job_type === 'random_fresh_content') {
+            $this->process_random_fresh_content_job($job, $keyword, $client, $site);
+            return;
+        }
 
         $article = $this->generate_article($keyword, $client, $site);
 
@@ -3702,9 +4298,9 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         ];
     }
 
-    private function store_article(object $job, object $keyword, object $client, object $site, array $article, ?array $featured_image): int {
+    private function store_article(object $job, object $keyword, object $client, object $site, array $article, ?array $featured_image, bool $collect_backlinks = true): int {
         $sanitized_content = wp_kses_post($article['content'] ?? '');
-        $backlinks = $this->extract_backlinks_from_content($sanitized_content, $this->get_client_link_targets($client));
+        $backlinks = $collect_backlinks ? $this->extract_backlinks_from_content($sanitized_content, $this->get_client_link_targets($client)) : [];
 
         $inserted = $this->db->insert($this->table('articles'), [
             'job_id' => (int) $job->id,
@@ -3744,9 +4340,12 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         return untrailingslashit((string) $site->base_url) . '/wp-admin/admin-post.php?action=shortcut_receive_content';
     }
 
-    private function publish_to_remote_site(object $site, array $article, ?array $featured_image, object $job, object $keyword, object $client, int $article_id): array {
+    private function publish_to_remote_site(object $site, array $article, ?array $featured_image, object $job, object $keyword, object $client, int $article_id, ?string $forced_category = null, ?string $forced_status = null): array {
         $trusted_source_domain = $this->get_trusted_source_domain();
-        $category = trim((string) $site->default_category);
+        $category = $this->sanitize_blog_category((string) $forced_category);
+        if ($category === '') {
+            $category = trim((string) $site->default_category);
+        }
 
         if ($category === '') {
             $category = $this->determine_category_for_site((string) $site->base_url, (string) $site->name);
@@ -3782,7 +4381,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'meta_title' => (string) $article['meta_title'],
             'meta_description' => (string) $article['meta_description'],
             'canonical_url' => (string) ($article['canonical_url'] ?? ''),
-            'status' => (string) $site->default_status,
+            'status' => in_array((string) $forced_status, ['draft', 'publish'], true) ? (string) $forced_status : (string) $site->default_status,
             'category' => $category,
             'external_job_id' => (int) $job->id,
             'external_article_id' => $article_id,
