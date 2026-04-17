@@ -1019,6 +1019,11 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     }
 
     public function render_editorial(): void {
+        $available_sites = $this->db->get_results("
+            SELECT id, name, base_url
+            FROM {$this->table('sites')}
+            ORDER BY is_active DESC, publish_priority ASC, name ASC
+        ");
         $rows = $this->db->get_results("
             SELECT
                 a.id,
@@ -1027,9 +1032,11 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 a.meta_description,
                 a.created_at,
                 a.updated_at,
+                a.site_id,
                 k.main_keyword,
                 c.name AS client_name,
                 s.name AS site_name,
+                s.base_url AS site_base_url,
                 j.id AS job_id
             FROM {$this->table('articles')} a
             INNER JOIN {$this->table('jobs')} j ON j.id = a.job_id
@@ -1068,12 +1075,26 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                             <td><input class="sch-article-check" type="checkbox" name="article_ids[]" value="<?php echo (int) $row->id; ?>"></td>
                             <td><strong><?php echo esc_html((string) $row->title); ?></strong><br><span class="sch-muted sch-code"><?php echo esc_html((string) $row->slug); ?></span></td>
                             <td><?php echo esc_html((string) ($row->client_name ?: '')); ?></td>
-                            <td><?php echo esc_html((string) ($row->site_name ?: '')); ?></td>
+                            <td>
+                                <strong><?php echo esc_html((string) ($row->site_name ?: 'Onbekend')); ?></strong>
+                                <?php if (!empty($row->site_base_url)) : ?>
+                                    <br><span class="sch-muted sch-code"><?php echo esc_html((string) $row->site_base_url); ?></span>
+                                <?php endif; ?>
+                                <br>
+                                <label class="screen-reader-text" for="sch-site-<?php echo (int) $row->id; ?>">Publiceer op blog</label>
+                                <select id="sch-site-<?php echo (int) $row->id; ?>" name="article_sites[<?php echo (int) $row->id; ?>]">
+                                    <?php foreach ((array) $available_sites as $site_option) : ?>
+                                        <option value="<?php echo (int) $site_option->id; ?>" <?php selected((int) $row->site_id, (int) $site_option->id); ?>>
+                                            <?php echo esc_html((string) $site_option->name . ' (' . $site_option->base_url . ')'); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </td>
                             <td><?php echo esc_html((string) ($row->main_keyword ?: '')); ?></td>
                             <td><?php echo esc_html((string) $row->meta_description); ?></td>
                             <td><?php echo esc_html((string) $row->created_at); ?></td>
                             <td>
-                                <a class="button button-primary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_approve_publish&article_id=' . (int) $row->id), 'sch_approve_publish')); ?>">Publiceren</a>
+                                <button class="button button-primary" type="submit" name="publish_now_article_id" value="<?php echo (int) $row->id; ?>">Publiceren</button>
                             </td>
                         </tr>
                     <?php endforeach; else : ?>
@@ -2561,17 +2582,19 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
     public function handle_approve_publish(): void {
         $this->verify_admin_nonce('sch_approve_publish');
-        $article_id = (int) ($_GET['article_id'] ?? 0);
+        $article_id = (int) ($_REQUEST['article_id'] ?? 0);
         if ($article_id <= 0) {
             $this->redirect_with_message('sch-editorial', 'Artikel niet gevonden.', 'error');
         }
+        $site_id = $this->resolve_publish_site_id($article_id, $_REQUEST['site_id'] ?? null);
 
         try {
-            $this->approve_and_publish_article($article_id);
+            $this->approve_and_publish_article($article_id, $site_id);
             $this->redirect_with_message('sch-editorial', 'Artikel gepubliceerd.');
         } catch (Throwable $e) {
             $this->log('error', 'editorial', 'Publiceren na redactionele approval mislukt', [
                 'article_id' => $article_id,
+                'site_id' => $site_id,
                 'error' => $e->getMessage(),
             ]);
             $this->redirect_with_message('sch-editorial', 'Publiceren mislukt. Check logs.', 'error');
@@ -2589,16 +2612,34 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             $this->redirect_with_message('sch-editorial', 'Geen artikelen geselecteerd.', 'error');
         }
 
+        $single_publish_article_id = (int) ($_POST['publish_now_article_id'] ?? 0);
+        if ($single_publish_article_id > 0) {
+            $site_id = $this->resolve_publish_site_id($single_publish_article_id, (array) ($_POST['article_sites'] ?? []));
+            try {
+                $this->approve_and_publish_article($single_publish_article_id, $site_id);
+                $this->redirect_with_message('sch-editorial', 'Artikel gepubliceerd.');
+            } catch (Throwable $e) {
+                $this->log('error', 'editorial', 'Publiceren na redactionele approval mislukt', [
+                    'article_id' => $single_publish_article_id,
+                    'site_id' => $site_id,
+                    'error' => $e->getMessage(),
+                ]);
+                $this->redirect_with_message('sch-editorial', 'Publiceren mislukt. Check logs.', 'error');
+            }
+        }
+
         $published = 0;
         $failed = 0;
         foreach ($article_ids as $article_id) {
+            $site_id = $this->resolve_publish_site_id($article_id, (array) ($_POST['article_sites'] ?? []));
             try {
-                $this->approve_and_publish_article($article_id);
+                $this->approve_and_publish_article($article_id, $site_id);
                 $published++;
             } catch (Throwable $e) {
                 $failed++;
                 $this->log('error', 'editorial', 'Bulk publiceren mislukt voor artikel', [
                     'article_id' => $article_id,
+                    'site_id' => $site_id,
                     'error' => $e->getMessage(),
                 ]);
             }
@@ -3611,7 +3652,25 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         ]);
     }
 
-    private function approve_and_publish_article(int $article_id): void {
+    private function resolve_publish_site_id(int $article_id, $site_input): int {
+        if (is_array($site_input)) {
+            $site_id = (int) ($site_input[$article_id] ?? 0);
+        } else {
+            $site_id = (int) $site_input;
+        }
+
+        if ($site_id <= 0) {
+            return 0;
+        }
+
+        $exists = (int) $this->db->get_var($this->db->prepare(
+            "SELECT COUNT(*) FROM {$this->table('sites')} WHERE id=%d",
+            $site_id
+        ));
+        return $exists > 0 ? $site_id : 0;
+    }
+
+    private function approve_and_publish_article(int $article_id, int $target_site_id = 0): void {
         $article = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('articles')} WHERE id=%d", $article_id));
         if (!$article) {
             throw new RuntimeException('Artikel niet gevonden.');
@@ -3620,6 +3679,10 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $job = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('jobs')} WHERE id=%d", (int) $article->job_id));
         $keyword = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('keywords')} WHERE id=%d", (int) $article->keyword_id));
         $client = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('clients')} WHERE id=%d", (int) $article->client_id));
+        if ($target_site_id > 0) {
+            $article->site_id = $target_site_id;
+        }
+
         $site = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('sites')} WHERE id=%d", (int) $article->site_id));
 
         if (!$job || !$keyword || !$client || !$site) {
@@ -3651,6 +3714,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $publish_result = $this->publish_to_remote_site($site, $publishable_article, $featured_image, $job, $keyword, $client, (int) $article->id);
 
         $this->db->update($this->table('articles'), [
+            'site_id' => (int) $site->id,
             'remote_post_id' => sanitize_text_field((string) ($publish_result['remote_post_id'] ?? '')),
             'remote_url'     => esc_url_raw((string) ($publish_result['remote_url'] ?? '')),
             'publish_status' => sanitize_text_field((string) ($publish_result['status'] ?? 'draft')),
@@ -3658,6 +3722,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         ], ['id' => (int) $article->id]);
 
         $this->db->update($this->table('jobs'), [
+            'site_id'      => (int) $site->id,
             'status'      => 'published',
             'result'      => wp_json_encode($publish_result),
             'finished_at' => $this->now(),
