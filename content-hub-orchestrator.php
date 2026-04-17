@@ -1717,14 +1717,30 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'updated_at' => $this->now(),
         ];
 
-        if ($data['default_category'] === '') {
-            $data['default_category'] = $this->determine_category_for_site($data['base_url'], $data['name']);
-        }
-
         $existing_id = (int) $this->db->get_var($this->db->prepare(
             "SELECT id FROM {$this->table('sites')} WHERE base_url=%s LIMIT 1",
             $blog_url
         ));
+
+        if ($data['default_category'] === '' && $existing_id > 0) {
+            $existing_category = (string) $this->db->get_var($this->db->prepare(
+                "SELECT default_category FROM {$this->table('sites')} WHERE id=%d LIMIT 1",
+                $existing_id
+            ));
+            $existing_category = $this->sanitize_blog_category($existing_category);
+            if ($existing_category !== '') {
+                $data['default_category'] = $existing_category;
+                $this->vlog('site_category', 'Bestaande handmatige categorie behouden bij receiver-registratie.', [
+                    'site_id' => $existing_id,
+                    'base_url' => $data['base_url'],
+                    'category' => $existing_category,
+                ]);
+            }
+        }
+
+        if ($data['default_category'] === '') {
+            $data['default_category'] = $this->determine_category_for_site($data['base_url'], $data['name']);
+        }
 
         $operation = 'created';
         if ($existing_id > 0) {
@@ -1883,7 +1899,16 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             ];
 
             if ($data['default_category'] === '') {
-                $data['default_category'] = $this->determine_category_for_site($data['base_url'], $data['name']);
+                if ($existing && $this->sanitize_blog_category((string) $existing->default_category) !== '') {
+                    $data['default_category'] = $this->sanitize_blog_category((string) $existing->default_category);
+                    $this->vlog('site_category', 'Bestaande handmatige categorie behouden bij bulk update.', [
+                        'site_id' => (int) $existing->id,
+                        'base_url' => $data['base_url'],
+                        'category' => $data['default_category'],
+                    ]);
+                } else {
+                    $data['default_category'] = $this->determine_category_for_site($data['base_url'], $data['name']);
+                }
             }
 
             if ($existing) {
@@ -2892,14 +2917,23 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
     private function fetch_and_extract_page(string $url): array {
         $start = microtime(true);
-        $response = wp_remote_get($url, [
+        $request_args = [
             'timeout' => 25,
             'redirection' => 5,
             'headers' => [
                 'User-Agent' => 'ShortcutContentHubBot/0.5.2 (+WordPress)',
                 'Accept' => 'text/html,application/xhtml+xml',
             ],
-        ]);
+        ];
+        $response = wp_remote_get($url, $request_args);
+
+        if (is_wp_error($response) && function_exists('curl_init')) {
+            $this->log('warning', 'research_http', 'wp_remote_get mislukt, cURL fallback gestart.', [
+                'url' => $url,
+                'error' => $response->get_error_message(),
+            ]);
+            $response = $this->curl_fallback_get($url, $request_args);
+        }
 
         if (is_wp_error($response)) {
             throw new RuntimeException('Research GET mislukt voor ' . $url . ': ' . $response->get_error_message());
@@ -2940,6 +2974,57 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'url' => $url,
             'title' => $title,
             'text' => $text,
+        ];
+    }
+
+    private function curl_fallback_get(string $url, array $request_args) {
+        if (!function_exists('curl_init')) {
+            return new WP_Error('curl_missing', 'cURL extension ontbreekt.');
+        }
+
+        $ch = curl_init($url);
+        if ($ch === false) {
+            return new WP_Error('curl_init_failed', 'cURL initialisatie mislukt.');
+        }
+
+        $timeout = max(1, (int) ($request_args['timeout'] ?? 25));
+        $redirection = max(0, (int) ($request_args['redirection'] ?? 5));
+        $headers = [];
+        foreach ((array) ($request_args['headers'] ?? []) as $key => $value) {
+            $headers[] = (string) $key . ': ' . (string) $value;
+        }
+
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_MAXREDIRS, $redirection);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, min(10, $timeout));
+        curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
+
+        if (!empty($headers)) {
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        }
+
+        $body = curl_exec($ch);
+        if ($body === false) {
+            $error = curl_error($ch);
+            curl_close($ch);
+            return new WP_Error('curl_request_failed', 'cURL request mislukt: ' . $error);
+        }
+
+        $http_code = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+
+        return [
+            'response' => [
+                'code' => $http_code,
+                'message' => '',
+            ],
+            'body' => (string) $body,
+            'headers' => [],
+            'cookies' => [],
+            'filename' => null,
         ];
     }
 
@@ -3798,8 +3883,14 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
     private function determine_category_for_site(string $base_url, string $site_name): string {
         $allowed_categories = $this->allowed_blog_categories();
+        $fallback_category = 'Inspiratie';
 
         try {
+            $this->vlog('site_category', 'Automatische site-categorisatie gestart.', [
+                'base_url' => $base_url,
+                'site_name' => $site_name,
+            ]);
+
             $page = $this->fetch_and_extract_page($base_url);
 
             $result = $this->openai_json_call(
@@ -3830,8 +3921,21 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
             $category = sanitize_text_field((string) ($result['category'] ?? ''));
             if (in_array($category, $allowed_categories, true)) {
+                $this->log('info', 'site_category', 'Site-categorie automatisch bepaald.', [
+                    'base_url' => $base_url,
+                    'site_name' => $site_name,
+                    'category' => $category,
+                    'page_title' => (string) ($page['title'] ?? ''),
+                    'page_text_length' => mb_strlen((string) ($page['text'] ?? '')),
+                ]);
                 return $category;
             }
+
+            $this->log('warning', 'openai_site_category', 'OpenAI gaf ongeldige categorie, fallback categorie toegepast.', [
+                'base_url' => $base_url,
+                'site_name' => $site_name,
+                'returned_category' => $category,
+            ]);
         } catch (Throwable $e) {
             $this->log('warning', 'openai_site_category', 'Site categorisatie mislukt, fallback categorie toegepast.', [
                 'base_url' => $base_url,
@@ -3839,7 +3943,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             ]);
         }
 
-        return 'Inspiratie';
+        return $fallback_category;
     }
 
     private function sanitize_blog_categories(array $categories): array {
