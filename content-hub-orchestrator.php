@@ -5162,12 +5162,27 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $json = json_decode($raw, true);
         $duration = round((microtime(true) - $start) * 1000);
 
-        $this->vlog('openai', 'OpenAI response ontvangen', [
+        $log_context = [
             'name' => $name,
             'http_code' => $code,
             'duration_ms' => $duration,
-            'body_excerpt' => mb_substr($raw, 0, 800),
-        ]);
+        ];
+
+        if (is_array($json)) {
+            $log_context['response_id'] = sanitize_text_field((string) ($json['id'] ?? ''));
+            $log_context['status'] = sanitize_text_field((string) ($json['status'] ?? ''));
+            $log_context['response_model'] = sanitize_text_field((string) ($json['model'] ?? ''));
+            $log_context['created_at'] = isset($json['created_at']) ? (int) $json['created_at'] : null;
+            $log_context['completed_at'] = isset($json['completed_at']) ? (int) $json['completed_at'] : null;
+
+            if (isset($json['error']) && $json['error'] !== null) {
+                $log_context['error'] = is_array($json['error']) ? wp_json_encode($json['error']) : (string) $json['error'];
+            }
+        } else {
+            $log_context['body_excerpt'] = mb_substr($raw, 0, 800);
+        }
+
+        $this->vlog('openai', 'OpenAI response ontvangen', $log_context);
 
         if ($code < 200 || $code >= 300 || !is_array($json)) {
             throw new RuntimeException('OpenAI response ongeldig: HTTP ' . $code . ' / ' . mb_substr($raw, 0, 800));
