@@ -583,9 +583,13 @@ final class SCH_Orchestrator {
                         <?php endif; ?>
                     </p>
 
-                    <p>
-                        <a class="button" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_gsc_fetch_properties&client_id=' . (int) $edit->id), 'sch_gsc_fetch_properties_' . (int) $edit->id)); ?>">Fetch properties</a>
-                    </p>
+                    <?php if ($this->client_has_gsc_connection($edit)) : ?>
+                        <p>
+                            <a class="button" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_gsc_fetch_properties&client_id=' . (int) $edit->id), 'sch_gsc_fetch_properties_' . (int) $edit->id)); ?>">Fetch properties</a>
+                        </p>
+                    <?php else : ?>
+                        <p class="description">Rond eerst de Google Search Console koppeling af voordat je properties ophaalt.</p>
+                    <?php endif; ?>
 
                     <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-top:15px;">
                         <?php wp_nonce_field('sch_gsc_save_property'); ?>
@@ -2327,7 +2331,14 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'state' => $state_token,
         ], 'https://accounts.google.com/o/oauth2/v2/auth');
 
-        wp_safe_redirect($auth_url);
+        $this->log('info', 'gsc_oauth', 'OAuth redirect naar Google', [
+            'client_id' => $client_id,
+            'user_id' => get_current_user_id(),
+            'redirect_uri' => $this->gsc_oauth_redirect_uri(),
+            'auth_url' => $auth_url,
+        ]);
+
+        wp_redirect($auth_url);
         exit;
     }
 
@@ -2339,6 +2350,14 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $state = sanitize_text_field((string) ($_GET['state'] ?? ''));
         $code = sanitize_text_field((string) ($_GET['code'] ?? ''));
         $error = sanitize_text_field((string) ($_GET['error'] ?? ''));
+
+        $this->log('info', 'gsc_oauth', 'OAuth callback ontvangen', [
+            'state_present' => $state !== '',
+            'code_present' => $code !== '',
+            'error' => $error,
+            'user_id' => get_current_user_id(),
+        ]);
+
         $state_payload = get_transient('sch_gsc_state_' . $state);
         delete_transient('sch_gsc_state_' . $state);
 
