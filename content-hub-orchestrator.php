@@ -63,6 +63,11 @@ final class SCH_Orchestrator {
     const OPTION_SERP_SYNC_BATCH_SIZE = 'sch_serp_sync_batch_size';
     const OPTION_DATAFORSEO_LAST_ERROR = 'sch_dataforseo_last_error';
     const OPTION_INTELLIGENCE_LAST_SYNC = 'sch_intelligence_last_sync';
+    const OPTION_INTELLIGENCE_LAST_STARTED_AT = 'sch_intelligence_last_started_at';
+    const OPTION_INTELLIGENCE_LAST_FINISHED_AT = 'sch_intelligence_last_finished_at';
+    const OPTION_INTELLIGENCE_LAST_STATUS = 'sch_intelligence_last_status';
+    const TRANSIENT_INTELLIGENCE_INGEST_LOCK = 'sch_intelligence_ingest_lock';
+    const INTELLIGENCE_INGEST_LOCK_TTL = 600;
 
     const GA_CRON_HOOK = 'sch_orchestrator_ga_sync_worker';
     const FEEDBACK_CRON_HOOK = 'sch_orchestrator_feedback_sync_worker';
@@ -893,6 +898,9 @@ final class SCH_Orchestrator {
         add_option(self::OPTION_DATAFORSEO_LOGIN, '');
         add_option(self::OPTION_DATAFORSEO_PASSWORD, '');
         add_option(self::OPTION_INTELLIGENCE_LAST_SYNC, '');
+        add_option(self::OPTION_INTELLIGENCE_LAST_STARTED_AT, '');
+        add_option(self::OPTION_INTELLIGENCE_LAST_FINISHED_AT, '');
+        add_option(self::OPTION_INTELLIGENCE_LAST_STATUS, '');
         add_option(self::OPTION_SERP_DEFAULT_COUNTRY_CODE, 'us');
         add_option(self::OPTION_SERP_DEFAULT_LANGUAGE_CODE, 'en');
         add_option(self::OPTION_SERP_DEFAULT_DEVICE, 'desktop');
@@ -929,7 +937,12 @@ final class SCH_Orchestrator {
     private function render_admin_notice(): void {
         $message = isset($_GET['sch_message']) ? sanitize_text_field(wp_unslash($_GET['sch_message'])) : '';
         $message_type = isset($_GET['sch_message_type']) ? sanitize_key(wp_unslash($_GET['sch_message_type'])) : 'success';
-        $notice_class = $message_type === 'error' ? 'notice notice-error' : 'notice notice-success';
+        $notice_class = 'notice notice-success';
+        if ($message_type === 'error') {
+            $notice_class = 'notice notice-error';
+        } elseif ($message_type === 'warning') {
+            $notice_class = 'notice notice-warning';
+        }
 
         if ($message !== '') {
             echo '<div class="' . esc_attr($notice_class) . '"><p>' . esc_html($message) . '</p></div>';
@@ -4131,7 +4144,11 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
     public function run_worker(): void {
         $this->log('info', 'worker', 'run_worker gestart');
-        $this->maybe_run_intelligence_pipeline();
+        if ($this->is_intelligence_ingest_locked()) {
+            $this->log('info', 'intelligence', 'Intelligence ingest overgeslagen: actieve run gedetecteerd (worker)', $this->get_intelligence_ingest_lock_payload());
+        } else {
+            $this->maybe_run_intelligence_pipeline();
+        }
         $this->maybe_prepare_random_content_jobs();
 
         $job = $this->db->get_row("SELECT * FROM {$this->table('jobs')} WHERE status='queued' ORDER BY id ASC LIMIT 1");
@@ -9213,8 +9230,18 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     public function handle_run_intelligence_ingest(): void {
         $this->verify_admin_nonce('sch_run_intelligence_ingest');
         $client_id = max(0, (int) ($_POST['client_id'] ?? 0));
-        $this->maybe_run_intelligence_pipeline($client_id > 0 ? $client_id : null, true);
-        $this->redirect_with_message('sch-intelligence', 'Intelligence ingest voltooid.', 'success', [
+        if ($this->is_intelligence_ingest_locked()) {
+            $this->log('info', 'intelligence', 'Intelligence ingest overgeslagen: actieve run gedetecteerd (admin)', [
+                'requested_client_id' => $client_id > 0 ? $client_id : null,
+                'lock_payload' => $this->get_intelligence_ingest_lock_payload(),
+            ]);
+            $this->redirect_with_message('sch-intelligence', 'Ingest overgeslagen: er is al een actieve intelligence-run.', 'warning', [
+                'client_id' => $client_id,
+            ]);
+        }
+
+        $completed = $this->maybe_run_intelligence_pipeline($client_id > 0 ? $client_id : null, true);
+        $this->redirect_with_message('sch-intelligence', $completed ? 'Intelligence ingest voltooid.' : 'Intelligence ingest overgeslagen.', $completed ? 'success' : 'warning', [
             'client_id' => $client_id,
         ]);
     }
@@ -9282,20 +9309,59 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         ];
     }
 
-    private function maybe_run_intelligence_pipeline(?int $client_id = null, bool $force = false): void {
+    private function maybe_run_intelligence_pipeline(?int $client_id = null, bool $force = false): bool {
         $last_sync = (string) get_option(self::OPTION_INTELLIGENCE_LAST_SYNC, '');
         if (!$force && $last_sync !== '') {
             $age = time() - strtotime($last_sync);
             if ($age >= 0 && $age < HOUR_IN_SECONDS) {
-                return;
+                return false;
             }
         }
 
-        $this->run_intelligence_ingest($client_id);
-        update_option(self::OPTION_INTELLIGENCE_LAST_SYNC, gmdate('Y-m-d H:i:s'));
+        $run_id = wp_generate_uuid4();
+        if (!$this->acquire_intelligence_ingest_lock($run_id, $client_id)) {
+            $this->log('info', 'intelligence', 'Intelligence ingest overgeslagen: lock kon niet worden verkregen', [
+                'run_id' => $run_id,
+                'requested_client_id' => $client_id,
+                'lock_payload' => $this->get_intelligence_ingest_lock_payload(),
+            ]);
+            return false;
+        }
+
+        $started_at = gmdate('Y-m-d H:i:s');
+        update_option(self::OPTION_INTELLIGENCE_LAST_STARTED_AT, $started_at);
+        update_option(self::OPTION_INTELLIGENCE_LAST_STATUS, 'running');
+        $this->log_orchestrator_event(1, 0, $client_id ?? 0, 'ingest', $run_id, 'ingest_started', 'orchestrator', [
+            'run_id' => $run_id,
+            'client_id' => $client_id,
+            'force' => $force,
+            'started_at' => $started_at,
+        ]);
+
+        try {
+            $this->run_intelligence_ingest($client_id, $run_id);
+            update_option(self::OPTION_INTELLIGENCE_LAST_SYNC, gmdate('Y-m-d H:i:s'));
+            update_option(self::OPTION_INTELLIGENCE_LAST_STATUS, 'completed');
+            $this->log_orchestrator_event(1, 0, $client_id ?? 0, 'ingest', $run_id, 'ingest_completed', 'orchestrator', [
+                'run_id' => $run_id,
+                'client_id' => $client_id,
+            ]);
+            return true;
+        } catch (Throwable $e) {
+            update_option(self::OPTION_INTELLIGENCE_LAST_STATUS, 'failed');
+            $this->log_orchestrator_event(1, 0, $client_id ?? 0, 'ingest', $run_id, 'ingest_failed', 'orchestrator', [
+                'run_id' => $run_id,
+                'client_id' => $client_id,
+                'error_message' => $e->getMessage(),
+            ]);
+            throw $e;
+        } finally {
+            update_option(self::OPTION_INTELLIGENCE_LAST_FINISHED_AT, gmdate('Y-m-d H:i:s'));
+            $this->release_intelligence_ingest_lock();
+        }
     }
 
-    private function run_intelligence_ingest(?int $client_id = null): void {
+    private function run_intelligence_ingest(?int $client_id = null, ?string $run_id = null): void {
         $clients_sql = "SELECT id FROM {$this->table('clients')} WHERE is_active=1";
         $params = [];
         if ($client_id !== null && $client_id > 0) {
@@ -9305,6 +9371,10 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $clients_sql .= " ORDER BY id ASC";
         $clients = $params ? $this->db->get_results($this->db->prepare($clients_sql, ...$params)) : $this->db->get_results($clients_sql);
         if (!$clients) {
+            $this->vlog('intelligence', 'Geen actieve clients voor ingest-run', [
+                'run_id' => $run_id,
+                'client_id' => $client_id,
+            ]);
             return;
         }
 
@@ -9317,6 +9387,30 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             $this->recompute_opportunities_for_client($cid);
         }
         $this->ingest_wp_content_events();
+    }
+
+    private function is_intelligence_ingest_locked(): bool {
+        return get_transient(self::TRANSIENT_INTELLIGENCE_INGEST_LOCK) !== false;
+    }
+
+    private function get_intelligence_ingest_lock_payload(): array {
+        $payload = get_transient(self::TRANSIENT_INTELLIGENCE_INGEST_LOCK);
+        return is_array($payload) ? $payload : [];
+    }
+
+    private function acquire_intelligence_ingest_lock(string $run_id, ?int $client_id = null): bool {
+        if ($this->is_intelligence_ingest_locked()) {
+            return false;
+        }
+        return set_transient(self::TRANSIENT_INTELLIGENCE_INGEST_LOCK, [
+            'run_id' => $run_id,
+            'client_id' => $client_id,
+            'acquired_at' => gmdate('Y-m-d H:i:s'),
+        ], self::INTELLIGENCE_INGEST_LOCK_TTL);
+    }
+
+    private function release_intelligence_ingest_lock(): void {
+        delete_transient(self::TRANSIENT_INTELLIGENCE_INGEST_LOCK);
     }
 
     private function ingest_client_daily_metrics(int $client_id): void {
