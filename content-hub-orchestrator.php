@@ -61,6 +61,7 @@ final class SCH_Orchestrator {
     const OPTION_SERP_DEFAULT_DEVICE = 'sch_serp_default_device';
     const OPTION_SERP_RESULTS_DEPTH = 'sch_serp_results_depth';
     const OPTION_SERP_SYNC_BATCH_SIZE = 'sch_serp_sync_batch_size';
+    const OPTION_SCORING_WEIGHTS = 'sch_scoring_weights';
     const OPTION_DATAFORSEO_LAST_ERROR = 'sch_dataforseo_last_error';
     const OPTION_INTELLIGENCE_LAST_SYNC = 'sch_intelligence_last_sync';
     const OPTION_INTELLIGENCE_LAST_STARTED_AT = 'sch_intelligence_last_started_at';
@@ -908,6 +909,7 @@ final class SCH_Orchestrator {
         add_option(self::OPTION_SERP_DEFAULT_COUNTRY_CODE, 'us');
         add_option(self::OPTION_SERP_DEFAULT_LANGUAGE_CODE, 'en');
         add_option(self::OPTION_SERP_DEFAULT_DEVICE, 'desktop');
+        add_option(self::OPTION_SCORING_WEIGHTS, wp_json_encode($this->default_scoring_weights(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
         add_option(self::OPTION_SERP_RESULTS_DEPTH, '10');
         add_option(self::OPTION_SERP_SYNC_BATCH_SIZE, '50');
         add_option(self::OPTION_DATAFORSEO_LAST_ERROR, '');
@@ -2135,6 +2137,25 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <tr><th>Google OAuth client secret</th><td><input type="password" name="ga_client_secret" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_GA_CLIENT_SECRET, '')); ?>"></td></tr>
                     <tr><th>Auto sync GA4</th><td><label><input type="checkbox" name="ga_auto_sync" value="1" <?php checked(get_option(self::OPTION_GA_AUTO_SYNC, '0'), '1'); ?>> Dagelijks GA4 page metrics syncen</label></td></tr>
                     <tr><th>Auto feedback engine</th><td><label><input type="checkbox" name="feedback_auto_sync" value="1" <?php checked(get_option(self::OPTION_FEEDBACK_AUTO_SYNC, '0'), '1'); ?>> Dagelijks overlay + feedback signalen genereren</label></td></tr>
+                    <tr><th colspan="2"><h2 style="margin:10px 0 0;">Intelligence scoring</h2></th></tr>
+                    <?php $scoring_weights = $this->get_opportunity_scoring_weights(); ?>
+                    <tr>
+                        <th>Scoring gewichten (JSON)</th>
+                        <td>
+                            <textarea name="scoring_weights_json" rows="4" class="large-text code"><?php echo esc_textarea(wp_json_encode($scoring_weights, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)); ?></textarea>
+                            <p class="description">Optioneel. Voorbeeld: <code>{"potential_norm":0.35,"ctr_gap":0.30,"position_factor":0.20,"decline_factor":0.15}</code></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Losse gewichten</th>
+                        <td>
+                            <label style="display:inline-block; margin-right:12px;">potential_norm <input type="number" step="0.01" min="0" max="1" name="weight_potential_norm" value="<?php echo esc_attr((string) ($scoring_weights['potential_norm'] ?? 0.35)); ?>"></label>
+                            <label style="display:inline-block; margin-right:12px;">ctr_gap <input type="number" step="0.01" min="0" max="1" name="weight_ctr_gap" value="<?php echo esc_attr((string) ($scoring_weights['ctr_gap'] ?? 0.30)); ?>"></label>
+                            <label style="display:inline-block; margin-right:12px;">position_factor <input type="number" step="0.01" min="0" max="1" name="weight_position_factor" value="<?php echo esc_attr((string) ($scoring_weights['position_factor'] ?? 0.20)); ?>"></label>
+                            <label style="display:inline-block; margin-right:12px;">decline_factor <input type="number" step="0.01" min="0" max="1" name="weight_decline_factor" value="<?php echo esc_attr((string) ($scoring_weights['decline_factor'] ?? 0.15)); ?>"></label>
+                            <p class="description">Als de som geen 1.0 is, normaliseren we automatisch naar 1.0.</p>
+                        </td>
+                    </tr>
                     <tr><th colspan="2"><h2 style="margin:10px 0 0;">SERP Provider</h2></th></tr>
                     <tr>
                         <th>SERP provider</th>
@@ -2180,7 +2201,10 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     </td></tr>
                     <tr><th>Exclude recent topic duplicates window (dagen)</th><td><input type="number" name="random_duplicate_window_days" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_DUPLICATE_WINDOW_DAYS, '30')); ?>" min="1" max="365"></td></tr>
                 </table>
-                <p><button class="button button-primary">Instellingen opslaan</button></p>
+                <p>
+                    <button class="button button-primary">Instellingen opslaan</button>
+                    <button type="submit" name="scoring_reset_defaults" value="1" class="button">Reset scoring defaults</button>
+                </p>
                 <p>Gebruik hier je eigen sleutels. Hardcode ze niet in de plugin.</p>
             </form>
         </div>
@@ -2232,6 +2256,48 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
         $decoded = json_decode($value, true);
         return is_array($decoded) ? $decoded : [];
+    }
+
+    private function default_scoring_weights(): array {
+        return [
+            'potential_norm' => 0.35,
+            'ctr_gap' => 0.30,
+            'position_factor' => 0.20,
+            'decline_factor' => 0.15,
+        ];
+    }
+
+    private function normalize_scoring_weights(array $candidate): array {
+        $defaults = $this->default_scoring_weights();
+        $weights = [];
+        foreach ($defaults as $key => $default_value) {
+            $weights[$key] = max(0.0, (float) ($candidate[$key] ?? $default_value));
+        }
+
+        $sum = array_sum($weights);
+        if ($sum <= 0.0) {
+            return $defaults;
+        }
+
+        foreach ($weights as $key => $value) {
+            $weights[$key] = round($value / $sum, 6);
+        }
+
+        $normalized_sum = array_sum($weights);
+        if (abs(1.0 - $normalized_sum) > 0.000001) {
+            $weights['decline_factor'] = round(($weights['decline_factor'] ?? 0.0) + (1.0 - $normalized_sum), 6);
+        }
+
+        return $weights;
+    }
+
+    private function get_opportunity_scoring_weights(): array {
+        $raw = get_option(self::OPTION_SCORING_WEIGHTS, wp_json_encode($this->default_scoring_weights(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        $decoded = is_string($raw) ? json_decode($raw, true) : [];
+        if (!is_array($decoded)) {
+            $decoded = [];
+        }
+        return $this->normalize_scoring_weights($decoded);
     }
 
     private function implode_target_strings(array $targets): string {
@@ -3467,6 +3533,57 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $random_allowed_categories = $this->sanitize_blog_categories((array) ($_POST['random_allowed_categories'] ?? []));
         update_option(self::OPTION_RANDOM_ALLOWED_CATEGORIES, wp_json_encode($random_allowed_categories));
         update_option(self::OPTION_RANDOM_DUPLICATE_WINDOW_DAYS, (string) max(1, min(365, (int) ($_POST['random_duplicate_window_days'] ?? 30))));
+
+        $previous_scoring_weights = $this->get_opportunity_scoring_weights();
+        $reset_scoring_defaults = isset($_POST['scoring_reset_defaults']) && (string) $_POST['scoring_reset_defaults'] === '1';
+        $scoring_weights = $this->default_scoring_weights();
+        $sum_before_normalization = array_sum($scoring_weights);
+        if (!$reset_scoring_defaults) {
+            $manual_weights = [
+                'potential_norm' => ($_POST['weight_potential_norm'] ?? ''),
+                'ctr_gap' => ($_POST['weight_ctr_gap'] ?? ''),
+                'position_factor' => ($_POST['weight_position_factor'] ?? ''),
+                'decline_factor' => ($_POST['weight_decline_factor'] ?? ''),
+            ];
+            $has_manual_weights = false;
+            foreach ($manual_weights as $value) {
+                if (trim((string) $value) !== '') {
+                    $has_manual_weights = true;
+                    break;
+                }
+            }
+            if ($has_manual_weights) {
+                $scoring_weights = [
+                    'potential_norm' => max(0.0, (float) $manual_weights['potential_norm']),
+                    'ctr_gap' => max(0.0, (float) $manual_weights['ctr_gap']),
+                    'position_factor' => max(0.0, (float) $manual_weights['position_factor']),
+                    'decline_factor' => max(0.0, (float) $manual_weights['decline_factor']),
+                ];
+            } else {
+                $json_weights_raw = trim((string) ($_POST['scoring_weights_json'] ?? ''));
+                if ($json_weights_raw !== '') {
+                    $decoded_json_weights = json_decode($json_weights_raw, true);
+                    if (is_array($decoded_json_weights)) {
+                        $scoring_weights = $decoded_json_weights;
+                    }
+                }
+            }
+            $sum_before_normalization = array_sum([
+                'potential_norm' => max(0.0, (float) ($scoring_weights['potential_norm'] ?? 0)),
+                'ctr_gap' => max(0.0, (float) ($scoring_weights['ctr_gap'] ?? 0)),
+                'position_factor' => max(0.0, (float) ($scoring_weights['position_factor'] ?? 0)),
+                'decline_factor' => max(0.0, (float) ($scoring_weights['decline_factor'] ?? 0)),
+            ]);
+        }
+        $scoring_weights = $this->normalize_scoring_weights($scoring_weights);
+        update_option(self::OPTION_SCORING_WEIGHTS, wp_json_encode($scoring_weights, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        $this->log_orchestrator_event(1, 0, 0, 'settings', 'scoring_weights', 'scoring_config_updated', 'admin_ui', [
+            'previous' => $previous_scoring_weights,
+            'current' => $scoring_weights,
+            'sum_before_normalization' => round((float) $sum_before_normalization, 6),
+            'normalized' => abs(1.0 - (float) $sum_before_normalization) > 0.000001,
+            'reset_to_defaults' => $reset_scoring_defaults,
+        ]);
 
         $this->redirect_with_message('sch-settings', 'Instellingen opgeslagen.');
     }
@@ -9661,6 +9778,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $clicks = max(0.0, (float) ($input['clicks_28'] ?? 0));
         $clicks_prev = max(0.0, (float) ($input['clicks_prev_28'] ?? 0));
         $source_quality = max(0.0, min(1.0, (float) ($input['source_quality'] ?? 0)));
+        $weights = $this->get_opportunity_scoring_weights();
 
         $potential_norm = min(1.0, log(1 + $impressions) / log(1 + 50000));
         $target_ctr = $position > 0 ? max(0.02, min(0.35, 0.32 - (($position - 1) * 0.015))) : 0.12;
@@ -9669,7 +9787,12 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $trend = ($clicks_prev > 0) ? (($clicks - $clicks_prev) / $clicks_prev) : 0.0;
         $decline_factor = max(0.0, min(1.0, -$trend));
 
-        $score = (($potential_norm * 0.35) + ($ctr_gap * 0.30) + ($position_factor * 0.20) + ($decline_factor * 0.15)) * 100;
+        $score = (
+            ($potential_norm * (float) ($weights['potential_norm'] ?? 0.35)) +
+            ($ctr_gap * (float) ($weights['ctr_gap'] ?? 0.30)) +
+            ($position_factor * (float) ($weights['position_factor'] ?? 0.20)) +
+            ($decline_factor * (float) ($weights['decline_factor'] ?? 0.15))
+        ) * 100;
         $score = round(max(0.0, min(100.0, $score)), 2);
         $confidence = round(max(0.05, min(1.0, $source_quality)), 4);
 
@@ -9690,6 +9813,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'position_factor' => round($position_factor, 4),
                 'decline_factor' => round($decline_factor, 4),
                 'target_ctr' => round($target_ctr, 4),
+                'weights' => $weights,
             ],
         ];
     }
@@ -9901,6 +10025,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
         $connectors = $this->get_connector_registry();
         $can_manage_task_actions = current_user_can('manage_options');
+        $active_scoring_weights = $this->get_opportunity_scoring_weights();
         ?>
         <div class="wrap">
             <h1>Intelligence</h1>
@@ -9910,6 +10035,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <span style="margin-right:10px;"><?php echo esc_html((string) $connector['label']); ?> <?php echo !empty($connector['enabled']) ? '✅' : '⚠️'; ?></span>
                 <?php endforeach; ?>
             </p>
+            <p><strong>Actieve scoring gewichten:</strong> <code><?php echo esc_html(wp_json_encode($active_scoring_weights, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)); ?></code></p>
 
             <form method="get" style="margin-bottom:12px;">
                 <input type="hidden" name="page" value="sch-intelligence">
