@@ -135,6 +135,8 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_mark_serp_signal_resolved', [$this, 'mark_serp_signal_resolved']);
         add_action('admin_post_sch_mark_serp_signal_ignored', [$this, 'mark_serp_signal_ignored']);
         add_action('admin_post_sch_create_intelligence_task', [$this, 'handle_create_intelligence_task']);
+        add_action('admin_post_sch_start_intelligence_task', [$this, 'handle_start_intelligence_task']);
+        add_action('admin_post_sch_complete_intelligence_task', [$this, 'handle_complete_intelligence_task']);
         add_action('admin_post_sch_run_intelligence_ingest', [$this, 'handle_run_intelligence_ingest']);
         add_action('admin_post_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
         add_action('admin_post_nopriv_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
@@ -9303,6 +9305,90 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         ]);
     }
 
+    public function handle_start_intelligence_task(): void {
+        $this->verify_admin_nonce('sch_start_intelligence_task');
+        $this->handle_intelligence_task_status_update('in_progress');
+    }
+
+    public function handle_complete_intelligence_task(): void {
+        $this->verify_admin_nonce('sch_complete_intelligence_task');
+        $this->handle_intelligence_task_status_update('done');
+    }
+
+    private function handle_intelligence_task_status_update(string $target_status): void {
+        $task_id = max(0, (int) ($_POST['task_id'] ?? 0));
+        if ($task_id <= 0) {
+            $this->redirect_with_message('sch-intelligence', 'Ongeldige task.', 'error');
+        }
+
+        $task = $this->db->get_row($this->db->prepare(
+            "SELECT * FROM {$this->table('orchestrator_tasks')} WHERE id=%d",
+            $task_id
+        ));
+        if (!$task) {
+            $this->redirect_with_message('sch-intelligence', 'Task niet gevonden.', 'error');
+        }
+
+        $current_status = sanitize_key((string) ($task->status ?? 'new'));
+        $allowed_transitions = [
+            'new' => 'in_progress',
+            'in_progress' => 'done',
+        ];
+        $expected_target = $allowed_transitions[$current_status] ?? '';
+        if ($expected_target === '' || $expected_target !== $target_status) {
+            $this->redirect_with_message('sch-intelligence', 'Ongeldige statusovergang voor task.', 'error', [
+                'client_id' => (int) ($task->client_id ?? 0),
+                'page_path' => rawurlencode((string) ($task->page_path ?? '')),
+            ]);
+        }
+
+        $now = $this->now();
+        $update = [
+            'status' => $target_status,
+            'updated_at' => $now,
+        ];
+        if ($target_status === 'in_progress') {
+            $update['started_at'] = $now;
+        } elseif ($target_status === 'done') {
+            if ((string) ($task->started_at ?? '') === '' || (string) ($task->started_at ?? '') === '0000-00-00 00:00:00') {
+                $update['started_at'] = $now;
+            }
+            $update['completed_at'] = $now;
+        }
+
+        $updated = $this->db->update($this->table('orchestrator_tasks'), $update, ['id' => $task_id]);
+        if ($updated === false) {
+            $this->log('error', 'intelligence', 'Task status bijwerken mislukt', [
+                'task_id' => $task_id,
+                'to_status' => $target_status,
+                'db_error' => $this->db->last_error,
+            ]);
+            $this->redirect_with_message('sch-intelligence', 'Task status bijwerken mislukt.', 'error');
+        }
+
+        $this->log_orchestrator_event(
+            (int) ($task->tenant_id ?? 1),
+            (int) ($task->site_id ?? 0),
+            (int) ($task->client_id ?? 0),
+            'task',
+            (string) $task_id,
+            'task_status_changed',
+            'admin_ui',
+            [
+                'from_status' => $current_status,
+                'to_status' => $target_status,
+                'started_at' => $update['started_at'] ?? (string) ($task->started_at ?? ''),
+                'completed_at' => $update['completed_at'] ?? (string) ($task->completed_at ?? ''),
+                'updated_by' => get_current_user_id() ?: null,
+            ]
+        );
+
+        $this->redirect_with_message('sch-intelligence', 'Task status bijgewerkt.', 'success', [
+            'client_id' => (int) ($task->client_id ?? 0),
+            'page_path' => rawurlencode((string) ($task->page_path ?? '')),
+        ]);
+    }
+
     private function get_connector_registry(): array {
         return [
             'gsc' => ['enabled' => get_option(self::OPTION_GSC_ENABLED, '0') === '1', 'label' => 'Google Search Console'],
@@ -9784,6 +9870,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
         $history = [];
         $events = [];
+        $recent_tasks = [];
         $explanation = null;
         if ($client_id > 0 && $selected_path !== '') {
             $history = $this->db->get_results($this->db->prepare(
@@ -9796,6 +9883,16 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             ));
             $events = $this->get_url_events($client_id, $selected_path, 21);
             $explanation = $this->explain_page_change($client_id, $selected_path, 14);
+        }
+        if ($client_id > 0) {
+            $recent_tasks = (array) $this->db->get_results($this->db->prepare(
+                "SELECT id, page_path, task_type, status, started_at, completed_at, created_at
+                 FROM {$this->table('orchestrator_tasks')}
+                 WHERE client_id=%d
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT 25",
+                $client_id
+            ));
         }
 
         $connectors = $this->get_connector_registry();
@@ -9902,6 +9999,46 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                                 </tr>
                             <?php endforeach; else : ?>
                                 <tr><td colspan="4">Geen events gevonden.</td></tr>
+                            <?php endif; ?>
+                            </tbody>
+                        </table>
+
+                        <h3>Recent tasks</h3>
+                        <table class="widefat striped">
+                            <thead><tr><th>ID</th><th>Pagina</th><th>Type</th><th>Status</th><th>Started</th><th>Completed</th><th>Acties</th></tr></thead>
+                            <tbody>
+                            <?php if ($recent_tasks) : foreach ($recent_tasks as $task) : ?>
+                                <tr>
+                                    <td>#<?php echo (int) $task->id; ?></td>
+                                    <td><code><?php echo esc_html((string) ($task->page_path ?: '—')); ?></code></td>
+                                    <td><?php echo esc_html((string) $task->task_type); ?></td>
+                                    <td><?php echo esc_html((string) $task->status); ?></td>
+                                    <td><?php echo esc_html((string) ($task->started_at ?: '—')); ?></td>
+                                    <td><?php echo esc_html((string) ($task->completed_at ?: '—')); ?></td>
+                                    <td>
+                                        <?php if ((string) $task->status === 'new') : ?>
+                                            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
+                                                <?php wp_nonce_field('sch_start_intelligence_task'); ?>
+                                                <input type="hidden" name="action" value="sch_start_intelligence_task">
+                                                <input type="hidden" name="task_id" value="<?php echo (int) $task->id; ?>">
+                                                <button class="button">Start</button>
+                                            </form>
+                                        <?php endif; ?>
+                                        <?php if ((string) $task->status === 'in_progress') : ?>
+                                            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
+                                                <?php wp_nonce_field('sch_complete_intelligence_task'); ?>
+                                                <input type="hidden" name="action" value="sch_complete_intelligence_task">
+                                                <input type="hidden" name="task_id" value="<?php echo (int) $task->id; ?>">
+                                                <button class="button button-primary">Complete</button>
+                                            </form>
+                                        <?php endif; ?>
+                                        <?php if (!in_array((string) $task->status, ['new', 'in_progress'], true)) : ?>
+                                            <span class="sch-muted">—</span>
+                                        <?php endif; ?>
+                                    </td>
+                                </tr>
+                            <?php endforeach; else : ?>
+                                <tr><td colspan="7">Nog geen tasks voor deze klant.</td></tr>
                             <?php endif; ?>
                             </tbody>
                         </table>
