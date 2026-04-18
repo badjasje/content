@@ -2219,6 +2219,10 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         check_admin_referer($action);
     }
 
+    private function verify_task_action_request(string $action): void {
+        $this->verify_admin_nonce($action);
+    }
+
     private function decode_json_array($value): array {
         if (is_array($value)) {
             return $value;
@@ -9251,7 +9255,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     }
 
     public function handle_create_intelligence_task(): void {
-        $this->verify_admin_nonce('sch_create_intelligence_task');
+        $this->verify_task_action_request('sch_create_intelligence_task');
 
         $task_type = sanitize_key((string) ($_POST['task_type'] ?? ''));
         if (!in_array($task_type, ['create_refresh_task', 'create_internal_link_review_task'], true)) {
@@ -9306,12 +9310,12 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     }
 
     public function handle_start_intelligence_task(): void {
-        $this->verify_admin_nonce('sch_start_intelligence_task');
+        $this->verify_task_action_request('sch_start_intelligence_task');
         $this->handle_intelligence_task_status_update('in_progress');
     }
 
     public function handle_complete_intelligence_task(): void {
-        $this->verify_admin_nonce('sch_complete_intelligence_task');
+        $this->verify_task_action_request('sch_complete_intelligence_task');
         $this->handle_intelligence_task_status_update('done');
     }
 
@@ -9896,6 +9900,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
 
         $connectors = $this->get_connector_registry();
+        $can_manage_task_actions = current_user_can('manage_options');
         ?>
         <div class="wrap">
             <h1>Intelligence</h1>
@@ -9943,20 +9948,24 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                                 <td><?php echo esc_html((string) round((float) $row->confidence, 2)); ?></td>
                                 <td><?php echo esc_html((string) $row->quick_reason); ?></td>
                                 <td>
-                                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
-                                        <?php wp_nonce_field('sch_create_intelligence_task'); ?>
-                                        <input type="hidden" name="action" value="sch_create_intelligence_task">
-                                        <input type="hidden" name="opportunity_id" value="<?php echo (int) $row->id; ?>">
-                                        <input type="hidden" name="task_type" value="create_refresh_task">
-                                        <button class="button">Refresh task</button>
-                                    </form>
-                                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
-                                        <?php wp_nonce_field('sch_create_intelligence_task'); ?>
-                                        <input type="hidden" name="action" value="sch_create_intelligence_task">
-                                        <input type="hidden" name="opportunity_id" value="<?php echo (int) $row->id; ?>">
-                                        <input type="hidden" name="task_type" value="create_internal_link_review_task">
-                                        <button class="button">Internal links</button>
-                                    </form>
+                                    <?php if ($can_manage_task_actions) : ?>
+                                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
+                                            <?php wp_nonce_field('sch_create_intelligence_task'); ?>
+                                            <input type="hidden" name="action" value="sch_create_intelligence_task">
+                                            <input type="hidden" name="opportunity_id" value="<?php echo (int) $row->id; ?>">
+                                            <input type="hidden" name="task_type" value="create_refresh_task">
+                                            <button class="button">Refresh task</button>
+                                        </form>
+                                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
+                                            <?php wp_nonce_field('sch_create_intelligence_task'); ?>
+                                            <input type="hidden" name="action" value="sch_create_intelligence_task">
+                                            <input type="hidden" name="opportunity_id" value="<?php echo (int) $row->id; ?>">
+                                            <input type="hidden" name="task_type" value="create_internal_link_review_task">
+                                            <button class="button">Internal links</button>
+                                        </form>
+                                    <?php else : ?>
+                                        <span class="sch-muted">Geen rechten</span>
+                                    <?php endif; ?>
                                 </td>
                             </tr>
                         <?php endforeach; else : ?>
@@ -10003,46 +10012,49 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                             </tbody>
                         </table>
 
-                        <h3>Recent tasks</h3>
-                        <table class="widefat striped">
-                            <thead><tr><th>ID</th><th>Pagina</th><th>Type</th><th>Status</th><th>Started</th><th>Completed</th><th>Acties</th></tr></thead>
-                            <tbody>
-                            <?php if ($recent_tasks) : foreach ($recent_tasks as $task) : ?>
-                                <tr>
-                                    <td>#<?php echo (int) $task->id; ?></td>
-                                    <td><code><?php echo esc_html((string) ($task->page_path ?: '—')); ?></code></td>
-                                    <td><?php echo esc_html((string) $task->task_type); ?></td>
-                                    <td><?php echo esc_html((string) $task->status); ?></td>
-                                    <td><?php echo esc_html((string) ($task->started_at ?: '—')); ?></td>
-                                    <td><?php echo esc_html((string) ($task->completed_at ?: '—')); ?></td>
-                                    <td>
-                                        <?php if ((string) $task->status === 'new') : ?>
-                                            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
-                                                <?php wp_nonce_field('sch_start_intelligence_task'); ?>
-                                                <input type="hidden" name="action" value="sch_start_intelligence_task">
-                                                <input type="hidden" name="task_id" value="<?php echo (int) $task->id; ?>">
-                                                <button class="button">Start</button>
-                                            </form>
-                                        <?php endif; ?>
-                                        <?php if ((string) $task->status === 'in_progress') : ?>
-                                            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
-                                                <?php wp_nonce_field('sch_complete_intelligence_task'); ?>
-                                                <input type="hidden" name="action" value="sch_complete_intelligence_task">
-                                                <input type="hidden" name="task_id" value="<?php echo (int) $task->id; ?>">
-                                                <button class="button button-primary">Complete</button>
-                                            </form>
-                                        <?php endif; ?>
-                                        <?php if (!in_array((string) $task->status, ['new', 'in_progress'], true)) : ?>
-                                            <span class="sch-muted">—</span>
-                                        <?php endif; ?>
-                                    </td>
-                                </tr>
-                            <?php endforeach; else : ?>
-                                <tr><td colspan="7">Nog geen tasks voor deze klant.</td></tr>
-                            <?php endif; ?>
-                            </tbody>
-                        </table>
                     <?php endif; ?>
+
+                    <h3>Recent tasks</h3>
+                    <table class="widefat striped">
+                        <thead><tr><th>ID</th><th>Pagina</th><th>Type</th><th>Status</th><th>Started</th><th>Completed</th><th>Acties</th></tr></thead>
+                        <tbody>
+                        <?php if ($client_id <= 0) : ?>
+                            <tr><td colspan="7">Selecteer eerst een klant.</td></tr>
+                        <?php elseif ($recent_tasks) : foreach ($recent_tasks as $task) : ?>
+                            <tr>
+                                <td>#<?php echo (int) $task->id; ?></td>
+                                <td><code><?php echo esc_html((string) ($task->page_path ?: '—')); ?></code></td>
+                                <td><?php echo esc_html((string) $task->task_type); ?></td>
+                                <td><?php echo esc_html((string) $task->status); ?></td>
+                                <td><?php echo esc_html((string) ($task->started_at ?: '—')); ?></td>
+                                <td><?php echo esc_html((string) ($task->completed_at ?: '—')); ?></td>
+                                <td>
+                                    <?php if (!$can_manage_task_actions) : ?>
+                                        <span class="sch-muted">Geen rechten</span>
+                                    <?php elseif ((string) $task->status === 'new') : ?>
+                                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
+                                            <?php wp_nonce_field('sch_start_intelligence_task'); ?>
+                                            <input type="hidden" name="action" value="sch_start_intelligence_task">
+                                            <input type="hidden" name="task_id" value="<?php echo (int) $task->id; ?>">
+                                            <button class="button">Start</button>
+                                        </form>
+                                    <?php elseif ((string) $task->status === 'in_progress') : ?>
+                                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
+                                            <?php wp_nonce_field('sch_complete_intelligence_task'); ?>
+                                            <input type="hidden" name="action" value="sch_complete_intelligence_task">
+                                            <input type="hidden" name="task_id" value="<?php echo (int) $task->id; ?>">
+                                            <button class="button button-primary">Complete</button>
+                                        </form>
+                                    <?php else : ?>
+                                        <span class="sch-muted">—</span>
+                                    <?php endif; ?>
+                                </td>
+                            </tr>
+                        <?php endforeach; else : ?>
+                            <tr><td colspan="7">Nog geen tasks voor deze klant.</td></tr>
+                        <?php endif; ?>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
