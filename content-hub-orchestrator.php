@@ -53,6 +53,15 @@ final class SCH_Orchestrator {
     const OPTION_GA_CLIENT_SECRET = 'sch_ga_client_secret';
     const OPTION_GA_AUTO_SYNC = 'sch_ga_auto_sync';
     const OPTION_FEEDBACK_AUTO_SYNC = 'sch_feedback_auto_sync';
+    const OPTION_SERP_PROVIDER = 'sch_serp_provider';
+    const OPTION_DATAFORSEO_LOGIN = 'sch_dataforseo_login';
+    const OPTION_DATAFORSEO_PASSWORD = 'sch_dataforseo_password';
+    const OPTION_SERP_DEFAULT_COUNTRY_CODE = 'sch_serp_default_country_code';
+    const OPTION_SERP_DEFAULT_LANGUAGE_CODE = 'sch_serp_default_language_code';
+    const OPTION_SERP_DEFAULT_DEVICE = 'sch_serp_default_device';
+    const OPTION_SERP_RESULTS_DEPTH = 'sch_serp_results_depth';
+    const OPTION_SERP_SYNC_BATCH_SIZE = 'sch_serp_sync_batch_size';
+    const OPTION_DATAFORSEO_LAST_ERROR = 'sch_dataforseo_last_error';
 
     const GA_CRON_HOOK = 'sch_orchestrator_ga_sync_worker';
     const FEEDBACK_CRON_HOOK = 'sch_orchestrator_feedback_sync_worker';
@@ -788,6 +797,15 @@ final class SCH_Orchestrator {
         add_option(self::OPTION_GA_CLIENT_SECRET, '');
         add_option(self::OPTION_GA_AUTO_SYNC, '0');
         add_option(self::OPTION_FEEDBACK_AUTO_SYNC, '0');
+        add_option(self::OPTION_SERP_PROVIDER, 'dataforseo');
+        add_option(self::OPTION_DATAFORSEO_LOGIN, '');
+        add_option(self::OPTION_DATAFORSEO_PASSWORD, '');
+        add_option(self::OPTION_SERP_DEFAULT_COUNTRY_CODE, 'us');
+        add_option(self::OPTION_SERP_DEFAULT_LANGUAGE_CODE, 'en');
+        add_option(self::OPTION_SERP_DEFAULT_DEVICE, 'desktop');
+        add_option(self::OPTION_SERP_RESULTS_DEPTH, '10');
+        add_option(self::OPTION_SERP_SYNC_BATCH_SIZE, '50');
+        add_option(self::OPTION_DATAFORSEO_LAST_ERROR, '');
 
         update_option(self::OPTION_DB_VERSION, self::DB_VERSION);
     }
@@ -2006,6 +2024,22 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <tr><th>Google OAuth client secret</th><td><input type="password" name="ga_client_secret" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_GA_CLIENT_SECRET, '')); ?>"></td></tr>
                     <tr><th>Auto sync GA4</th><td><label><input type="checkbox" name="ga_auto_sync" value="1" <?php checked(get_option(self::OPTION_GA_AUTO_SYNC, '0'), '1'); ?>> Dagelijks GA4 page metrics syncen</label></td></tr>
                     <tr><th>Auto feedback engine</th><td><label><input type="checkbox" name="feedback_auto_sync" value="1" <?php checked(get_option(self::OPTION_FEEDBACK_AUTO_SYNC, '0'), '1'); ?>> Dagelijks overlay + feedback signalen genereren</label></td></tr>
+                    <tr><th colspan="2"><h2 style="margin:10px 0 0;">SERP Provider</h2></th></tr>
+                    <tr>
+                        <th>SERP provider</th>
+                        <td>
+                            <select name="serp_provider">
+                                <option value="dataforseo" <?php selected((string) get_option(self::OPTION_SERP_PROVIDER, 'dataforseo'), 'dataforseo'); ?>>DataForSEO</option>
+                            </select>
+                        </td>
+                    </tr>
+                    <tr><th>DataForSEO login</th><td><input type="text" name="dataforseo_login" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_DATAFORSEO_LOGIN, '')); ?>"></td></tr>
+                    <tr><th>DataForSEO password</th><td><input type="password" name="dataforseo_password" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_DATAFORSEO_PASSWORD, '')); ?>"></td></tr>
+                    <tr><th>Default country code</th><td><input type="text" name="serp_default_country_code" class="regular-text" maxlength="5" value="<?php echo esc_attr((string) get_option(self::OPTION_SERP_DEFAULT_COUNTRY_CODE, 'us')); ?>"><p class="description">ISO landcode, bijvoorbeeld <code>us</code>, <code>nl</code>.</p></td></tr>
+                    <tr><th>Default language code</th><td><input type="text" name="serp_default_language_code" class="regular-text" maxlength="10" value="<?php echo esc_attr((string) get_option(self::OPTION_SERP_DEFAULT_LANGUAGE_CODE, 'en')); ?>"></td></tr>
+                    <tr><th>Default device</th><td><select name="serp_default_device"><option value="desktop" <?php selected((string) get_option(self::OPTION_SERP_DEFAULT_DEVICE, 'desktop'), 'desktop'); ?>>desktop</option><option value="mobile" <?php selected((string) get_option(self::OPTION_SERP_DEFAULT_DEVICE, 'desktop'), 'mobile'); ?>>mobile</option></select></td></tr>
+                    <tr><th>Results depth</th><td><input type="number" name="serp_results_depth" min="1" max="100" value="<?php echo esc_attr((string) get_option(self::OPTION_SERP_RESULTS_DEPTH, '10')); ?>"></td></tr>
+                    <tr><th>Sync batch size per run</th><td><input type="number" name="serp_sync_batch_size" min="1" max="200" value="<?php echo esc_attr((string) get_option(self::OPTION_SERP_SYNC_BATCH_SIZE, '50')); ?>"></td></tr>
                     <tr>
                         <th>OAuth setup hulp</th>
                         <td>
@@ -3278,6 +3312,22 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         update_option(self::OPTION_GA_CLIENT_SECRET, sanitize_text_field((string) ($_POST['ga_client_secret'] ?? '')));
         update_option(self::OPTION_GA_AUTO_SYNC, isset($_POST['ga_auto_sync']) ? '1' : '0');
         update_option(self::OPTION_FEEDBACK_AUTO_SYNC, isset($_POST['feedback_auto_sync']) ? '1' : '0');
+        $serp_provider = sanitize_key((string) ($_POST['serp_provider'] ?? 'dataforseo'));
+        if (!in_array($serp_provider, ['dataforseo'], true)) {
+            $serp_provider = 'dataforseo';
+        }
+        update_option(self::OPTION_SERP_PROVIDER, $serp_provider);
+        update_option(self::OPTION_DATAFORSEO_LOGIN, sanitize_text_field((string) ($_POST['dataforseo_login'] ?? '')));
+        update_option(self::OPTION_DATAFORSEO_PASSWORD, sanitize_text_field((string) ($_POST['dataforseo_password'] ?? '')));
+        update_option(self::OPTION_SERP_DEFAULT_COUNTRY_CODE, strtolower(substr(sanitize_text_field((string) ($_POST['serp_default_country_code'] ?? 'us')), 0, 5)));
+        update_option(self::OPTION_SERP_DEFAULT_LANGUAGE_CODE, strtolower(substr(sanitize_text_field((string) ($_POST['serp_default_language_code'] ?? 'en')), 0, 10)));
+        $serp_device = sanitize_key((string) ($_POST['serp_default_device'] ?? 'desktop'));
+        if (!in_array($serp_device, ['desktop', 'mobile'], true)) {
+            $serp_device = 'desktop';
+        }
+        update_option(self::OPTION_SERP_DEFAULT_DEVICE, $serp_device);
+        update_option(self::OPTION_SERP_RESULTS_DEPTH, (string) max(1, min(100, (int) ($_POST['serp_results_depth'] ?? 10))));
+        update_option(self::OPTION_SERP_SYNC_BATCH_SIZE, (string) max(1, min(200, (int) ($_POST['serp_sync_batch_size'] ?? 50))));
 
         update_option(self::OPTION_RANDOM_MACHINE_ENABLED, isset($_POST['random_machine_enabled']) ? '1' : '0');
         update_option(self::OPTION_RANDOM_DAILY_MAX, (string) max(1, min(100, (int) ($_POST['random_daily_max'] ?? 10))));
@@ -7643,7 +7693,255 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         return 'Q&A';
     }
 
-    public function observe_serp_for_query(object $client, array $query_context): array {
+    public function is_serp_provider_enabled(): bool {
+        return (string) get_option(self::OPTION_SERP_PROVIDER, 'dataforseo') === 'dataforseo';
+    }
+
+    public function get_dataforseo_credentials(): array {
+        $login = sanitize_text_field((string) get_option(self::OPTION_DATAFORSEO_LOGIN, ''));
+        $password = sanitize_text_field((string) get_option(self::OPTION_DATAFORSEO_PASSWORD, ''));
+        return [
+            'login' => $login,
+            'password' => $password,
+            'valid' => $login !== '' && $password !== '',
+        ];
+    }
+
+    public function build_dataforseo_serp_task(string $query, array $context = []): array {
+        $query = sanitize_text_field($query);
+        $country = strtolower(substr(sanitize_text_field((string) ($context['country_code'] ?? get_option(self::OPTION_SERP_DEFAULT_COUNTRY_CODE, 'us'))), 0, 5));
+        $language = strtolower(substr(sanitize_text_field((string) ($context['language_code'] ?? get_option(self::OPTION_SERP_DEFAULT_LANGUAGE_CODE, 'en'))), 0, 10));
+        $device = sanitize_key((string) ($context['device'] ?? get_option(self::OPTION_SERP_DEFAULT_DEVICE, 'desktop')));
+        if (!in_array($device, ['desktop', 'mobile'], true)) {
+            $device = 'desktop';
+        }
+        $depth = max(1, min(100, (int) ($context['depth'] ?? get_option(self::OPTION_SERP_RESULTS_DEPTH, '10'))));
+        $location_map = [
+            'us' => 2840,
+            'nl' => 1528,
+            'be' => 2056,
+            'gb' => 2826,
+            'de' => 2276,
+            'fr' => 2250,
+            'es' => 2724,
+            'it' => 2380,
+            'ca' => 2124,
+            'au' => 2036,
+        ];
+        $location_code = (int) ($location_map[$country] ?? $location_map['us']);
+
+        return [
+            'keyword' => $query,
+            'language_code' => $language,
+            'location_code' => $location_code,
+            'device' => $device,
+            'depth' => $depth,
+            'se_name' => 'google',
+            'calculate_rectangles' => false,
+        ];
+    }
+
+    public function request_dataforseo_serp(array $task): array {
+        $creds = $this->get_dataforseo_credentials();
+        if (empty($creds['valid'])) {
+            throw new RuntimeException('DataForSEO credentials ontbreken.');
+        }
+
+        $url = 'https://api.dataforseo.com/v3/serp/google/organic/live/advanced';
+        $attempt = 0;
+        $max_attempts = 3;
+        $last_error = '';
+
+        while ($attempt < $max_attempts) {
+            $attempt++;
+            $response = wp_remote_post($url, [
+                'timeout' => 25,
+                'headers' => [
+                    'Authorization' => 'Basic ' . base64_encode($creds['login'] . ':' . $creds['password']),
+                    'Content-Type' => 'application/json',
+                ],
+                'body' => wp_json_encode([$task]),
+            ]);
+
+            if (is_wp_error($response)) {
+                $last_error = $response->get_error_message();
+                $this->log('error', 'dataforseo', 'DataForSEO HTTP fout', ['attempt' => $attempt, 'error' => $last_error]);
+                if ($attempt < $max_attempts) {
+                    sleep($attempt);
+                    continue;
+                }
+                break;
+            }
+
+            $status = (int) wp_remote_retrieve_response_code($response);
+            $body_raw = (string) wp_remote_retrieve_body($response);
+            $body = json_decode($body_raw, true);
+            if (!is_array($body)) {
+                $body = [];
+            }
+
+            if ($status >= 200 && $status < 300) {
+                update_option(self::OPTION_DATAFORSEO_LAST_ERROR, '');
+                return $body;
+            }
+
+            $last_error = 'HTTP ' . $status;
+            if (isset($body['status_message'])) {
+                $last_error .= ': ' . sanitize_text_field((string) $body['status_message']);
+            }
+            $this->log('error', 'dataforseo', 'DataForSEO response fout', ['attempt' => $attempt, 'status' => $status, 'error' => $last_error]);
+
+            if (($status === 429 || $status >= 500) && $attempt < $max_attempts) {
+                sleep($attempt * 2);
+                continue;
+            }
+
+            break;
+        }
+
+        update_option(self::OPTION_DATAFORSEO_LAST_ERROR, sanitize_text_field($last_error));
+        throw new RuntimeException('DataForSEO request mislukt: ' . $last_error);
+    }
+
+    public function map_dataforseo_feature_flags(array $serp_items): array {
+        $types = [];
+        foreach ($serp_items as $item) {
+            $types[] = sanitize_key((string) ($item['type'] ?? ''));
+        }
+
+        $contains = static function (array $stack, array $needles): bool {
+            foreach ($needles as $needle) {
+                if (in_array($needle, $stack, true)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        return [
+            'ai_overview_present' => $contains($types, ['ai_overview', 'generative_ai', 'ai_summary']) ? 1 : 0,
+            'featured_snippet_present' => $contains($types, ['featured_snippet']) ? 1 : 0,
+            'people_also_ask_present' => $contains($types, ['people_also_ask', 'related_questions']) ? 1 : 0,
+            'video_present' => $contains($types, ['video', 'videos']) ? 1 : 0,
+            'local_pack_present' => $contains($types, ['local_pack', 'local_map_pack']) ? 1 : 0,
+            'shopping_present' => $contains($types, ['shopping', 'popular_products']) ? 1 : 0,
+            'discussions_present' => $contains($types, ['discussions_and_forums', 'discussions']) ? 1 : 0,
+            'image_pack_present' => $contains($types, ['images', 'image_pack']) ? 1 : 0,
+            'knowledge_panel_present' => $contains($types, ['knowledge_graph', 'knowledge_panel']) ? 1 : 0,
+        ];
+    }
+
+    public function extract_top_entities_from_dataforseo(array $response): array {
+        $entities = [];
+        $items = (array) ($response['tasks'][0]['result'][0]['items'] ?? []);
+        foreach ($items as $item) {
+            $type = sanitize_key((string) ($item['type'] ?? ''));
+            if (!in_array($type, ['organic', 'featured_snippet', 'knowledge_graph'], true)) {
+                continue;
+            }
+            $title = sanitize_text_field((string) ($item['title'] ?? ''));
+            $domain = sanitize_text_field((string) ($item['domain'] ?? ''));
+            if ($title !== '') {
+                $entities[$title] = ($entities[$title] ?? 0) + 1;
+            }
+            if ($domain !== '') {
+                $entities[$domain] = ($entities[$domain] ?? 0) + 1;
+            }
+        }
+        arsort($entities);
+        return array_slice(array_keys($entities), 0, 12);
+    }
+
+    public function parse_dataforseo_serp_response(array $response, object $client, array $query_context): array {
+        $query = sanitize_text_field((string) ($query_context['query'] ?? ''));
+        $page_url = esc_url_raw((string) ($query_context['page_url'] ?? ''));
+        $task = (array) ($response['tasks'][0] ?? []);
+        $result = (array) ($task['result'][0] ?? []);
+        $serp_items = (array) ($result['items'] ?? []);
+        $feature_flags = $this->map_dataforseo_feature_flags($serp_items);
+        $organic_items = array_values(array_filter($serp_items, static function ($item) {
+            return sanitize_key((string) ($item['type'] ?? '')) === 'organic';
+        }));
+
+        $normalized_target = $this->normalize_page_url($page_url);
+        $target_host = (string) wp_parse_url($normalized_target, PHP_URL_HOST);
+        $target_path = $this->normalize_page_path($normalized_target);
+        $best_match = null;
+        $best_score = 0;
+
+        foreach ($organic_items as $item) {
+            $result_url = $this->normalize_page_url((string) ($item['url'] ?? ''));
+            if ($result_url === '') {
+                continue;
+            }
+            if ($normalized_target !== '' && $result_url === $normalized_target) {
+                $best_match = $item;
+                $best_score = 1000;
+                break;
+            }
+
+            $score = 0;
+            $result_host = (string) wp_parse_url($result_url, PHP_URL_HOST);
+            $result_path = $this->normalize_page_path($result_url);
+            if ($target_host !== '' && $result_host === $target_host) {
+                $score += 40;
+            }
+            if ($target_path !== '/' && $result_path === $target_path) {
+                $score += 40;
+            } elseif ($target_path !== '/' && strpos($result_path, $target_path) === 0) {
+                $score += 25;
+            }
+            if ($score > $best_score) {
+                $best_score = $score;
+                $best_match = $item;
+            }
+        }
+
+        $organic_position = null;
+        $organic_url = null;
+        if ($best_match && $best_score >= 40) {
+            $organic_position = isset($best_match['rank_absolute']) ? (float) $best_match['rank_absolute'] : null;
+            $organic_url = esc_url_raw((string) ($best_match['url'] ?? ''));
+        }
+
+        return [
+            'client_id' => (int) $client->id,
+            'site_id' => !empty($query_context['site_id']) ? (int) $query_context['site_id'] : null,
+            'article_id' => !empty($query_context['article_id']) ? (int) $query_context['article_id'] : null,
+            'query' => $query,
+            'page_url' => $page_url !== '' ? $page_url : null,
+            'snapshot_date' => current_time('Y-m-d'),
+            'engine' => sanitize_key((string) ($result['se_type'] ?? 'google')),
+            'locale' => sanitize_text_field((string) ($result['language_code'] ?? get_option(self::OPTION_SERP_DEFAULT_LANGUAGE_CODE, 'en'))),
+            'country' => strtoupper(substr(sanitize_text_field((string) get_option(self::OPTION_SERP_DEFAULT_COUNTRY_CODE, 'us')), 0, 10)),
+            'device' => sanitize_key((string) ($result['device'] ?? get_option(self::OPTION_SERP_DEFAULT_DEVICE, 'desktop'))),
+            'organic_position' => $organic_position,
+            'organic_url' => $organic_url,
+            'ai_overview_present' => $feature_flags['ai_overview_present'],
+            'featured_snippet_present' => $feature_flags['featured_snippet_present'],
+            'people_also_ask_present' => $feature_flags['people_also_ask_present'],
+            'video_present' => $feature_flags['video_present'],
+            'local_pack_present' => $feature_flags['local_pack_present'],
+            'shopping_present' => $feature_flags['shopping_present'],
+            'discussions_present' => $feature_flags['discussions_present'],
+            'image_pack_present' => $feature_flags['image_pack_present'],
+            'knowledge_panel_present' => $feature_flags['knowledge_panel_present'],
+            'serp_features_json' => wp_json_encode([
+                'source' => 'provider',
+                'provider' => 'dataforseo',
+                'result_count' => count($serp_items),
+                'feature_flags' => $feature_flags,
+            ]),
+            'top_entities_json' => wp_json_encode($this->extract_top_entities_from_dataforseo($response)),
+            'raw_observation_json' => wp_json_encode([
+                'source' => 'dataforseo',
+                'task' => $task,
+                'result' => $result,
+            ]),
+        ];
+    }
+
+    private function observe_serp_for_query_heuristic(object $client, array $query_context, string $source = 'heuristic_from_query_plus_gsc'): array {
         $query = sanitize_text_field((string) ($query_context['query'] ?? ''));
         $page_url = esc_url_raw((string) ($query_context['page_url'] ?? ''));
         $article_id = (int) ($query_context['article_id'] ?? 0);
@@ -7675,7 +7973,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $image_pack = preg_match('/\b(voorbeelden|design|foto|afbeelding)\b/u', strtolower($query)) === 1;
         $knowledge_panel = preg_match('/\b(bedrijf|persoon|merk)\b/u', strtolower($query)) === 1;
 
-        $observation = [
+        return [
             'client_id' => (int) $client->id,
             'site_id' => $site_id > 0 ? $site_id : null,
             'article_id' => $article_id > 0 ? $article_id : null,
@@ -7698,6 +7996,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'image_pack_present' => $image_pack ? 1 : 0,
             'knowledge_panel_present' => $knowledge_panel ? 1 : 0,
             'serp_features_json' => wp_json_encode([
+                'source' => 'fallback',
                 'token_count' => $token_count,
                 'impressions_28d' => $impressions,
                 'observed_features' => [
@@ -7714,13 +8013,39 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             ]),
             'top_entities_json' => wp_json_encode($this->extract_entities_from_content($query)),
             'raw_observation_json' => wp_json_encode([
-                'source' => 'heuristic_from_query_plus_gsc',
+                'source' => $source,
                 'gsc_position' => $avg_position,
                 'gsc_impressions' => $impressions,
             ]),
         ];
+    }
 
-        return $this->normalize_serp_observation($observation);
+    public function observe_serp_for_query(object $client, array $query_context): array {
+        $query = sanitize_text_field((string) ($query_context['query'] ?? ''));
+        if ($query === '') {
+            return $this->normalize_serp_observation($this->observe_serp_for_query_heuristic($client, $query_context));
+        }
+
+        if ($this->is_serp_provider_enabled()) {
+            $credentials = $this->get_dataforseo_credentials();
+            if (!empty($credentials['valid'])) {
+                try {
+                    $task = $this->build_dataforseo_serp_task($query, $query_context);
+                    $response = $this->request_dataforseo_serp($task);
+                    $parsed = $this->parse_dataforseo_serp_response($response, $client, $query_context);
+                    return $this->normalize_serp_observation($parsed);
+                } catch (Throwable $e) {
+                    $this->log('warning', 'dataforseo', 'DataForSEO observe mislukt, fallback actief', [
+                        'client_id' => (int) $client->id,
+                        'query' => $query,
+                        'error' => $e->getMessage(),
+                    ]);
+                    update_option(self::OPTION_DATAFORSEO_LAST_ERROR, sanitize_text_field($e->getMessage()));
+                }
+            }
+        }
+
+        return $this->normalize_serp_observation($this->observe_serp_for_query_heuristic($client, $query_context, 'fallback_after_provider_error'));
     }
 
     public function normalize_serp_observation(array $observation): array {
@@ -7767,24 +8092,59 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     }
 
     public function sync_serp_observations_for_client(object $client): int {
+        $batch_size = max(1, min(200, (int) get_option(self::OPTION_SERP_SYNC_BATCH_SIZE, '50')));
         $rows = $this->db->get_results($this->db->prepare(
             "SELECT qpm.query, qpm.page_url, MAX(qpm.article_id) AS article_id, MAX(qpm.site_id) AS site_id
              FROM {$this->table('gsc_query_page_metrics')} qpm
              WHERE qpm.client_id=%d AND qpm.metric_date>=DATE_SUB(CURDATE(), INTERVAL 28 DAY)
              GROUP BY qpm.query, qpm.page_url
              ORDER BY SUM(qpm.impressions) DESC
-             LIMIT 150",
-            (int) $client->id
+             LIMIT %d",
+            (int) $client->id,
+            $batch_size
         ), ARRAY_A);
 
         $stored = 0;
+        $processed = 0;
+        $success = 0;
+        $fallback = 0;
+        $errors = 0;
+
         foreach ((array) $rows as $row) {
-            $observation = $this->observe_serp_for_query($client, $row);
-            if ($observation['query'] === '') {
-                continue;
+            $processed++;
+            try {
+                $observation = $this->observe_serp_for_query($client, $row);
+                if ($observation['query'] === '') {
+                    continue;
+                }
+                $features = (array) json_decode((string) ($observation['serp_features_json'] ?? '{}'), true);
+                $source = sanitize_key((string) ($features['source'] ?? 'fallback'));
+                if ($source === 'provider') {
+                    $success++;
+                } else {
+                    $fallback++;
+                }
+                $stored += $this->store_serp_snapshot($observation) > 0 ? 1 : 0;
+            } catch (Throwable $e) {
+                $errors++;
+                $this->log('error', 'serp_sync', 'SERP observation query overgeslagen na fout', [
+                    'client_id' => (int) $client->id,
+                    'query' => sanitize_text_field((string) ($row['query'] ?? '')),
+                    'error' => $e->getMessage(),
+                ]);
             }
-            $stored += $this->store_serp_snapshot($observation) > 0 ? 1 : 0;
         }
+
+        $this->log('info', 'serp_sync', 'SERP sync run afgerond', [
+            'client_id' => (int) $client->id,
+            'processed' => $processed,
+            'stored' => $stored,
+            'provider_success' => $success,
+            'fallback' => $fallback,
+            'errors' => $errors,
+            'batch_size' => $batch_size,
+        ]);
+
         return $stored;
     }
 
@@ -8561,6 +8921,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     public function render_serp_intelligence(): void {
         $client_id = (int) ($_GET['client_id'] ?? 0);
         $query = sanitize_text_field((string) ($_GET['query'] ?? ''));
+        $provider_enabled = $this->is_serp_provider_enabled() && !empty($this->get_dataforseo_credentials()['valid']);
+        $last_dataforseo_error = sanitize_text_field((string) get_option(self::OPTION_DATAFORSEO_LAST_ERROR, ''));
         $rows = [];
         if ($client_id > 0) {
             $sql = "SELECT * FROM {$this->table('serp_snapshots')} WHERE client_id=%d";
@@ -8574,9 +8936,13 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
         ?>
         <div class="wrap"><h1>SERP Intelligence</h1><?php $this->render_admin_notice(); ?>
+            <p><strong>Provider status:</strong> <?php echo $provider_enabled ? 'enabled' : 'disabled'; ?> (<?php echo esc_html((string) get_option(self::OPTION_SERP_PROVIDER, 'dataforseo')); ?>)</p>
+            <?php if ($last_dataforseo_error !== '') : ?>
+                <p><strong>Laatste DataForSEO fout:</strong> <?php echo esc_html($last_dataforseo_error); ?></p>
+            <?php endif; ?>
             <form method="get"><input type="hidden" name="page" value="sch-serp-intelligence"><label>Klant ID <input type="number" name="client_id" value="<?php echo (int) $client_id; ?>"></label> <label>Query <input type="text" name="query" value="<?php echo esc_attr($query); ?>" style="min-width:320px;"></label> <button class="button button-primary">Filter</button></form>
-            <table class="widefat striped"><thead><tr><th>Datum</th><th>Query</th><th>Positie</th><th>AI</th><th>FS</th><th>PAA</th><th>Video</th><th>Image</th><th>Discussions</th><th>Local</th><th>KP</th><th>URL</th></tr></thead><tbody>
-            <?php if ($rows) : foreach ($rows as $row) : ?><tr><td><?php echo esc_html((string) $row->snapshot_date); ?></td><td><?php echo esc_html((string) $row->query); ?></td><td><?php echo esc_html((string) round((float) $row->organic_position, 2)); ?></td><td><?php echo (int) $row->ai_overview_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->featured_snippet_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->people_also_ask_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->video_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->image_pack_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->discussions_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->local_pack_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->knowledge_panel_present ? '✅' : '—'; ?></td><td><code><?php echo esc_html($this->normalize_page_path((string) ($row->page_url ?? ''))); ?></code></td></tr><?php endforeach; else : ?><tr><td colspan="12">Geen SERP snapshots voor selectie.</td></tr><?php endif; ?>
+            <table class="widefat striped"><thead><tr><th>Datum</th><th>Query</th><th>Source</th><th>Positie</th><th>AI</th><th>FS</th><th>PAA</th><th>Video</th><th>Image</th><th>Discussions</th><th>Local</th><th>KP</th><th>URL</th></tr></thead><tbody>
+            <?php if ($rows) : foreach ($rows as $row) : $features = (array) json_decode((string) ($row->serp_features_json ?? '{}'), true); $source = sanitize_key((string) ($features['source'] ?? 'unknown')); ?><tr><td><?php echo esc_html((string) $row->snapshot_date); ?></td><td><?php echo esc_html((string) $row->query); ?></td><td><?php echo esc_html($source); ?></td><td><?php echo esc_html((string) round((float) $row->organic_position, 2)); ?></td><td><?php echo (int) $row->ai_overview_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->featured_snippet_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->people_also_ask_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->video_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->image_pack_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->discussions_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->local_pack_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->knowledge_panel_present ? '✅' : '—'; ?></td><td><code><?php echo esc_html($this->normalize_page_path((string) ($row->page_url ?? ''))); ?></code></td></tr><?php endforeach; else : ?><tr><td colspan="13">Geen SERP snapshots voor selectie.</td></tr><?php endif; ?>
             </tbody></table>
         </div>
         <?php
