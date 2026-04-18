@@ -139,6 +139,7 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_start_intelligence_task', [$this, 'handle_start_intelligence_task']);
         add_action('admin_post_sch_complete_intelligence_task', [$this, 'handle_complete_intelligence_task']);
         add_action('admin_post_sch_run_intelligence_ingest', [$this, 'handle_run_intelligence_ingest']);
+        add_action('rest_api_init', [$this, 'register_intelligence_rest_routes']);
         add_action('admin_post_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
         add_action('admin_post_nopriv_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
 
@@ -2245,6 +2246,112 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
     private function verify_task_action_request(string $action): void {
         $this->verify_admin_nonce($action);
+    }
+
+    public function register_intelligence_rest_routes(): void {
+        register_rest_route('sch/v1/intelligence', '/opportunities', [
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => [$this, 'rest_get_intelligence_opportunities'],
+            'permission_callback' => [$this, 'rest_can_access_intelligence_read'],
+            'args' => [
+                'client_id' => [
+                    'required' => true,
+                    'type' => 'integer',
+                    'sanitize_callback' => [$this, 'sanitize_rest_client_id'],
+                    'validate_callback' => [$this, 'validate_rest_client_id'],
+                ],
+            ],
+        ]);
+
+        register_rest_route('sch/v1/intelligence', '/url-detail', [
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => [$this, 'rest_get_intelligence_url_detail'],
+            'permission_callback' => [$this, 'rest_can_access_intelligence_read'],
+            'args' => [
+                'client_id' => [
+                    'required' => true,
+                    'type' => 'integer',
+                    'sanitize_callback' => [$this, 'sanitize_rest_client_id'],
+                    'validate_callback' => [$this, 'validate_rest_client_id'],
+                ],
+                'page_path' => [
+                    'required' => true,
+                    'type' => 'string',
+                    'sanitize_callback' => [$this, 'sanitize_rest_page_path'],
+                    'validate_callback' => [$this, 'validate_rest_page_path'],
+                ],
+            ],
+        ]);
+
+        register_rest_route('sch/v1/intelligence', '/tasks', [
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => [$this, 'rest_create_intelligence_task'],
+            'permission_callback' => [$this, 'rest_can_access_intelligence_write'],
+            'args' => [
+                'client_id' => [
+                    'required' => true,
+                    'type' => 'integer',
+                    'sanitize_callback' => [$this, 'sanitize_rest_client_id'],
+                    'validate_callback' => [$this, 'validate_rest_client_id'],
+                ],
+                'page_path' => [
+                    'required' => true,
+                    'type' => 'string',
+                    'sanitize_callback' => [$this, 'sanitize_rest_page_path'],
+                    'validate_callback' => [$this, 'validate_rest_page_path'],
+                ],
+                'task_type' => [
+                    'required' => true,
+                    'type' => 'string',
+                    'sanitize_callback' => [$this, 'sanitize_rest_task_type'],
+                    'validate_callback' => [$this, 'validate_rest_task_type'],
+                ],
+                'opportunity_id' => [
+                    'required' => false,
+                    'type' => 'integer',
+                    'sanitize_callback' => 'absint',
+                ],
+            ],
+        ]);
+    }
+
+    public function rest_can_access_intelligence_read(): bool {
+        return current_user_can('manage_options');
+    }
+
+    public function rest_can_access_intelligence_write(): bool {
+        return current_user_can('manage_options');
+    }
+
+    public function sanitize_rest_client_id($value): int {
+        return max(0, (int) $value);
+    }
+
+    public function validate_rest_client_id($value): bool {
+        return (int) $value > 0;
+    }
+
+    public function sanitize_rest_page_path($value): string {
+        return $this->normalize_page_path(sanitize_text_field((string) $value));
+    }
+
+    public function validate_rest_page_path($value): bool {
+        return $this->sanitize_rest_page_path($value) !== '';
+    }
+
+    public function sanitize_rest_task_type($value): string {
+        $task_type = sanitize_key((string) $value);
+        if ($task_type === 'internal_link_review') {
+            return 'internal-link-review';
+        }
+        if ($task_type === 'refresh') {
+            return 'refresh';
+        }
+        return $task_type;
+    }
+
+    public function validate_rest_task_type($value): bool {
+        return in_array($this->sanitize_rest_task_type($value), ['refresh', 'internal-link-review'], true);
     }
 
     private function decode_json_array($value): array {
@@ -9352,6 +9459,170 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         return is_string($plain) && $plain !== '' ? $plain : $binary;
     }
 
+    public function rest_get_intelligence_opportunities(WP_REST_Request $request): WP_REST_Response {
+        $client_id = (int) $request->get_param('client_id');
+        $rows = $this->get_open_opportunities_for_client($client_id);
+        return new WP_REST_Response([
+            'client_id' => $client_id,
+            'items' => $rows,
+            'count' => count($rows),
+        ], 200);
+    }
+
+    public function rest_get_intelligence_url_detail(WP_REST_Request $request): WP_REST_Response {
+        $client_id = (int) $request->get_param('client_id');
+        $page_path = (string) $request->get_param('page_path');
+        return new WP_REST_Response($this->get_url_detail_payload($client_id, $page_path), 200);
+    }
+
+    public function rest_create_intelligence_task(WP_REST_Request $request): WP_REST_Response {
+        $client_id = (int) $request->get_param('client_id');
+        $page_path = (string) $request->get_param('page_path');
+        $task_type = (string) $request->get_param('task_type');
+        $opportunity_id = max(0, (int) $request->get_param('opportunity_id'));
+        $task = $this->create_intelligence_task_from_context($client_id, $page_path, $task_type, $opportunity_id, 'rest_api');
+
+        if (is_wp_error($task)) {
+            $status = (int) ($task->get_error_data('status') ?: 400);
+            return new WP_REST_Response([
+                'code' => $task->get_error_code(),
+                'message' => $task->get_error_message(),
+            ], $status);
+        }
+
+        return new WP_REST_Response($task, 201);
+    }
+
+    private function map_external_task_type_to_internal(string $task_type): string {
+        $normalized = $this->sanitize_rest_task_type($task_type);
+        if ($normalized === 'refresh') {
+            return 'create_refresh_task';
+        }
+        if ($normalized === 'internal-link-review') {
+            return 'create_internal_link_review_task';
+        }
+        return '';
+    }
+
+    private function get_open_opportunities_for_client(int $client_id): array {
+        if ($client_id <= 0) {
+            return [];
+        }
+        $rows = (array) $this->db->get_results($this->db->prepare(
+            "SELECT * FROM {$this->table('orchestrator_opportunities')} WHERE client_id=%d AND status='open' ORDER BY score DESC, id DESC LIMIT 100",
+            $client_id
+        ), ARRAY_A);
+        return array_map(static function ($row) {
+            if (isset($row['score'])) {
+                $row['score'] = round((float) $row['score'], 4);
+            }
+            if (isset($row['confidence'])) {
+                $row['confidence'] = round((float) $row['confidence'], 4);
+            }
+            return $row;
+        }, $rows);
+    }
+
+    private function get_url_detail_payload(int $client_id, string $page_path): array {
+        $normalized_page_path = $this->normalize_page_path($page_path);
+        $opportunity = null;
+        if ($client_id > 0 && $normalized_page_path !== '') {
+            $opportunity = $this->db->get_row($this->db->prepare(
+                "SELECT * FROM {$this->table('orchestrator_opportunities')} WHERE client_id=%d AND page_path=%s LIMIT 1",
+                $client_id,
+                $normalized_page_path
+            ), ARRAY_A);
+        }
+        $history = $client_id > 0 && $normalized_page_path !== ''
+            ? (array) $this->db->get_results($this->db->prepare(
+                "SELECT metric_date, clicks, impressions, ctr, avg_position, sessions
+                 FROM {$this->table('orchestrator_page_metrics_daily')}
+                 WHERE client_id=%d AND page_path=%s
+                 ORDER BY metric_date DESC LIMIT 30",
+                $client_id,
+                $normalized_page_path
+            ), ARRAY_A)
+            : [];
+
+        return [
+            'client_id' => $client_id,
+            'page_path' => $normalized_page_path,
+            'opportunity' => $opportunity,
+            'history' => $history,
+            'events' => $this->get_url_events($client_id, $normalized_page_path, 21),
+            'explanation' => $this->explain_page_change($client_id, $normalized_page_path, 14),
+        ];
+    }
+
+    private function create_intelligence_task_from_context(int $client_id, string $page_path, string $task_type, int $opportunity_id = 0, string $origin = 'admin_ui') {
+        $normalized_page_path = $this->normalize_page_path($page_path);
+        $internal_task_type = $this->map_external_task_type_to_internal($task_type);
+        if ($internal_task_type === '') {
+            return new WP_Error('invalid_task_type', 'Ongeldig task type.', ['status' => 400]);
+        }
+        if ($client_id <= 0 || $normalized_page_path === '') {
+            return new WP_Error('invalid_context', 'Ongeldige klant of page_path.', ['status' => 400]);
+        }
+
+        $opportunity = null;
+        if ($opportunity_id > 0) {
+            $opportunity = $this->db->get_row($this->db->prepare(
+                "SELECT * FROM {$this->table('orchestrator_opportunities')} WHERE id=%d",
+                $opportunity_id
+            ));
+        }
+        if (!$opportunity) {
+            $opportunity = $this->db->get_row($this->db->prepare(
+                "SELECT * FROM {$this->table('orchestrator_opportunities')} WHERE client_id=%d AND page_path=%s ORDER BY score DESC, id DESC LIMIT 1",
+                $client_id,
+                $normalized_page_path
+            ));
+        }
+        if (!$opportunity) {
+            return new WP_Error('opportunity_not_found', 'Opportunity niet gevonden.', ['status' => 404]);
+        }
+
+        $now = $this->now();
+        $inserted = $this->db->insert($this->table('orchestrator_tasks'), [
+            'tenant_id' => (int) ($opportunity->tenant_id ?? 1),
+            'site_id' => (int) ($opportunity->site_id ?? 0) ?: null,
+            'client_id' => (int) ($opportunity->client_id ?? $client_id),
+            'opportunity_id' => (int) ($opportunity->id ?? 0) ?: null,
+            'article_id' => (int) ($opportunity->article_id ?? 0) ?: null,
+            'page_url' => (string) ($opportunity->page_url ?? ''),
+            'page_path' => (string) ($opportunity->page_path ?? $normalized_page_path),
+            'task_type' => $internal_task_type,
+            'status' => 'new',
+            'payload' => wp_json_encode([
+                'origin' => sanitize_key($origin),
+                'quick_reason' => (string) ($opportunity->quick_reason ?? ''),
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            'created_by' => get_current_user_id() ?: null,
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+        if ($inserted === false) {
+            $this->log('error', 'intelligence', 'Task aanmaken mislukt', ['db_error' => $this->db->last_error]);
+            return new WP_Error('task_insert_failed', 'Task aanmaken mislukt.', ['status' => 500]);
+        }
+
+        $task_id = (int) $this->db->insert_id;
+        $this->log_orchestrator_event((int) ($opportunity->tenant_id ?? 1), (int) ($opportunity->site_id ?? 0), (int) ($opportunity->client_id ?? 0), 'task', (string) $task_id, 'task_created', sanitize_key($origin), [
+            'task_type' => $internal_task_type,
+            'opportunity_id' => (int) ($opportunity->id ?? 0),
+            'page_path' => (string) ($opportunity->page_path ?? ''),
+        ]);
+
+        return [
+            'task_id' => $task_id,
+            'client_id' => (int) ($opportunity->client_id ?? 0),
+            'page_path' => (string) ($opportunity->page_path ?? ''),
+            'task_type' => $internal_task_type,
+            'status' => 'new',
+        ];
+    }
+
     public function handle_run_intelligence_ingest(): void {
         $this->verify_admin_nonce('sch_run_intelligence_ingest');
         $client_id = max(0, (int) ($_POST['client_id'] ?? 0));
@@ -9374,12 +9645,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     public function handle_create_intelligence_task(): void {
         $this->verify_task_action_request('sch_create_intelligence_task');
 
-        $task_type = sanitize_key((string) ($_POST['task_type'] ?? ''));
-        if (!in_array($task_type, ['create_refresh_task', 'create_internal_link_review_task'], true)) {
-            $this->redirect_with_message('sch-intelligence', 'Ongeldig task type.', 'error');
-        }
-
         $opportunity_id = max(0, (int) ($_POST['opportunity_id'] ?? 0));
+        $task_type = sanitize_key((string) ($_POST['task_type'] ?? ''));
         $opportunity = $this->db->get_row($this->db->prepare(
             "SELECT * FROM {$this->table('orchestrator_opportunities')} WHERE id=%d",
             $opportunity_id
@@ -9387,38 +9654,21 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         if (!$opportunity) {
             $this->redirect_with_message('sch-intelligence', 'Opportunity niet gevonden.', 'error');
         }
-
-        $now = $this->now();
-        $inserted = $this->db->insert($this->table('orchestrator_tasks'), [
-            'tenant_id' => (int) ($opportunity->tenant_id ?? 1),
-            'site_id' => (int) ($opportunity->site_id ?? 0) ?: null,
-            'client_id' => (int) ($opportunity->client_id ?? 0),
-            'opportunity_id' => (int) $opportunity->id,
-            'article_id' => (int) ($opportunity->article_id ?? 0) ?: null,
-            'page_url' => (string) ($opportunity->page_url ?? ''),
-            'page_path' => (string) ($opportunity->page_path ?? ''),
-            'task_type' => $task_type,
-            'status' => 'new',
-            'payload' => wp_json_encode([
-                'origin' => 'intelligence_queue',
-                'quick_reason' => (string) ($opportunity->quick_reason ?? ''),
-            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-            'created_by' => get_current_user_id() ?: null,
-            'created_at' => $now,
-            'updated_at' => $now,
-        ]);
-
-        if ($inserted === false) {
-            $this->log('error', 'intelligence', 'Task aanmaken mislukt', ['db_error' => $this->db->last_error]);
-            $this->redirect_with_message('sch-intelligence', 'Task aanmaken mislukt.', 'error');
+        if (!in_array($task_type, ['create_refresh_task', 'create_internal_link_review_task'], true)) {
+            $this->redirect_with_message('sch-intelligence', 'Ongeldig task type.', 'error');
         }
 
-        $task_id = (int) $this->db->insert_id;
-        $this->log_orchestrator_event((int) ($opportunity->tenant_id ?? 1), (int) ($opportunity->site_id ?? 0), (int) ($opportunity->client_id ?? 0), 'task', (string) $task_id, 'task_created', 'admin_ui', [
-            'task_type' => $task_type,
-            'opportunity_id' => (int) $opportunity->id,
-            'page_path' => (string) ($opportunity->page_path ?? ''),
-        ]);
+        $external_task_type = $task_type === 'create_internal_link_review_task' ? 'internal-link-review' : 'refresh';
+        $task_result = $this->create_intelligence_task_from_context(
+            (int) ($opportunity->client_id ?? 0),
+            (string) ($opportunity->page_path ?? ''),
+            $external_task_type,
+            $opportunity_id,
+            'admin_ui'
+        );
+        if (is_wp_error($task_result)) {
+            $this->redirect_with_message('sch-intelligence', $task_result->get_error_message(), 'error');
+        }
 
         $this->redirect_with_message('sch-intelligence', 'Task aangemaakt vanuit opportunity.', 'success', [
             'client_id' => (int) ($opportunity->client_id ?? 0),
@@ -9976,23 +10226,18 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $selected_path = $this->normalize_page_path(sanitize_text_field((string) ($_GET['page_path'] ?? '')));
         $clients = $this->db->get_results("SELECT id, name FROM {$this->table('clients')} ORDER BY name ASC");
 
-        $rows = [];
-        if ($client_id > 0) {
-            $rows = $this->db->get_results($this->db->prepare(
-                "SELECT * FROM {$this->table('orchestrator_opportunities')} WHERE client_id=%d AND status='open' ORDER BY score DESC, id DESC LIMIT 100",
-                $client_id
-            ));
-        }
+        $rows = $this->get_open_opportunities_for_client($client_id);
 
         $selected = null;
         if ($client_id > 0 && $selected_path !== '') {
-            $selected = $this->db->get_row($this->db->prepare(
-                "SELECT * FROM {$this->table('orchestrator_opportunities')} WHERE client_id=%d AND page_path=%s LIMIT 1",
-                $client_id,
-                $selected_path
-            ));
+            foreach ($rows as $row) {
+                if ((string) ($row['page_path'] ?? '') === $selected_path) {
+                    $selected = (object) $row;
+                    break;
+                }
+            }
         } elseif (!empty($rows)) {
-            $selected = $rows[0];
+            $selected = (object) $rows[0];
             $selected_path = (string) ($selected->page_path ?? '');
         }
 
@@ -10001,16 +10246,10 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $recent_tasks = [];
         $explanation = null;
         if ($client_id > 0 && $selected_path !== '') {
-            $history = $this->db->get_results($this->db->prepare(
-                "SELECT metric_date, clicks, impressions, ctr, avg_position, sessions
-                 FROM {$this->table('orchestrator_page_metrics_daily')}
-                 WHERE client_id=%d AND page_path=%s
-                 ORDER BY metric_date DESC LIMIT 30",
-                $client_id,
-                $selected_path
-            ));
-            $events = $this->get_url_events($client_id, $selected_path, 21);
-            $explanation = $this->explain_page_change($client_id, $selected_path, 14);
+            $detail = $this->get_url_detail_payload($client_id, $selected_path);
+            $history = array_map(static fn($item) => (object) $item, (array) ($detail['history'] ?? []));
+            $events = (array) ($detail['events'] ?? []);
+            $explanation = is_array($detail['explanation'] ?? null) ? $detail['explanation'] : null;
         }
         if ($client_id > 0) {
             $recent_tasks = (array) $this->db->get_results($this->db->prepare(
@@ -10063,7 +10302,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <table class="widefat striped">
                         <thead><tr><th>Pagina</th><th>Score</th><th>Confidence</th><th>Reason</th><th>Acties</th></tr></thead>
                         <tbody>
-                        <?php if ($rows) : foreach ($rows as $row) : ?>
+                        <?php if ($rows) : foreach ($rows as $row_data) : $row = (object) $row_data; ?>
                             <tr>
                                 <td>
                                     <a href="<?php echo esc_url(add_query_arg(['page' => 'sch-intelligence', 'client_id' => $client_id, 'page_path' => rawurlencode((string) $row->page_path)], admin_url('admin.php'))); ?>">
