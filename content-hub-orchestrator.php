@@ -14,9 +14,10 @@ final class SCH_Orchestrator {
     const VERSION = '0.6.0';
     const CRON_HOOK = 'sch_orchestrator_minute_worker';
     const GSC_CRON_HOOK = 'sch_orchestrator_gsc_sync_worker';
+    const SERP_CRON_HOOK = 'sch_orchestrator_serp_intelligence_worker';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
-    const DB_VERSION = '0.7.0';
+    const DB_VERSION = '0.8.0';
     const EXACT_MATCH_THRESHOLD_PERCENT = 30;
 
     const OPTION_OPENAI_API_KEY = 'sch_openai_api_key';
@@ -82,6 +83,7 @@ final class SCH_Orchestrator {
         add_filter('cron_schedules', [$this, 'add_cron_schedule']);
         add_action(self::CRON_HOOK, [$this, 'run_worker']);
         add_action(self::GSC_CRON_HOOK, [$this, 'run_gsc_auto_sync']);
+        add_action(self::SERP_CRON_HOOK, [$this, 'run_serp_intelligence_worker']);
         add_action(self::GA_CRON_HOOK, [$this, 'run_ga_auto_sync']);
         add_action(self::FEEDBACK_CRON_HOOK, [$this, 'run_feedback_auto_sync']);
 
@@ -115,11 +117,14 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_ga_save_property', [$this, 'handle_ga_save_property']);
         add_action('admin_post_sch_mark_signal_resolved', [$this, 'mark_signal_resolved']);
         add_action('admin_post_sch_mark_signal_ignored', [$this, 'mark_signal_ignored']);
+        add_action('admin_post_sch_mark_serp_signal_resolved', [$this, 'mark_serp_signal_resolved']);
+        add_action('admin_post_sch_mark_serp_signal_ignored', [$this, 'mark_serp_signal_ignored']);
         add_action('admin_post_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
         add_action('admin_post_nopriv_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
 
         add_action('admin_enqueue_scripts', [$this, 'admin_assets']);
         $this->schedule_gsc_cron();
+        $this->schedule_serp_cron();
         $this->schedule_ga_cron();
         $this->schedule_feedback_cron();
     }
@@ -128,6 +133,7 @@ final class SCH_Orchestrator {
         $this->create_tables();
         $this->schedule_cron();
         $this->schedule_gsc_cron();
+        $this->schedule_serp_cron();
         $this->schedule_ga_cron();
         $this->schedule_feedback_cron();
     }
@@ -135,6 +141,7 @@ final class SCH_Orchestrator {
     public function deactivate(): void {
         wp_clear_scheduled_hook(self::CRON_HOOK);
         wp_clear_scheduled_hook(self::GSC_CRON_HOOK);
+        wp_clear_scheduled_hook(self::SERP_CRON_HOOK);
         wp_clear_scheduled_hook(self::GA_CRON_HOOK);
         wp_clear_scheduled_hook(self::FEEDBACK_CRON_HOOK);
     }
@@ -215,6 +222,12 @@ final class SCH_Orchestrator {
         }
     }
 
+    private function schedule_serp_cron(): void {
+        if (!wp_next_scheduled(self::SERP_CRON_HOOK)) {
+            wp_schedule_event(time() + HOUR_IN_SECONDS + 180, 'daily', self::SERP_CRON_HOOK);
+        }
+    }
+
     private function schedule_ga_cron(): void {
         if (!wp_next_scheduled(self::GA_CRON_HOOK)) {
             wp_schedule_event(time() + HOUR_IN_SECONDS + 300, 'daily', self::GA_CRON_HOOK);
@@ -275,6 +288,11 @@ final class SCH_Orchestrator {
         $feedback_signals = $this->table('feedback_signals');
         $refresh_candidates = $this->table('refresh_candidates');
         $query_overlap = $this->table('query_overlap');
+        $serp_snapshots = $this->table('serp_snapshots');
+        $entity_coverage = $this->table('entity_coverage');
+        $serp_signals = $this->table('serp_signals');
+        $serp_recommendations = $this->table('serp_recommendations');
+        $query_serp_profiles = $this->table('query_serp_profiles');
 
         dbDelta("CREATE TABLE {$clients} (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -589,6 +607,129 @@ final class SCH_Orchestrator {
             KEY detected_at (detected_at)
         ) {$charset};");
 
+        dbDelta("CREATE TABLE {$serp_snapshots} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NULL,
+            article_id BIGINT UNSIGNED NULL,
+            query VARCHAR(255) NOT NULL DEFAULT '',
+            page_url TEXT NULL,
+            snapshot_date DATE NOT NULL,
+            engine VARCHAR(50) NOT NULL DEFAULT 'google',
+            locale VARCHAR(20) NOT NULL DEFAULT '',
+            country VARCHAR(10) NOT NULL DEFAULT '',
+            device VARCHAR(20) NOT NULL DEFAULT 'desktop',
+            organic_position DECIMAL(20,10) NULL,
+            organic_url TEXT NULL,
+            ai_overview_present TINYINT(1) NOT NULL DEFAULT 0,
+            featured_snippet_present TINYINT(1) NOT NULL DEFAULT 0,
+            people_also_ask_present TINYINT(1) NOT NULL DEFAULT 0,
+            video_present TINYINT(1) NOT NULL DEFAULT 0,
+            local_pack_present TINYINT(1) NOT NULL DEFAULT 0,
+            shopping_present TINYINT(1) NOT NULL DEFAULT 0,
+            discussions_present TINYINT(1) NOT NULL DEFAULT 0,
+            image_pack_present TINYINT(1) NOT NULL DEFAULT 0,
+            knowledge_panel_present TINYINT(1) NOT NULL DEFAULT 0,
+            serp_features_json LONGTEXT NULL,
+            top_entities_json LONGTEXT NULL,
+            raw_observation_json LONGTEXT NULL,
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY client_query_date (client_id, query(191), snapshot_date),
+            KEY article_id (article_id),
+            KEY snapshot_date (snapshot_date)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$entity_coverage} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NULL,
+            article_id BIGINT UNSIGNED NULL,
+            page_url TEXT NOT NULL,
+            snapshot_date DATE NOT NULL,
+            brand_entity_score DECIMAL(10,4) NOT NULL DEFAULT 0,
+            author_entity_score DECIMAL(10,4) NOT NULL DEFAULT 0,
+            topic_entity_score DECIMAL(10,4) NOT NULL DEFAULT 0,
+            subtopic_entity_score DECIMAL(10,4) NOT NULL DEFAULT 0,
+            semantic_gap_score DECIMAL(10,4) NOT NULL DEFAULT 0,
+            covered_entities_json LONGTEXT NULL,
+            missing_entities_json LONGTEXT NULL,
+            author_signals_json LONGTEXT NULL,
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY client_date (client_id, snapshot_date),
+            KEY article_id (article_id),
+            KEY page_url (page_url(191))
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$serp_signals} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NULL,
+            article_id BIGINT UNSIGNED NULL,
+            query VARCHAR(255) NOT NULL DEFAULT '',
+            page_url TEXT NULL,
+            signal_type VARCHAR(100) NOT NULL DEFAULT '',
+            severity VARCHAR(20) NOT NULL DEFAULT 'medium',
+            status VARCHAR(20) NOT NULL DEFAULT 'open',
+            priority_score DECIMAL(10,4) NOT NULL DEFAULT 0,
+            title VARCHAR(255) NOT NULL DEFAULT '',
+            description TEXT NULL,
+            recommended_action VARCHAR(100) NOT NULL DEFAULT '',
+            evidence_json LONGTEXT NULL,
+            first_detected_at DATETIME NOT NULL,
+            last_detected_at DATETIME NOT NULL,
+            resolved_at DATETIME NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY client_status_priority (client_id, status, priority_score),
+            KEY signal_type (signal_type),
+            KEY query (query(191)),
+            KEY article_id (article_id)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$serp_recommendations} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NULL,
+            article_id BIGINT UNSIGNED NULL,
+            query VARCHAR(255) NOT NULL DEFAULT '',
+            page_url TEXT NULL,
+            recommendation_type VARCHAR(100) NOT NULL DEFAULT '',
+            format_type VARCHAR(50) NOT NULL DEFAULT '',
+            confidence_score DECIMAL(10,4) NOT NULL DEFAULT 0,
+            priority_score DECIMAL(10,4) NOT NULL DEFAULT 0,
+            reasoning TEXT NULL,
+            implementation_brief_json LONGTEXT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'open',
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY client_status_priority (client_id, status, priority_score),
+            KEY query (query(191)),
+            KEY article_id (article_id)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$query_serp_profiles} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            query VARCHAR(255) NOT NULL DEFAULT '',
+            dominant_intent VARCHAR(100) NOT NULL DEFAULT '',
+            dominant_format VARCHAR(50) NOT NULL DEFAULT '',
+            ai_overview_frequency DECIMAL(10,4) NOT NULL DEFAULT 0,
+            featured_snippet_frequency DECIMAL(10,4) NOT NULL DEFAULT 0,
+            paa_frequency DECIMAL(10,4) NOT NULL DEFAULT 0,
+            volatility_score DECIMAL(10,4) NOT NULL DEFAULT 0,
+            answer_engine_pressure_score DECIMAL(10,4) NOT NULL DEFAULT 0,
+            best_format_fit VARCHAR(50) NOT NULL DEFAULT '',
+            current_gap_summary_json LONGTEXT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY client_query_unique (client_id, query(191)),
+            KEY client_id (client_id)
+        ) {$charset};");
+
         $this->maybe_add_column($clients, 'research_urls', "ALTER TABLE {$clients} ADD COLUMN research_urls LONGTEXT NULL AFTER link_targets");
         $this->maybe_add_column($clients, 'max_posts_per_month', "ALTER TABLE {$clients} ADD COLUMN max_posts_per_month INT UNSIGNED NOT NULL DEFAULT 0 AFTER research_urls");
         $this->maybe_add_column($clients, 'gsc_property', "ALTER TABLE {$clients} ADD COLUMN gsc_property VARCHAR(255) NOT NULL DEFAULT '' AFTER max_posts_per_month");
@@ -663,6 +804,10 @@ final class SCH_Orchestrator {
         add_submenu_page('sch-content-hub', 'Rapportage', 'Rapportage', 'manage_options', 'sch-reporting', [$this, 'render_reporting']);
         add_submenu_page('sch-content-hub', 'Performance', 'Performance', 'manage_options', 'sch-performance', [$this, 'render_performance']);
         add_submenu_page('sch-content-hub', 'Page Intelligence', 'Page Intelligence', 'manage_options', 'sch-page-intelligence', [$this, 'render_page_intelligence']);
+        add_submenu_page('sch-content-hub', 'SERP Intelligence', 'SERP Intelligence', 'manage_options', 'sch-serp-intelligence', [$this, 'render_serp_intelligence']);
+        add_submenu_page('sch-content-hub', 'SERP Signals', 'SERP Signals', 'manage_options', 'sch-serp-signals', [$this, 'render_serp_signals']);
+        add_submenu_page('sch-content-hub', 'Entity Coverage', 'Entity Coverage', 'manage_options', 'sch-entity-coverage', [$this, 'render_entity_coverage']);
+        add_submenu_page('sch-content-hub', 'SERP Recommendations', 'SERP Recommendations', 'manage_options', 'sch-serp-recommendations', [$this, 'render_serp_recommendations']);
         add_submenu_page('sch-content-hub', 'Feedback', 'Feedback', 'manage_options', 'sch-feedback', [$this, 'render_feedback']);
         add_submenu_page('sch-content-hub', 'Refresh Queue', 'Refresh Queue', 'manage_options', 'sch-refresh-queue', [$this, 'render_refresh_queue']);
         add_submenu_page('sch-content-hub', 'Logs', 'Logs', 'manage_options', 'sch-logs', [$this, 'render_logs']);
@@ -723,6 +868,22 @@ final class SCH_Orchestrator {
             'sch-page-intelligence' => [
                 'title' => 'Page Intelligence',
                 'text' => 'Op deze pagina verzamel je pagina-inzichten om contentbeslissingen te verbeteren. Je gebruikt de analyses om te bepalen welke pagina’s geüpdatet, uitgebreid of opnieuw gepositioneerd moeten worden.',
+            ],
+            'sch-serp-intelligence' => [
+                'title' => 'SERP Intelligence',
+                'text' => 'Hier volg je SERP-dynamiek per query, inclusief AI Overviews, snippets en format shifts. Je ziet hoe answer-engine pressure toeneemt en waar klassieke klikruimte afneemt.',
+            ],
+            'sch-serp-signals' => [
+                'title' => 'SERP Signals',
+                'text' => 'Op deze pagina beheer je actieve SERP-signalen zoals feature shifts, format mismatch en entity gaps. Je prioriteert snel welke content-aanpassingen eerst moeten gebeuren.',
+            ],
+            'sch-entity-coverage' => [
+                'title' => 'Entity Coverage',
+                'text' => 'Hier beoordeel je dekking van merk-, auteur- en topic-entiteiten op pagina’s. Je ziet semantic gaps en trust-signalen die je contentkwaliteit beïnvloeden.',
+            ],
+            'sch-serp-recommendations' => [
+                'title' => 'SERP Recommendations',
+                'text' => 'Deze pagina bundelt concrete format-aanbevelingen per query en pagina, inclusief implementatiebriefs en prioriteit. Gebruik dit als uitvoerbare backlog voor content updates.',
             ],
             'sch-feedback' => [
                 'title' => 'Feedback',
@@ -7456,6 +7617,804 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         return $inserted;
     }
 
+    private function get_content_format_recommendation(string $query, array $feature_flags = []): string {
+        $query = strtolower(sanitize_text_field($query));
+        $has_paa = !empty($feature_flags['people_also_ask_present']);
+        $has_fs = !empty($feature_flags['featured_snippet_present']);
+
+        if (preg_match('/\b(versus|vs|beste|best|top|alternatief|vergelijk)\b/u', $query)) {
+            return 'comparison';
+        }
+        if (preg_match('/\b(how to|hoe|stappen|tutorial|gids)\b/u', $query)) {
+            return 'how-to';
+        }
+        if (preg_match('/\b(prijs|kosten|bereken|calculator|besparing|rendement|roi)\b/u', $query)) {
+            return 'calculator';
+        }
+        if (preg_match('/\b(wat is|definitie|meaning|betekenis)\b/u', $query)) {
+            return 'definition page';
+        }
+        if ($has_paa) {
+            return 'FAQ';
+        }
+        if ($has_fs && preg_match('/\b(top|beste|lijst|soorten|types)\b/u', $query)) {
+            return 'listicle';
+        }
+        return 'Q&A';
+    }
+
+    public function observe_serp_for_query(object $client, array $query_context): array {
+        $query = sanitize_text_field((string) ($query_context['query'] ?? ''));
+        $page_url = esc_url_raw((string) ($query_context['page_url'] ?? ''));
+        $article_id = (int) ($query_context['article_id'] ?? 0);
+        $site_id = (int) ($query_context['site_id'] ?? 0);
+
+        $gsc_row = null;
+        if ($query !== '') {
+            $gsc_row = $this->db->get_row($this->db->prepare(
+                "SELECT AVG(position) AS avg_position, SUM(impressions) AS impressions, SUM(clicks) AS clicks
+                 FROM {$this->table('gsc_query_page_metrics')}
+                 WHERE client_id=%d AND query=%s AND metric_date>=DATE_SUB(CURDATE(), INTERVAL 28 DAY)",
+                (int) $client->id,
+                $query
+            ));
+        }
+
+        $avg_position = (float) ($gsc_row->avg_position ?? 0);
+        $impressions = (float) ($gsc_row->impressions ?? 0);
+        $tokens = preg_split('/\s+/', strtolower($query)) ?: [];
+        $token_count = max(1, count(array_filter($tokens)));
+
+        $ai_present = $impressions > 120 || preg_match('/\b(wat is|hoe|waarom|beste|top)\b/u', strtolower($query));
+        $fs_present = $avg_position > 0 && $avg_position <= 12;
+        $paa_present = preg_match('/\b(hoe|waarom|wanneer|kan|wat)\b/u', strtolower($query)) === 1;
+        $video_present = preg_match('/\b(video|youtube|demo)\b/u', strtolower($query)) === 1;
+        $local_pack = preg_match('/\b(in de buurt|near me|amsterdam|rotterdam|utrecht)\b/u', strtolower($query)) === 1;
+        $shopping = preg_match('/\b(kopen|prijs|kosten|aanbieding)\b/u', strtolower($query)) === 1;
+        $discussions = $token_count >= 5 && $paa_present;
+        $image_pack = preg_match('/\b(voorbeelden|design|foto|afbeelding)\b/u', strtolower($query)) === 1;
+        $knowledge_panel = preg_match('/\b(bedrijf|persoon|merk)\b/u', strtolower($query)) === 1;
+
+        $observation = [
+            'client_id' => (int) $client->id,
+            'site_id' => $site_id > 0 ? $site_id : null,
+            'article_id' => $article_id > 0 ? $article_id : null,
+            'query' => $query,
+            'page_url' => $page_url !== '' ? $page_url : null,
+            'snapshot_date' => current_time('Y-m-d'),
+            'engine' => 'google',
+            'locale' => get_locale(),
+            'country' => 'US',
+            'device' => 'desktop',
+            'organic_position' => $avg_position > 0 ? round($avg_position, 3) : null,
+            'organic_url' => $page_url !== '' ? $page_url : null,
+            'ai_overview_present' => $ai_present ? 1 : 0,
+            'featured_snippet_present' => $fs_present ? 1 : 0,
+            'people_also_ask_present' => $paa_present ? 1 : 0,
+            'video_present' => $video_present ? 1 : 0,
+            'local_pack_present' => $local_pack ? 1 : 0,
+            'shopping_present' => $shopping ? 1 : 0,
+            'discussions_present' => $discussions ? 1 : 0,
+            'image_pack_present' => $image_pack ? 1 : 0,
+            'knowledge_panel_present' => $knowledge_panel ? 1 : 0,
+            'serp_features_json' => wp_json_encode([
+                'token_count' => $token_count,
+                'impressions_28d' => $impressions,
+                'observed_features' => [
+                    'ai_overview' => $ai_present,
+                    'featured_snippet' => $fs_present,
+                    'people_also_ask' => $paa_present,
+                    'video' => $video_present,
+                    'local_pack' => $local_pack,
+                    'shopping' => $shopping,
+                    'discussions' => $discussions,
+                    'image_pack' => $image_pack,
+                    'knowledge_panel' => $knowledge_panel,
+                ],
+            ]),
+            'top_entities_json' => wp_json_encode($this->extract_entities_from_content($query)),
+            'raw_observation_json' => wp_json_encode([
+                'source' => 'heuristic_from_query_plus_gsc',
+                'gsc_position' => $avg_position,
+                'gsc_impressions' => $impressions,
+            ]),
+        ];
+
+        return $this->normalize_serp_observation($observation);
+    }
+
+    public function normalize_serp_observation(array $observation): array {
+        $feature_keys = [
+            'ai_overview_present',
+            'featured_snippet_present',
+            'people_also_ask_present',
+            'video_present',
+            'local_pack_present',
+            'shopping_present',
+            'discussions_present',
+            'image_pack_present',
+            'knowledge_panel_present',
+        ];
+
+        foreach ($feature_keys as $key) {
+            $observation[$key] = !empty($observation[$key]) ? 1 : 0;
+        }
+
+        $observation['query'] = sanitize_text_field((string) ($observation['query'] ?? ''));
+        $observation['page_url'] = isset($observation['page_url']) && $observation['page_url'] !== '' ? esc_url_raw((string) $observation['page_url']) : null;
+        $observation['organic_url'] = isset($observation['organic_url']) && $observation['organic_url'] !== '' ? esc_url_raw((string) $observation['organic_url']) : null;
+        $observation['snapshot_date'] = sanitize_text_field((string) ($observation['snapshot_date'] ?? current_time('Y-m-d')));
+        $observation['engine'] = sanitize_key((string) ($observation['engine'] ?? 'google'));
+        $observation['locale'] = sanitize_text_field((string) ($observation['locale'] ?? get_locale()));
+        $observation['country'] = strtoupper(substr(sanitize_text_field((string) ($observation['country'] ?? 'US')), 0, 10));
+        $observation['device'] = sanitize_key((string) ($observation['device'] ?? 'desktop'));
+        $observation['serp_features_json'] = wp_json_encode((array) json_decode((string) ($observation['serp_features_json'] ?? '{}'), true));
+        $observation['top_entities_json'] = wp_json_encode((array) json_decode((string) ($observation['top_entities_json'] ?? '[]'), true));
+        $observation['raw_observation_json'] = wp_json_encode((array) json_decode((string) ($observation['raw_observation_json'] ?? '{}'), true));
+        return $observation;
+    }
+
+    public function store_serp_snapshot(array $observation): int {
+        $observation = $this->normalize_serp_observation($observation);
+        $observation['created_at'] = $this->now();
+
+        $this->db->insert($this->table('serp_snapshots'), $observation);
+        if ($this->db->last_error) {
+            $this->log('error', 'serp_snapshot', 'SERP snapshot insert mislukt', ['db_error' => $this->db->last_error, 'query' => $observation['query']]);
+            return 0;
+        }
+        return (int) $this->db->insert_id;
+    }
+
+    public function sync_serp_observations_for_client(object $client): int {
+        $rows = $this->db->get_results($this->db->prepare(
+            "SELECT qpm.query, qpm.page_url, MAX(qpm.article_id) AS article_id, MAX(qpm.site_id) AS site_id
+             FROM {$this->table('gsc_query_page_metrics')} qpm
+             WHERE qpm.client_id=%d AND qpm.metric_date>=DATE_SUB(CURDATE(), INTERVAL 28 DAY)
+             GROUP BY qpm.query, qpm.page_url
+             ORDER BY SUM(qpm.impressions) DESC
+             LIMIT 150",
+            (int) $client->id
+        ), ARRAY_A);
+
+        $stored = 0;
+        foreach ((array) $rows as $row) {
+            $observation = $this->observe_serp_for_query($client, $row);
+            if ($observation['query'] === '') {
+                continue;
+            }
+            $stored += $this->store_serp_snapshot($observation) > 0 ? 1 : 0;
+        }
+        return $stored;
+    }
+
+    public function detect_serp_feature_shifts(object $client): int {
+        $snapshots = $this->db->get_results($this->db->prepare(
+            "SELECT * FROM {$this->table('serp_snapshots')} WHERE client_id=%d ORDER BY query ASC, snapshot_date DESC LIMIT 2000",
+            (int) $client->id
+        ));
+        $grouped = [];
+        foreach ((array) $snapshots as $snapshot) {
+            $grouped[(string) $snapshot->query][] = $snapshot;
+        }
+
+        $count = 0;
+        foreach ($grouped as $query => $rows) {
+            if (count($rows) < 2) {
+                continue;
+            }
+            $latest = $rows[0];
+            $previous = $rows[1];
+            $features = ['ai_overview_present', 'featured_snippet_present', 'people_also_ask_present', 'video_present', 'image_pack_present', 'discussions_present', 'local_pack_present', 'knowledge_panel_present'];
+
+            foreach ($features as $feature) {
+                $latest_value = (int) ($latest->{$feature} ?? 0);
+                $previous_value = (int) ($previous->{$feature} ?? 0);
+                if ($latest_value === $previous_value) {
+                    continue;
+                }
+                $direction = $latest_value === 1 ? 'nieuw verschenen' : 'verdwenen';
+                $this->upsert_serp_signal([
+                    'client_id' => (int) $client->id,
+                    'site_id' => (int) ($latest->site_id ?? 0) ?: null,
+                    'article_id' => (int) ($latest->article_id ?? 0) ?: null,
+                    'query' => $query,
+                    'page_url' => (string) ($latest->page_url ?? ''),
+                    'signal_type' => 'serp_feature_shift',
+                    'severity' => 'medium',
+                    'status' => 'open',
+                    'priority_score' => $this->calculate_serp_signal_priority_score([
+                        'feature' => $feature,
+                        'direction' => $direction,
+                        'answer_engine_pressure' => (int) ($latest->ai_overview_present ?? 0),
+                    ]),
+                    'title' => sprintf('SERP feature shift: %s %s', $feature, $direction),
+                    'description' => sprintf('Voor query "%s" is feature "%s" %s.', $query, $feature, $direction),
+                    'recommended_action' => 'review_serp_layout',
+                    'evidence_json' => wp_json_encode(['latest_date' => $latest->snapshot_date, 'previous_date' => $previous->snapshot_date, 'feature' => $feature]),
+                ]);
+                $count++;
+
+                if ($feature === 'featured_snippet_present' && $latest_value === 0 && $previous_value === 1) {
+                    $this->upsert_serp_signal([
+                        'client_id' => (int) $client->id,
+                        'site_id' => (int) ($latest->site_id ?? 0) ?: null,
+                        'article_id' => (int) ($latest->article_id ?? 0) ?: null,
+                        'query' => $query,
+                        'page_url' => (string) ($latest->page_url ?? ''),
+                        'signal_type' => 'featured_snippet_lost',
+                        'severity' => 'high',
+                        'status' => 'open',
+                        'priority_score' => $this->calculate_serp_signal_priority_score(['base' => 60, 'position' => (float) ($latest->organic_position ?? 10)]),
+                        'title' => 'Featured snippet verloren',
+                        'description' => sprintf('Featured snippet is verdwenen voor query "%s".', $query),
+                        'recommended_action' => 'create_snippet_optimization_job',
+                        'evidence_json' => wp_json_encode(['latest_date' => $latest->snapshot_date, 'previous_date' => $previous->snapshot_date]),
+                    ]);
+                    $count++;
+                }
+            }
+        }
+        return $count;
+    }
+
+    public function detect_answer_engine_pressure(object $client): int {
+        $rows = $this->db->get_results($this->db->prepare(
+            "SELECT query, AVG(ai_overview_present) AS ai_freq, AVG(featured_snippet_present) AS fs_freq, AVG(people_also_ask_present) AS paa_freq
+             FROM {$this->table('serp_snapshots')}
+             WHERE client_id=%d AND snapshot_date>=DATE_SUB(CURDATE(), INTERVAL 28 DAY)
+             GROUP BY query",
+            (int) $client->id
+        ));
+        $count = 0;
+        foreach ((array) $rows as $row) {
+            $pressure = min(1, ((float) $row->ai_freq * 0.65) + ((float) $row->fs_freq * 0.2) + ((float) $row->paa_freq * 0.15));
+            if ($pressure < 0.55) {
+                continue;
+            }
+            $this->upsert_serp_signal([
+                'client_id' => (int) $client->id,
+                'query' => (string) $row->query,
+                'signal_type' => $pressure >= 0.7 ? 'answer_engine_pressure_high' : 'ai_overview_detected',
+                'severity' => $pressure >= 0.7 ? 'high' : 'medium',
+                'status' => 'open',
+                'priority_score' => $this->calculate_serp_signal_priority_score(['answer_engine_pressure' => $pressure]),
+                'title' => $pressure >= 0.7 ? 'Answer-engine pressure hoog' : 'AI overview aanwezig',
+                'description' => sprintf('Voor query "%s" is de answer-engine pressure score %.2f.', (string) $row->query, $pressure),
+                'recommended_action' => 'create_snippet_optimization_job',
+                'evidence_json' => wp_json_encode(['answer_engine_pressure_score' => $pressure]),
+            ]);
+            $count++;
+        }
+        return $count;
+    }
+
+    public function detect_feature_opportunities(object $client): int {
+        $rows = $this->db->get_results($this->db->prepare(
+            "SELECT * FROM {$this->table('serp_snapshots')} WHERE client_id=%d ORDER BY snapshot_date DESC LIMIT 600",
+            (int) $client->id
+        ));
+        $count = 0;
+        foreach ((array) $rows as $row) {
+            if ((int) $row->featured_snippet_present === 1 && ((float) $row->organic_position >= 2 && (float) $row->organic_position <= 8)) {
+                $this->upsert_serp_signal([
+                    'client_id' => (int) $client->id,
+                    'site_id' => (int) ($row->site_id ?? 0) ?: null,
+                    'article_id' => (int) ($row->article_id ?? 0) ?: null,
+                    'query' => (string) $row->query,
+                    'page_url' => (string) ($row->page_url ?? ''),
+                    'signal_type' => 'featured_snippet_opportunity',
+                    'severity' => 'high',
+                    'status' => 'open',
+                    'priority_score' => $this->calculate_serp_signal_priority_score(['base' => 55, 'position' => (float) $row->organic_position]),
+                    'title' => 'Featured snippet opportunity',
+                    'description' => 'Pagina staat dichtbij snippet-ruimte maar benut deze nog niet maximaal.',
+                    'recommended_action' => 'create_snippet_optimization_job',
+                    'evidence_json' => wp_json_encode(['organic_position' => (float) $row->organic_position]),
+                ]);
+                $count++;
+            }
+            if ((int) $row->people_also_ask_present === 1) {
+                $this->upsert_serp_signal([
+                    'client_id' => (int) $client->id,
+                    'site_id' => (int) ($row->site_id ?? 0) ?: null,
+                    'article_id' => (int) ($row->article_id ?? 0) ?: null,
+                    'query' => (string) $row->query,
+                    'page_url' => (string) ($row->page_url ?? ''),
+                    'signal_type' => 'paa_opportunity',
+                    'severity' => 'medium',
+                    'status' => 'open',
+                    'priority_score' => $this->calculate_serp_signal_priority_score(['base' => 40]),
+                    'title' => 'PAA opportunity',
+                    'description' => 'SERP toont PAA; voeg expliciete vraag-antwoordblokken toe.',
+                    'recommended_action' => 'create_faq_expansion_job',
+                    'evidence_json' => wp_json_encode(['people_also_ask_present' => 1]),
+                ]);
+                $count++;
+            }
+        }
+        return $count;
+    }
+
+    public function detect_format_mismatch(object $client): int {
+        $rows = $this->db->get_results($this->db->prepare(
+            "SELECT sp.query, sp.page_url, sp.article_id, sp.site_id, q.main_keyword, q.content_type
+             FROM {$this->table('serp_snapshots')} sp
+             LEFT JOIN {$this->table('articles')} a ON a.id=sp.article_id
+             LEFT JOIN {$this->table('keywords')} q ON q.id=a.keyword_id
+             WHERE sp.client_id=%d
+             ORDER BY sp.snapshot_date DESC
+             LIMIT 500",
+            (int) $client->id
+        ));
+
+        $count = 0;
+        foreach ((array) $rows as $row) {
+            $ideal = $this->get_content_format_recommendation((string) $row->query, ['people_also_ask_present' => true, 'featured_snippet_present' => true]);
+            $current = strtolower((string) ($row->content_type ?? ''));
+            if ($current !== '' && strpos($current, strtolower($ideal)) !== false) {
+                continue;
+            }
+            $signal_type = match ($ideal) {
+                'listicle' => 'list_format_opportunity',
+                'comparison' => 'comparison_format_opportunity',
+                'how-to' => 'howto_format_opportunity',
+                'calculator' => 'calculator_format_opportunity',
+                'FAQ' => 'faq_format_opportunity',
+                default => 'format_mismatch',
+            };
+            $this->upsert_serp_signal([
+                'client_id' => (int) $client->id,
+                'site_id' => (int) ($row->site_id ?? 0) ?: null,
+                'article_id' => (int) ($row->article_id ?? 0) ?: null,
+                'query' => (string) $row->query,
+                'page_url' => (string) ($row->page_url ?? ''),
+                'signal_type' => $signal_type,
+                'severity' => 'medium',
+                'status' => 'open',
+                'priority_score' => $this->calculate_serp_signal_priority_score(['base' => 48]),
+                'title' => 'Contentformat mismatch',
+                'description' => sprintf('Huidige format (%s) past niet bij SERP-verwachting (%s).', $current !== '' ? $current : 'onbekend', $ideal),
+                'recommended_action' => 'create_serp_adaptation_job',
+                'evidence_json' => wp_json_encode(['current_format' => $current, 'recommended_format' => $ideal]),
+            ]);
+            $count++;
+        }
+        return $count;
+    }
+
+    public function build_query_serp_profile(object $client, string $query): array {
+        $query = sanitize_text_field($query);
+        $rows = $this->db->get_results($this->db->prepare(
+            "SELECT * FROM {$this->table('serp_snapshots')} WHERE client_id=%d AND query=%s ORDER BY snapshot_date DESC LIMIT 45",
+            (int) $client->id,
+            $query
+        ));
+        $samples = max(1, count((array) $rows));
+        $ai_freq = array_sum(array_map(static fn($r) => (int) ($r->ai_overview_present ?? 0), (array) $rows)) / $samples;
+        $fs_freq = array_sum(array_map(static fn($r) => (int) ($r->featured_snippet_present ?? 0), (array) $rows)) / $samples;
+        $paa_freq = array_sum(array_map(static fn($r) => (int) ($r->people_also_ask_present ?? 0), (array) $rows)) / $samples;
+        $volatility = $this->calculate_serp_volatility_score((array) $rows);
+        $pressure = min(1, ($ai_freq * 0.7) + ($fs_freq * 0.15) + ($paa_freq * 0.15));
+        $best_format = $this->get_content_format_recommendation($query, ['people_also_ask_present' => $paa_freq > 0.4, 'featured_snippet_present' => $fs_freq > 0.4]);
+        $dominant_intent = str_contains(strtolower($query), 'hoe') ? 'informational-procedural' : 'informational';
+
+        return [
+            'client_id' => (int) $client->id,
+            'query' => $query,
+            'dominant_intent' => $dominant_intent,
+            'dominant_format' => $best_format,
+            'ai_overview_frequency' => round($ai_freq, 4),
+            'featured_snippet_frequency' => round($fs_freq, 4),
+            'paa_frequency' => round($paa_freq, 4),
+            'volatility_score' => round($volatility, 4),
+            'answer_engine_pressure_score' => round($pressure, 4),
+            'best_format_fit' => $best_format,
+            'current_gap_summary_json' => wp_json_encode([
+                'clickspace_pressure' => $pressure >= 0.65 ? 'high' : 'moderate',
+                'format_gap' => $best_format,
+                'samples' => $samples,
+            ]),
+            'updated_at' => $this->now(),
+        ];
+    }
+
+    public function update_query_serp_profiles(object $client): int {
+        $queries = $this->db->get_col($this->db->prepare(
+            "SELECT DISTINCT query FROM {$this->table('serp_snapshots')} WHERE client_id=%d ORDER BY query ASC LIMIT 500",
+            (int) $client->id
+        ));
+        $updated = 0;
+        foreach ((array) $queries as $query) {
+            $profile = $this->build_query_serp_profile($client, (string) $query);
+            $existing = (int) $this->db->get_var($this->db->prepare(
+                "SELECT id FROM {$this->table('query_serp_profiles')} WHERE client_id=%d AND query=%s LIMIT 1",
+                (int) $client->id,
+                (string) $query
+            ));
+            if ($existing > 0) {
+                $this->db->update($this->table('query_serp_profiles'), $profile, ['id' => $existing]);
+            } else {
+                $this->db->insert($this->table('query_serp_profiles'), $profile);
+            }
+            $updated++;
+        }
+        return $updated;
+    }
+
+    public function calculate_serp_volatility_score(array $snapshots): float {
+        if (count($snapshots) < 2) {
+            return 0.0;
+        }
+        $changes = 0;
+        $comparisons = 0;
+        $features = ['ai_overview_present', 'featured_snippet_present', 'people_also_ask_present', 'video_present', 'local_pack_present', 'discussions_present', 'image_pack_present', 'knowledge_panel_present'];
+        for ($i = 0; $i < count($snapshots) - 1; $i++) {
+            $a = $snapshots[$i];
+            $b = $snapshots[$i + 1];
+            foreach ($features as $feature) {
+                $comparisons++;
+                $a_value = (int) (is_object($a) ? $a->{$feature} : ($a[$feature] ?? 0));
+                $b_value = (int) (is_object($b) ? $b->{$feature} : ($b[$feature] ?? 0));
+                if ($a_value !== $b_value) {
+                    $changes++;
+                }
+            }
+        }
+        return $comparisons > 0 ? $changes / $comparisons : 0.0;
+    }
+
+    public function extract_entities_from_content(string $content): array {
+        $content = wp_strip_all_tags($content);
+        preg_match_all('/\b[A-Z][a-zA-Z0-9\-\&]{2,}\b/u', $content, $matches);
+        $entities = array_values(array_unique(array_map('sanitize_text_field', (array) ($matches[0] ?? []))));
+        return array_slice($entities, 0, 40);
+    }
+
+    public function build_expected_entity_set_for_query(object $client, string $query): array {
+        $client_name = sanitize_text_field((string) ($client->name ?? ''));
+        $tokens = preg_split('/\s+/', strtolower($query)) ?: [];
+        $topic = array_values(array_filter(array_map(static fn($t) => sanitize_text_field($t), $tokens), static fn($t) => strlen($t) > 3));
+        return array_values(array_unique(array_merge([$client_name], array_slice($topic, 0, 8))));
+    }
+
+    public function calculate_entity_coverage_score(array $expected_entities, array $covered_entities): float {
+        $expected = array_map('strtolower', $expected_entities);
+        $covered = array_map('strtolower', $covered_entities);
+        if (count($expected) === 0) {
+            return 1.0;
+        }
+        $hits = count(array_intersect($expected, $covered));
+        return round($hits / count($expected), 4);
+    }
+
+    public function detect_missing_entities(array $expected_entities, array $covered_entities): array {
+        $covered_lookup = array_map('strtolower', $covered_entities);
+        $missing = [];
+        foreach ($expected_entities as $entity) {
+            if (!in_array(strtolower($entity), $covered_lookup, true)) {
+                $missing[] = $entity;
+            }
+        }
+        return $missing;
+    }
+
+    public function detect_author_signal_gaps(string $content): array {
+        $checks = [
+            'author_name_present' => preg_match('/\b(auteur|author|door)\b/i', $content) === 1,
+            'expertise_present' => preg_match('/\b(ervaring|expert|certified|gecertificeerd)\b/i', $content) === 1,
+            'credentials_present' => preg_match('/\b(mba|phd|dr\.|msc|bsc)\b/i', $content) === 1,
+        ];
+        return array_keys(array_filter($checks, static fn($ok) => $ok === false));
+    }
+
+    public function detect_brand_signal_gaps(string $content, string $brand_name): array {
+        $content_l = strtolower($content);
+        $brand_l = strtolower($brand_name);
+        $gaps = [];
+        if ($brand_l !== '' && !str_contains($content_l, $brand_l)) {
+            $gaps[] = 'brand_mention_missing';
+        }
+        if (!preg_match('/\b(about|over ons|missie|waarden)\b/i', $content)) {
+            $gaps[] = 'brand_trust_context_missing';
+        }
+        return $gaps;
+    }
+
+    public function store_entity_coverage_snapshot(array $coverage): int {
+        $coverage['created_at'] = $this->now();
+        $this->db->insert($this->table('entity_coverage'), $coverage);
+        return $this->db->last_error ? 0 : (int) $this->db->insert_id;
+    }
+
+    public function update_entity_coverage_for_client(object $client): int {
+        $rows = $this->db->get_results($this->db->prepare(
+            "SELECT a.id AS article_id, a.site_id, a.remote_url, a.content, k.main_keyword
+             FROM {$this->table('articles')} a
+             LEFT JOIN {$this->table('keywords')} k ON k.id=a.keyword_id
+             WHERE a.client_id=%d
+             ORDER BY a.id DESC
+             LIMIT 200",
+            (int) $client->id
+        ));
+        $stored = 0;
+        foreach ((array) $rows as $row) {
+            $content = (string) ($row->content ?? '');
+            $covered_entities = $this->extract_entities_from_content($content);
+            $expected = $this->build_expected_entity_set_for_query($client, (string) ($row->main_keyword ?? ''));
+            $missing = $this->detect_missing_entities($expected, $covered_entities);
+            $author_gaps = $this->detect_author_signal_gaps($content);
+            $brand_gaps = $this->detect_brand_signal_gaps($content, (string) ($client->name ?? ''));
+            $coverage_score = $this->calculate_entity_coverage_score($expected, $covered_entities);
+
+            $stored += $this->store_entity_coverage_snapshot([
+                'client_id' => (int) $client->id,
+                'site_id' => (int) ($row->site_id ?? 0) ?: null,
+                'article_id' => (int) ($row->article_id ?? 0) ?: null,
+                'page_url' => esc_url_raw((string) ($row->remote_url ?? '')),
+                'snapshot_date' => current_time('Y-m-d'),
+                'brand_entity_score' => in_array('brand_mention_missing', $brand_gaps, true) ? 0.2 : 1.0,
+                'author_entity_score' => count($author_gaps) === 0 ? 1.0 : max(0.1, 1 - (count($author_gaps) * 0.33)),
+                'topic_entity_score' => $coverage_score,
+                'subtopic_entity_score' => max(0, $coverage_score - 0.1),
+                'semantic_gap_score' => round(min(1, count($missing) / max(1, count($expected))), 4),
+                'covered_entities_json' => wp_json_encode($covered_entities),
+                'missing_entities_json' => wp_json_encode($missing),
+                'author_signals_json' => wp_json_encode(['author_signal_gaps' => $author_gaps, 'brand_signal_gaps' => $brand_gaps]),
+            ]) > 0 ? 1 : 0;
+        }
+        return $stored;
+    }
+
+    public function generate_serp_recommendations_for_client(object $client): int {
+        $signals = $this->db->get_results($this->db->prepare(
+            "SELECT * FROM {$this->table('serp_signals')} WHERE client_id=%d AND status='open' ORDER BY priority_score DESC LIMIT 300",
+            (int) $client->id
+        ));
+        $created = 0;
+        foreach ((array) $signals as $signal) {
+            $format = $this->get_content_format_recommendation((string) $signal->query);
+            $recommendation_type = match ((string) $signal->signal_type) {
+                'featured_snippet_opportunity' => 'snippet-friendly intro',
+                'paa_opportunity', 'faq_format_opportunity' => 'FAQ block',
+                'comparison_format_opportunity' => 'comparison table',
+                'howto_format_opportunity' => 'answer block',
+                'entity_gap', 'author_signal_gap', 'trust_signal_gap' => 'author trust expansion',
+                default => 'format upgrade',
+            };
+            $exists = (int) $this->db->get_var($this->db->prepare(
+                "SELECT id FROM {$this->table('serp_recommendations')} WHERE client_id=%d AND query=%s AND recommendation_type=%s AND status='open' LIMIT 1",
+                (int) $client->id,
+                (string) $signal->query,
+                $recommendation_type
+            ));
+            if ($exists > 0) {
+                continue;
+            }
+
+            $this->db->insert($this->table('serp_recommendations'), [
+                'client_id' => (int) $client->id,
+                'site_id' => (int) ($signal->site_id ?? 0) ?: null,
+                'article_id' => (int) ($signal->article_id ?? 0) ?: null,
+                'query' => sanitize_text_field((string) $signal->query),
+                'page_url' => esc_url_raw((string) ($signal->page_url ?? '')),
+                'recommendation_type' => $recommendation_type,
+                'format_type' => $format,
+                'confidence_score' => min(1, 0.55 + ((float) $signal->priority_score / 150)),
+                'priority_score' => (float) $signal->priority_score,
+                'reasoning' => sanitize_text_field((string) $signal->description),
+                'implementation_brief_json' => wp_json_encode([
+                    'blocks' => [$recommendation_type],
+                    'format' => $format,
+                    'trigger_signal' => (string) $signal->signal_type,
+                ]),
+                'status' => 'open',
+                'created_at' => $this->now(),
+                'updated_at' => $this->now(),
+            ]);
+            $created++;
+        }
+        return $created;
+    }
+
+    public function create_serp_adaptation_job(int $client_id, int $article_id, array $context = []): int { return $this->create_job_from_signal($client_id, $article_id, 'serp_adaptation', $context); }
+    public function create_snippet_optimization_job(int $client_id, int $article_id, array $context = []): int { return $this->create_job_from_signal($client_id, $article_id, 'snippet_optimization', $context); }
+    public function create_faq_expansion_job(int $client_id, int $article_id, array $context = []): int { return $this->create_job_from_signal($client_id, $article_id, 'faq_expansion', $context); }
+    public function create_comparison_upgrade_job(int $client_id, int $article_id, array $context = []): int { return $this->create_job_from_signal($client_id, $article_id, 'comparison_upgrade', $context); }
+    public function create_howto_restructure_job(int $client_id, int $article_id, array $context = []): int { return $this->create_job_from_signal($client_id, $article_id, 'howto_restructure', $context); }
+    public function create_entity_expansion_job(int $client_id, int $article_id, array $context = []): int { return $this->create_job_from_signal($client_id, $article_id, 'entity_expansion', $context); }
+
+    private function upsert_serp_signal(array $signal): void {
+        $existing_id = (int) $this->db->get_var($this->db->prepare(
+            "SELECT id FROM {$this->table('serp_signals')} WHERE client_id=%d AND signal_type=%s AND query=%s AND status IN ('open','ignored') ORDER BY id DESC LIMIT 1",
+            (int) $signal['client_id'],
+            (string) $signal['signal_type'],
+            (string) ($signal['query'] ?? '')
+        ));
+
+        if ($existing_id > 0) {
+            $this->db->update($this->table('serp_signals'), [
+                'severity' => $signal['severity'],
+                'priority_score' => $signal['priority_score'],
+                'title' => $signal['title'],
+                'description' => $signal['description'],
+                'recommended_action' => $signal['recommended_action'],
+                'evidence_json' => $signal['evidence_json'],
+                'last_detected_at' => $this->now(),
+                'updated_at' => $this->now(),
+            ], ['id' => $existing_id]);
+            return;
+        }
+
+        $signal['first_detected_at'] = $this->now();
+        $signal['last_detected_at'] = $this->now();
+        $signal['created_at'] = $this->now();
+        $signal['updated_at'] = $this->now();
+        $this->db->insert($this->table('serp_signals'), $signal);
+    }
+
+    public function generate_serp_signals_for_client(object $client): int {
+        $count = 0;
+        $count += $this->detect_serp_feature_shifts($client);
+        $count += $this->detect_answer_engine_pressure($client);
+        $count += $this->detect_feature_opportunities($client);
+        $count += $this->detect_format_mismatch($client);
+
+        $entity_rows = $this->db->get_results($this->db->prepare(
+            "SELECT * FROM {$this->table('entity_coverage')} WHERE client_id=%d ORDER BY snapshot_date DESC LIMIT 300",
+            (int) $client->id
+        ));
+        foreach ((array) $entity_rows as $row) {
+            $missing = (array) json_decode((string) ($row->missing_entities_json ?? '[]'), true);
+            $author_signals = (array) json_decode((string) ($row->author_signals_json ?? '{}'), true);
+            $author_gaps = (array) ($author_signals['author_signal_gaps'] ?? []);
+            $brand_gaps = (array) ($author_signals['brand_signal_gaps'] ?? []);
+
+            if (count($missing) >= 2) {
+                $this->upsert_serp_signal([
+                    'client_id' => (int) $client->id,
+                    'site_id' => (int) ($row->site_id ?? 0) ?: null,
+                    'article_id' => (int) ($row->article_id ?? 0) ?: null,
+                    'query' => '',
+                    'page_url' => (string) ($row->page_url ?? ''),
+                    'signal_type' => 'entity_gap',
+                    'severity' => 'medium',
+                    'status' => 'open',
+                    'priority_score' => $this->calculate_serp_signal_priority_score(['base' => 38, 'missing_entities' => count($missing)]),
+                    'title' => 'Entity gap gevonden',
+                    'description' => 'Belangrijke entiteiten ontbreken in huidige content.',
+                    'recommended_action' => 'create_entity_expansion_job',
+                    'evidence_json' => wp_json_encode(['missing_entities' => $missing]),
+                ]);
+                $count++;
+            }
+            if (!empty($author_gaps)) {
+                $this->upsert_serp_signal([
+                    'client_id' => (int) $client->id,
+                    'site_id' => (int) ($row->site_id ?? 0) ?: null,
+                    'article_id' => (int) ($row->article_id ?? 0) ?: null,
+                    'query' => '',
+                    'page_url' => (string) ($row->page_url ?? ''),
+                    'signal_type' => 'author_signal_gap',
+                    'severity' => 'medium',
+                    'status' => 'open',
+                    'priority_score' => $this->calculate_serp_signal_priority_score(['base' => 35, 'author_gaps' => count($author_gaps)]),
+                    'title' => 'Author signal gap',
+                    'description' => 'Auteur- of expertise-signalen ontbreken.',
+                    'recommended_action' => 'create_entity_expansion_job',
+                    'evidence_json' => wp_json_encode(['author_signal_gaps' => $author_gaps]),
+                ]);
+                $count++;
+            }
+            if (!empty($brand_gaps)) {
+                $this->upsert_serp_signal([
+                    'client_id' => (int) $client->id,
+                    'site_id' => (int) ($row->site_id ?? 0) ?: null,
+                    'article_id' => (int) ($row->article_id ?? 0) ?: null,
+                    'query' => '',
+                    'page_url' => (string) ($row->page_url ?? ''),
+                    'signal_type' => 'trust_signal_gap',
+                    'severity' => 'medium',
+                    'status' => 'open',
+                    'priority_score' => $this->calculate_serp_signal_priority_score(['base' => 36, 'brand_gaps' => count($brand_gaps)]),
+                    'title' => 'Trust signal gap',
+                    'description' => 'Merk- en trustcontext kan sterker voor deze pagina.',
+                    'recommended_action' => 'create_entity_expansion_job',
+                    'evidence_json' => wp_json_encode(['brand_signal_gaps' => $brand_gaps]),
+                ]);
+                $count++;
+            }
+        }
+
+        $profiles = $this->db->get_results($this->db->prepare(
+            "SELECT * FROM {$this->table('query_serp_profiles')} WHERE client_id=%d AND volatility_score>=0.35 ORDER BY volatility_score DESC LIMIT 200",
+            (int) $client->id
+        ));
+        foreach ((array) $profiles as $profile) {
+            $this->upsert_serp_signal([
+                'client_id' => (int) $client->id,
+                'query' => (string) $profile->query,
+                'signal_type' => 'serp_volatility_high',
+                'severity' => 'medium',
+                'status' => 'open',
+                'priority_score' => $this->calculate_serp_signal_priority_score(['base' => 42, 'answer_engine_pressure' => (float) $profile->answer_engine_pressure_score]),
+                'title' => 'Hoge SERP-volatiliteit',
+                'description' => sprintf('Query "%s" heeft volatiliteitsscore %.2f.', (string) $profile->query, (float) $profile->volatility_score),
+                'recommended_action' => 'create_serp_adaptation_job',
+                'evidence_json' => wp_json_encode(['volatility_score' => (float) $profile->volatility_score]),
+            ]);
+            $count++;
+        }
+        return $count;
+    }
+
+    public function calculate_serp_signal_priority_score(array $context): float {
+        $base = (float) ($context['base'] ?? 30);
+        $position = (float) ($context['position'] ?? 10);
+        $answer_engine = (float) ($context['answer_engine_pressure'] ?? 0);
+        $missing_entities = (int) ($context['missing_entities'] ?? 0);
+        $direction_bonus = (($context['direction'] ?? '') === 'nieuw verschenen') ? 6 : 0;
+        $feature_bonus = (($context['feature'] ?? '') === 'ai_overview_present') ? 8 : 0;
+        $position_bonus = $position > 0 ? max(0, (12 - $position) * 1.6) : 0;
+        $gap_bonus = $missing_entities * 4;
+        return round($base + ($answer_engine * 45) + $position_bonus + $gap_bonus + $direction_bonus + $feature_bonus, 4);
+    }
+
+    public function mark_serp_signal_resolved(): void {
+        $this->verify_admin_nonce('sch_mark_serp_signal');
+        $id = (int) ($_POST['signal_id'] ?? 0);
+        if ($id > 0) {
+            $this->mark_serp_signal_status($id, 'resolved');
+        }
+        $this->redirect_with_message('sch-serp-signals', 'SERP-signaal gemarkeerd als resolved.');
+    }
+
+    public function mark_serp_signal_ignored(): void {
+        $this->verify_admin_nonce('sch_mark_serp_signal');
+        $id = (int) ($_POST['signal_id'] ?? 0);
+        if ($id > 0) {
+            $this->mark_serp_signal_status($id, 'ignored');
+        }
+        $this->redirect_with_message('sch-serp-signals', 'SERP-signaal gemarkeerd als ignored.');
+    }
+
+    private function mark_serp_signal_status(int $signal_id, string $status): void {
+        if (!in_array($status, ['resolved', 'ignored'], true)) {
+            return;
+        }
+        $payload = [
+            'status' => $status,
+            'updated_at' => $this->now(),
+        ];
+        if ($status === 'resolved') {
+            $payload['resolved_at'] = $this->now();
+        }
+        $this->db->update($this->table('serp_signals'), $payload, ['id' => $signal_id]);
+    }
+
+    public function run_serp_intelligence_worker(): void {
+        $clients = $this->db->get_results("SELECT * FROM {$this->table('clients')} WHERE is_active=1 ORDER BY id ASC");
+        foreach ((array) $clients as $client) {
+            try {
+                $synced = $this->sync_serp_observations_for_client($client);
+                $profiles = $this->update_query_serp_profiles($client);
+                $entity = $this->update_entity_coverage_for_client($client);
+                $signals = $this->generate_serp_signals_for_client($client);
+                $recommendations = $this->generate_serp_recommendations_for_client($client);
+                $this->log('info', 'serp_worker', 'SERP intelligence worker afgerond voor klant', [
+                    'client_id' => (int) $client->id,
+                    'snapshots' => $synced,
+                    'profiles' => $profiles,
+                    'entity_coverage' => $entity,
+                    'signals' => $signals,
+                    'recommendations' => $recommendations,
+                ]);
+            } catch (Throwable $e) {
+                $this->log('error', 'serp_worker', 'SERP intelligence worker mislukt voor klant', ['client_id' => (int) $client->id, 'error' => $e->getMessage()]);
+            }
+        }
+    }
+
     public function mark_signal_resolved(): void {
         $this->verify_admin_nonce('sch_mark_signal');
         $id = (int) ($_POST['signal_id'] ?? 0);
@@ -7595,6 +8554,100 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             <?php if ($mapping) : ?><p><strong>Linked article:</strong> <?php echo (int) ($mapping->article_id ?? 0); ?> | <strong>Matched via:</strong> <?php echo esc_html((string) ($mapping->matched_via ?? '')); ?></p><?php endif; ?>
             <h2>Dagelijkse historie</h2><table class="widefat striped"><thead><tr><th>Datum</th><th>Clicks</th><th>Impressions</th><th>CTR</th><th>Positie</th><th>Sessions</th><th>Views</th><th>Key events</th></tr></thead><tbody><?php if ($history) : foreach ($history as $row) : ?><tr><td><?php echo esc_html((string) $row->metric_date); ?></td><td><?php echo esc_html((string) round((float) $row->gsc_clicks)); ?></td><td><?php echo esc_html((string) round((float) $row->gsc_impressions)); ?></td><td><?php echo esc_html((string) round((float) $row->gsc_ctr * 100, 2)); ?>%</td><td><?php echo esc_html((string) round((float) $row->gsc_position, 2)); ?></td><td><?php echo esc_html((string) round((float) $row->ga_sessions)); ?></td><td><?php echo esc_html((string) round((float) $row->ga_views)); ?></td><td><?php echo esc_html((string) round((float) $row->ga_key_events, 2)); ?></td></tr><?php endforeach; else : ?><tr><td colspan="8">Geen data.</td></tr><?php endif; ?></tbody></table>
             <h2>Top queries</h2><table class="widefat striped"><thead><tr><th>Query</th><th>Clicks</th><th>Impressions</th><th>Positie</th></tr></thead><tbody><?php if ($queries) : foreach ($queries as $query) : ?><tr><td><?php echo esc_html((string) $query->query); ?></td><td><?php echo esc_html((string) round((float) $query->clicks)); ?></td><td><?php echo esc_html((string) round((float) $query->impressions)); ?></td><td><?php echo esc_html((string) round((float) $query->position, 2)); ?></td></tr><?php endforeach; else : ?><tr><td colspan="4">Geen query data.</td></tr><?php endif; ?></tbody></table>
+        </div>
+        <?php
+    }
+
+    public function render_serp_intelligence(): void {
+        $client_id = (int) ($_GET['client_id'] ?? 0);
+        $query = sanitize_text_field((string) ($_GET['query'] ?? ''));
+        $rows = [];
+        if ($client_id > 0) {
+            $sql = "SELECT * FROM {$this->table('serp_snapshots')} WHERE client_id=%d";
+            $params = [$client_id];
+            if ($query !== '') {
+                $sql .= " AND query=%s";
+                $params[] = $query;
+            }
+            $sql .= " ORDER BY snapshot_date DESC, id DESC LIMIT 500";
+            $rows = $this->db->get_results($this->db->prepare($sql, ...$params));
+        }
+        ?>
+        <div class="wrap"><h1>SERP Intelligence</h1><?php $this->render_admin_notice(); ?>
+            <form method="get"><input type="hidden" name="page" value="sch-serp-intelligence"><label>Klant ID <input type="number" name="client_id" value="<?php echo (int) $client_id; ?>"></label> <label>Query <input type="text" name="query" value="<?php echo esc_attr($query); ?>" style="min-width:320px;"></label> <button class="button button-primary">Filter</button></form>
+            <table class="widefat striped"><thead><tr><th>Datum</th><th>Query</th><th>Positie</th><th>AI</th><th>FS</th><th>PAA</th><th>Video</th><th>Image</th><th>Discussions</th><th>Local</th><th>KP</th><th>URL</th></tr></thead><tbody>
+            <?php if ($rows) : foreach ($rows as $row) : ?><tr><td><?php echo esc_html((string) $row->snapshot_date); ?></td><td><?php echo esc_html((string) $row->query); ?></td><td><?php echo esc_html((string) round((float) $row->organic_position, 2)); ?></td><td><?php echo (int) $row->ai_overview_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->featured_snippet_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->people_also_ask_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->video_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->image_pack_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->discussions_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->local_pack_present ? '✅' : '—'; ?></td><td><?php echo (int) $row->knowledge_panel_present ? '✅' : '—'; ?></td><td><code><?php echo esc_html($this->normalize_page_path((string) ($row->page_url ?? ''))); ?></code></td></tr><?php endforeach; else : ?><tr><td colspan="12">Geen SERP snapshots voor selectie.</td></tr><?php endif; ?>
+            </tbody></table>
+        </div>
+        <?php
+    }
+
+    public function render_serp_signals(): void {
+        $client_id = (int) ($_GET['client_id'] ?? 0);
+        $status = sanitize_key((string) ($_GET['status'] ?? 'open'));
+        if (!in_array($status, ['open', 'ignored', 'resolved'], true)) {
+            $status = 'open';
+        }
+        $sql = "SELECT * FROM {$this->table('serp_signals')} WHERE status=%s";
+        $params = [$status];
+        if ($client_id > 0) {
+            $sql .= " AND client_id=%d";
+            $params[] = $client_id;
+        }
+        $sql .= " ORDER BY priority_score DESC, id DESC LIMIT 500";
+        $rows = $this->db->get_results($this->db->prepare($sql, ...$params));
+        ?>
+        <div class="wrap"><h1>SERP Signals</h1><?php $this->render_admin_notice(); ?>
+            <form method="get"><input type="hidden" name="page" value="sch-serp-signals"><label>Klant ID <input type="number" name="client_id" value="<?php echo (int) $client_id; ?>"></label> <label>Status <select name="status"><?php foreach (['open', 'ignored', 'resolved'] as $s) : ?><option value="<?php echo esc_attr($s); ?>" <?php selected($status, $s); ?>><?php echo esc_html($s); ?></option><?php endforeach; ?></select></label> <button class="button button-primary">Filter</button></form>
+            <table class="widefat striped"><thead><tr><th>Type</th><th>Severity</th><th>Status</th><th>Priority</th><th>Query</th><th>Titel</th><th>Action</th><th>Pagina</th><th>Actions</th></tr></thead><tbody>
+            <?php if ($rows) : foreach ($rows as $row) : ?><tr><td><?php echo esc_html((string) $row->signal_type); ?></td><td><?php echo esc_html((string) $row->severity); ?></td><td><?php echo esc_html((string) $row->status); ?></td><td><?php echo esc_html((string) $row->priority_score); ?></td><td><?php echo esc_html((string) $row->query); ?></td><td><?php echo esc_html((string) $row->title); ?></td><td><?php echo esc_html((string) $row->recommended_action); ?></td><td><code><?php echo esc_html($this->normalize_page_path((string) ($row->page_url ?? ''))); ?></code></td><td>
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_serp_signal'); ?><input type="hidden" name="action" value="sch_mark_serp_signal_resolved"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button">Resolve</button></form>
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_serp_signal'); ?><input type="hidden" name="action" value="sch_mark_serp_signal_ignored"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button">Ignore</button></form>
+            </td></tr><?php endforeach; else : ?><tr><td colspan="9">Geen SERP signalen gevonden.</td></tr><?php endif; ?></tbody></table>
+        </div>
+        <?php
+    }
+
+    public function render_entity_coverage(): void {
+        $client_id = (int) ($_GET['client_id'] ?? 0);
+        $sql = "SELECT * FROM {$this->table('entity_coverage')}";
+        $params = [];
+        if ($client_id > 0) {
+            $sql .= " WHERE client_id=%d";
+            $params[] = $client_id;
+        }
+        $sql .= " ORDER BY snapshot_date DESC, id DESC LIMIT 500";
+        $rows = $params ? $this->db->get_results($this->db->prepare($sql, ...$params)) : $this->db->get_results($sql);
+        ?>
+        <div class="wrap"><h1>Entity Coverage</h1><?php $this->render_admin_notice(); ?>
+            <form method="get"><input type="hidden" name="page" value="sch-entity-coverage"><label>Klant ID <input type="number" name="client_id" value="<?php echo (int) $client_id; ?>"></label> <button class="button button-primary">Filter</button></form>
+            <table class="widefat striped"><thead><tr><th>Datum</th><th>Artikel</th><th>Pagina</th><th>Brand</th><th>Author</th><th>Topic</th><th>Subtopic</th><th>Semantic gap</th><th>Missing entities</th></tr></thead><tbody>
+            <?php if ($rows) : foreach ($rows as $row) : $missing = (array) json_decode((string) ($row->missing_entities_json ?? '[]'), true); ?><tr><td><?php echo esc_html((string) $row->snapshot_date); ?></td><td><?php echo (int) $row->article_id; ?></td><td><code><?php echo esc_html($this->normalize_page_path((string) ($row->page_url ?? ''))); ?></code></td><td><?php echo esc_html((string) $row->brand_entity_score); ?></td><td><?php echo esc_html((string) $row->author_entity_score); ?></td><td><?php echo esc_html((string) $row->topic_entity_score); ?></td><td><?php echo esc_html((string) $row->subtopic_entity_score); ?></td><td><?php echo esc_html((string) $row->semantic_gap_score); ?></td><td><?php echo esc_html(implode(', ', array_slice($missing, 0, 8))); ?></td></tr><?php endforeach; else : ?><tr><td colspan="9">Geen entity coverage snapshots.</td></tr><?php endif; ?>
+            </tbody></table>
+        </div>
+        <?php
+    }
+
+    public function render_serp_recommendations(): void {
+        $client_id = (int) ($_GET['client_id'] ?? 0);
+        $status = sanitize_key((string) ($_GET['status'] ?? 'open'));
+        if (!in_array($status, ['open', 'ignored', 'resolved'], true)) {
+            $status = 'open';
+        }
+        $sql = "SELECT * FROM {$this->table('serp_recommendations')} WHERE status=%s";
+        $params = [$status];
+        if ($client_id > 0) {
+            $sql .= " AND client_id=%d";
+            $params[] = $client_id;
+        }
+        $sql .= " ORDER BY priority_score DESC, id DESC LIMIT 500";
+        $rows = $this->db->get_results($this->db->prepare($sql, ...$params));
+        ?>
+        <div class="wrap"><h1>SERP Recommendations</h1><?php $this->render_admin_notice(); ?>
+            <form method="get"><input type="hidden" name="page" value="sch-serp-recommendations"><label>Klant ID <input type="number" name="client_id" value="<?php echo (int) $client_id; ?>"></label> <label>Status <select name="status"><?php foreach (['open', 'ignored', 'resolved'] as $s) : ?><option value="<?php echo esc_attr($s); ?>" <?php selected($status, $s); ?>><?php echo esc_html($s); ?></option><?php endforeach; ?></select></label> <button class="button button-primary">Filter</button></form>
+            <table class="widefat striped"><thead><tr><th>Type</th><th>Format</th><th>Confidence</th><th>Priority</th><th>Query</th><th>Reasoning</th><th>Pagina</th></tr></thead><tbody>
+            <?php if ($rows) : foreach ($rows as $row) : ?><tr><td><?php echo esc_html((string) $row->recommendation_type); ?></td><td><?php echo esc_html((string) $row->format_type); ?></td><td><?php echo esc_html((string) round((float) $row->confidence_score, 3)); ?></td><td><?php echo esc_html((string) $row->priority_score); ?></td><td><?php echo esc_html((string) $row->query); ?></td><td><?php echo esc_html((string) $row->reasoning); ?></td><td><code><?php echo esc_html($this->normalize_page_path((string) ($row->page_url ?? ''))); ?></code></td></tr><?php endforeach; else : ?><tr><td colspan="7">Geen aanbevelingen gevonden.</td></tr><?php endif; ?>
+            </tbody></table>
         </div>
         <?php
     }
