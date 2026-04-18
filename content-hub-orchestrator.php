@@ -2,7 +2,7 @@
 /*
 Plugin Name: Shortcut Content Hub Orchestrator
 Description: Centrale content orchestrator voor klanten, keyword discovery, jobs en distributie naar externe WordPress blogs via een receiver plugin. Inclusief AI schrijf- en redactieflow, website research, Unsplash featured images en bulk blog import.
-Version: 0.6.0
+Version: 0.7.0
 Author: OpenAI
 */
 
@@ -11,13 +11,13 @@ if (!defined('ABSPATH')) {
 }
 
 final class SCH_Orchestrator {
-    const VERSION = '0.6.0';
+    const VERSION = '0.7.0';
     const CRON_HOOK = 'sch_orchestrator_minute_worker';
     const GSC_CRON_HOOK = 'sch_orchestrator_gsc_sync_worker';
     const SERP_CRON_HOOK = 'sch_orchestrator_serp_intelligence_worker';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
-    const DB_VERSION = '0.8.0';
+    const DB_VERSION = '0.9.0';
     const EXACT_MATCH_THRESHOLD_PERCENT = 30;
 
     const OPTION_OPENAI_API_KEY = 'sch_openai_api_key';
@@ -62,6 +62,7 @@ final class SCH_Orchestrator {
     const OPTION_SERP_RESULTS_DEPTH = 'sch_serp_results_depth';
     const OPTION_SERP_SYNC_BATCH_SIZE = 'sch_serp_sync_batch_size';
     const OPTION_DATAFORSEO_LAST_ERROR = 'sch_dataforseo_last_error';
+    const OPTION_INTELLIGENCE_LAST_SYNC = 'sch_intelligence_last_sync';
 
     const GA_CRON_HOOK = 'sch_orchestrator_ga_sync_worker';
     const FEEDBACK_CRON_HOOK = 'sch_orchestrator_feedback_sync_worker';
@@ -128,6 +129,8 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_mark_signal_ignored', [$this, 'mark_signal_ignored']);
         add_action('admin_post_sch_mark_serp_signal_resolved', [$this, 'mark_serp_signal_resolved']);
         add_action('admin_post_sch_mark_serp_signal_ignored', [$this, 'mark_serp_signal_ignored']);
+        add_action('admin_post_sch_create_intelligence_task', [$this, 'handle_create_intelligence_task']);
+        add_action('admin_post_sch_run_intelligence_ingest', [$this, 'handle_run_intelligence_ingest']);
         add_action('admin_post_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
         add_action('admin_post_nopriv_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
 
@@ -302,6 +305,10 @@ final class SCH_Orchestrator {
         $serp_signals = $this->table('serp_signals');
         $serp_recommendations = $this->table('serp_recommendations');
         $query_serp_profiles = $this->table('query_serp_profiles');
+        $orchestrator_events = $this->table('orchestrator_events');
+        $orchestrator_page_metrics_daily = $this->table('orchestrator_page_metrics_daily');
+        $orchestrator_opportunities = $this->table('orchestrator_opportunities');
+        $orchestrator_tasks = $this->table('orchestrator_tasks');
 
         dbDelta("CREATE TABLE {$clients} (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -739,6 +746,91 @@ final class SCH_Orchestrator {
             KEY client_id (client_id)
         ) {$charset};");
 
+        dbDelta("CREATE TABLE {$orchestrator_events} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            tenant_id BIGINT UNSIGNED NOT NULL DEFAULT 1,
+            site_id BIGINT UNSIGNED NULL,
+            client_id BIGINT UNSIGNED NULL,
+            object_type VARCHAR(50) NOT NULL DEFAULT '',
+            object_id VARCHAR(191) NOT NULL DEFAULT '',
+            event_type VARCHAR(100) NOT NULL DEFAULT '',
+            actor_source VARCHAR(100) NOT NULL DEFAULT '',
+            payload LONGTEXT NULL,
+            event_time DATETIME NOT NULL,
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY tenant_site_time (tenant_id, site_id, event_time),
+            KEY client_object_time (client_id, object_type, object_id, event_time),
+            KEY event_type_time (event_type, event_time)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$orchestrator_page_metrics_daily} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            tenant_id BIGINT UNSIGNED NOT NULL DEFAULT 1,
+            site_id BIGINT UNSIGNED NULL,
+            client_id BIGINT UNSIGNED NOT NULL,
+            article_id BIGINT UNSIGNED NULL,
+            page_url TEXT NOT NULL,
+            page_path VARCHAR(255) NOT NULL DEFAULT '',
+            metric_date DATE NOT NULL,
+            clicks DECIMAL(20,6) NOT NULL DEFAULT 0,
+            impressions DECIMAL(20,6) NOT NULL DEFAULT 0,
+            ctr DECIMAL(20,10) NOT NULL DEFAULT 0,
+            avg_position DECIMAL(20,10) NOT NULL DEFAULT 0,
+            sessions DECIMAL(20,6) NOT NULL DEFAULT 0,
+            source_quality DECIMAL(10,4) NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY client_page_date_unique (client_id, page_path(191), metric_date),
+            KEY tenant_site_date (tenant_id, site_id, metric_date),
+            KEY client_date (client_id, metric_date)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$orchestrator_opportunities} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            tenant_id BIGINT UNSIGNED NOT NULL DEFAULT 1,
+            site_id BIGINT UNSIGNED NULL,
+            client_id BIGINT UNSIGNED NOT NULL,
+            article_id BIGINT UNSIGNED NULL,
+            page_url TEXT NOT NULL,
+            page_path VARCHAR(255) NOT NULL DEFAULT '',
+            score DECIMAL(10,4) NOT NULL DEFAULT 0,
+            confidence DECIMAL(10,4) NOT NULL DEFAULT 0,
+            quick_reason VARCHAR(255) NOT NULL DEFAULT '',
+            score_breakdown LONGTEXT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'open',
+            updated_at DATETIME NOT NULL,
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY client_page_unique (client_id, page_path(191)),
+            KEY client_status_score (client_id, status, score),
+            KEY tenant_site_status (tenant_id, site_id, status)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$orchestrator_tasks} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            tenant_id BIGINT UNSIGNED NOT NULL DEFAULT 1,
+            site_id BIGINT UNSIGNED NULL,
+            client_id BIGINT UNSIGNED NOT NULL,
+            opportunity_id BIGINT UNSIGNED NULL,
+            article_id BIGINT UNSIGNED NULL,
+            page_url TEXT NOT NULL,
+            page_path VARCHAR(255) NOT NULL DEFAULT '',
+            task_type VARCHAR(100) NOT NULL DEFAULT '',
+            status VARCHAR(20) NOT NULL DEFAULT 'new',
+            payload LONGTEXT NULL,
+            created_by BIGINT UNSIGNED NULL,
+            started_at DATETIME NULL,
+            completed_at DATETIME NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY client_status_created (client_id, status, created_at),
+            KEY opportunity_id (opportunity_id),
+            KEY task_type (task_type)
+        ) {$charset};");
+
         $this->maybe_add_column($clients, 'research_urls', "ALTER TABLE {$clients} ADD COLUMN research_urls LONGTEXT NULL AFTER link_targets");
         $this->maybe_add_column($clients, 'max_posts_per_month', "ALTER TABLE {$clients} ADD COLUMN max_posts_per_month INT UNSIGNED NOT NULL DEFAULT 0 AFTER research_urls");
         $this->maybe_add_column($clients, 'gsc_property', "ALTER TABLE {$clients} ADD COLUMN gsc_property VARCHAR(255) NOT NULL DEFAULT '' AFTER max_posts_per_month");
@@ -800,6 +892,7 @@ final class SCH_Orchestrator {
         add_option(self::OPTION_SERP_PROVIDER, 'dataforseo');
         add_option(self::OPTION_DATAFORSEO_LOGIN, '');
         add_option(self::OPTION_DATAFORSEO_PASSWORD, '');
+        add_option(self::OPTION_INTELLIGENCE_LAST_SYNC, '');
         add_option(self::OPTION_SERP_DEFAULT_COUNTRY_CODE, 'us');
         add_option(self::OPTION_SERP_DEFAULT_LANGUAGE_CODE, 'en');
         add_option(self::OPTION_SERP_DEFAULT_DEVICE, 'desktop');
@@ -821,6 +914,7 @@ final class SCH_Orchestrator {
         add_submenu_page('sch-content-hub', 'Redactie', 'Redactie', 'manage_options', 'sch-editorial', [$this, 'render_editorial']);
         add_submenu_page('sch-content-hub', 'Rapportage', 'Rapportage', 'manage_options', 'sch-reporting', [$this, 'render_reporting']);
         add_submenu_page('sch-content-hub', 'Performance', 'Performance', 'manage_options', 'sch-performance', [$this, 'render_performance']);
+        add_submenu_page('sch-content-hub', 'Intelligence', 'Intelligence', 'manage_options', 'sch-intelligence', [$this, 'render_intelligence']);
         add_submenu_page('sch-content-hub', 'Page Intelligence', 'Page Intelligence', 'manage_options', 'sch-page-intelligence', [$this, 'render_page_intelligence']);
         add_submenu_page('sch-content-hub', 'SERP Intelligence', 'SERP Intelligence', 'manage_options', 'sch-serp-intelligence', [$this, 'render_serp_intelligence']);
         add_submenu_page('sch-content-hub', 'SERP Signals', 'SERP Signals', 'manage_options', 'sch-serp-signals', [$this, 'render_serp_signals']);
@@ -4037,6 +4131,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
     public function run_worker(): void {
         $this->log('info', 'worker', 'run_worker gestart');
+        $this->maybe_run_intelligence_pipeline();
         $this->maybe_prepare_random_content_jobs();
 
         $job = $this->db->get_row("SELECT * FROM {$this->table('jobs')} WHERE status='queued' ORDER BY id ASC LIMIT 1");
@@ -9113,6 +9208,587 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $cipher = substr($binary, 16);
         $plain = openssl_decrypt($cipher, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
         return is_string($plain) && $plain !== '' ? $plain : $binary;
+    }
+
+    public function handle_run_intelligence_ingest(): void {
+        $this->verify_admin_nonce('sch_run_intelligence_ingest');
+        $client_id = max(0, (int) ($_POST['client_id'] ?? 0));
+        $this->maybe_run_intelligence_pipeline($client_id > 0 ? $client_id : null, true);
+        $this->redirect_with_message('sch-intelligence', 'Intelligence ingest voltooid.', 'success', [
+            'client_id' => $client_id,
+        ]);
+    }
+
+    public function handle_create_intelligence_task(): void {
+        $this->verify_admin_nonce('sch_create_intelligence_task');
+
+        $task_type = sanitize_key((string) ($_POST['task_type'] ?? ''));
+        if (!in_array($task_type, ['create_refresh_task', 'create_internal_link_review_task'], true)) {
+            $this->redirect_with_message('sch-intelligence', 'Ongeldig task type.', 'error');
+        }
+
+        $opportunity_id = max(0, (int) ($_POST['opportunity_id'] ?? 0));
+        $opportunity = $this->db->get_row($this->db->prepare(
+            "SELECT * FROM {$this->table('orchestrator_opportunities')} WHERE id=%d",
+            $opportunity_id
+        ));
+        if (!$opportunity) {
+            $this->redirect_with_message('sch-intelligence', 'Opportunity niet gevonden.', 'error');
+        }
+
+        $now = $this->now();
+        $inserted = $this->db->insert($this->table('orchestrator_tasks'), [
+            'tenant_id' => (int) ($opportunity->tenant_id ?? 1),
+            'site_id' => (int) ($opportunity->site_id ?? 0) ?: null,
+            'client_id' => (int) ($opportunity->client_id ?? 0),
+            'opportunity_id' => (int) $opportunity->id,
+            'article_id' => (int) ($opportunity->article_id ?? 0) ?: null,
+            'page_url' => (string) ($opportunity->page_url ?? ''),
+            'page_path' => (string) ($opportunity->page_path ?? ''),
+            'task_type' => $task_type,
+            'status' => 'new',
+            'payload' => wp_json_encode([
+                'origin' => 'intelligence_queue',
+                'quick_reason' => (string) ($opportunity->quick_reason ?? ''),
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            'created_by' => get_current_user_id() ?: null,
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+        if ($inserted === false) {
+            $this->log('error', 'intelligence', 'Task aanmaken mislukt', ['db_error' => $this->db->last_error]);
+            $this->redirect_with_message('sch-intelligence', 'Task aanmaken mislukt.', 'error');
+        }
+
+        $task_id = (int) $this->db->insert_id;
+        $this->log_orchestrator_event((int) ($opportunity->tenant_id ?? 1), (int) ($opportunity->site_id ?? 0), (int) ($opportunity->client_id ?? 0), 'task', (string) $task_id, 'task_created', 'admin_ui', [
+            'task_type' => $task_type,
+            'opportunity_id' => (int) $opportunity->id,
+            'page_path' => (string) ($opportunity->page_path ?? ''),
+        ]);
+
+        $this->redirect_with_message('sch-intelligence', 'Task aangemaakt vanuit opportunity.', 'success', [
+            'client_id' => (int) ($opportunity->client_id ?? 0),
+            'page_path' => rawurlencode((string) ($opportunity->page_path ?? '')),
+        ]);
+    }
+
+    private function get_connector_registry(): array {
+        return [
+            'gsc' => ['enabled' => get_option(self::OPTION_GSC_ENABLED, '0') === '1', 'label' => 'Google Search Console'],
+            'ga4' => ['enabled' => get_option(self::OPTION_GA_ENABLED, '0') === '1', 'label' => 'Google Analytics 4'],
+            'wp_content' => ['enabled' => true, 'label' => 'WordPress Content'],
+        ];
+    }
+
+    private function maybe_run_intelligence_pipeline(?int $client_id = null, bool $force = false): void {
+        $last_sync = (string) get_option(self::OPTION_INTELLIGENCE_LAST_SYNC, '');
+        if (!$force && $last_sync !== '') {
+            $age = time() - strtotime($last_sync);
+            if ($age >= 0 && $age < HOUR_IN_SECONDS) {
+                return;
+            }
+        }
+
+        $this->run_intelligence_ingest($client_id);
+        update_option(self::OPTION_INTELLIGENCE_LAST_SYNC, gmdate('Y-m-d H:i:s'));
+    }
+
+    private function run_intelligence_ingest(?int $client_id = null): void {
+        $clients_sql = "SELECT id FROM {$this->table('clients')} WHERE is_active=1";
+        $params = [];
+        if ($client_id !== null && $client_id > 0) {
+            $clients_sql .= " AND id=%d";
+            $params[] = $client_id;
+        }
+        $clients_sql .= " ORDER BY id ASC";
+        $clients = $params ? $this->db->get_results($this->db->prepare($clients_sql, ...$params)) : $this->db->get_results($clients_sql);
+        if (!$clients) {
+            return;
+        }
+
+        foreach ($clients as $client) {
+            $cid = (int) ($client->id ?? 0);
+            if ($cid <= 0) {
+                continue;
+            }
+            $this->ingest_client_daily_metrics($cid);
+            $this->recompute_opportunities_for_client($cid);
+        }
+        $this->ingest_wp_content_events();
+    }
+
+    private function ingest_client_daily_metrics(int $client_id): void {
+        $rows = $this->db->get_results($this->db->prepare(
+            "SELECT p.client_id, p.site_id, p.article_id, p.page_url, p.page_path, p.metric_date,
+                    p.gsc_clicks, p.gsc_impressions, p.gsc_ctr, p.gsc_position, p.ga_sessions
+             FROM {$this->table('page_overlay_daily')} p
+             WHERE p.client_id=%d AND p.metric_date>=DATE_SUB(CURDATE(), INTERVAL 35 DAY)
+             ORDER BY p.metric_date DESC",
+            $client_id
+        ));
+        if (!$rows) {
+            return;
+        }
+
+        foreach ($rows as $row) {
+            $dto = $this->build_page_metric_dto($row);
+            if (!$this->validate_page_metric_dto($dto)) {
+                continue;
+            }
+            $this->store_page_metric_dto($dto);
+        }
+    }
+
+    private function build_page_metric_dto(object $row): array {
+        return [
+            'tenant_id' => 1,
+            'client_id' => (int) ($row->client_id ?? 0),
+            'site_id' => (int) ($row->site_id ?? 0),
+            'article_id' => (int) ($row->article_id ?? 0),
+            'page_url' => esc_url_raw((string) ($row->page_url ?? '')),
+            'page_path' => $this->normalize_page_path((string) ($row->page_path ?? $row->page_url ?? '')),
+            'metric_date' => (string) ($row->metric_date ?? ''),
+            'clicks' => (float) ($row->gsc_clicks ?? 0),
+            'impressions' => (float) ($row->gsc_impressions ?? 0),
+            'ctr' => (float) ($row->gsc_ctr ?? 0),
+            'avg_position' => (float) ($row->gsc_position ?? 0),
+            'sessions' => (float) ($row->ga_sessions ?? 0),
+            'source_quality' => ((float) ($row->gsc_impressions ?? 0) > 0 ? 0.7 : 0.3) + ((float) ($row->ga_sessions ?? 0) > 0 ? 0.3 : 0.0),
+        ];
+    }
+
+    private function validate_page_metric_dto(array $dto): bool {
+        if ((int) ($dto['client_id'] ?? 0) <= 0) {
+            return false;
+        }
+        if ((string) ($dto['page_path'] ?? '') === '') {
+            return false;
+        }
+        if ((string) ($dto['metric_date'] ?? '') === '') {
+            return false;
+        }
+        return true;
+    }
+
+    private function store_page_metric_dto(array $dto): void {
+        $existing_id = (int) $this->db->get_var($this->db->prepare(
+            "SELECT id FROM {$this->table('orchestrator_page_metrics_daily')} WHERE client_id=%d AND page_path=%s AND metric_date=%s LIMIT 1",
+            (int) $dto['client_id'],
+            (string) $dto['page_path'],
+            (string) $dto['metric_date']
+        ));
+        $payload = [
+            'tenant_id' => (int) ($dto['tenant_id'] ?? 1),
+            'site_id' => (int) ($dto['site_id'] ?? 0) ?: null,
+            'client_id' => (int) $dto['client_id'],
+            'article_id' => (int) ($dto['article_id'] ?? 0) ?: null,
+            'page_url' => (string) ($dto['page_url'] ?? ''),
+            'page_path' => (string) $dto['page_path'],
+            'metric_date' => (string) $dto['metric_date'],
+            'clicks' => (float) ($dto['clicks'] ?? 0),
+            'impressions' => (float) ($dto['impressions'] ?? 0),
+            'ctr' => (float) ($dto['ctr'] ?? 0),
+            'avg_position' => (float) ($dto['avg_position'] ?? 0),
+            'sessions' => (float) ($dto['sessions'] ?? 0),
+            'source_quality' => max(0, min(1, (float) ($dto['source_quality'] ?? 0))),
+            'updated_at' => $this->now(),
+        ];
+        if ($existing_id > 0) {
+            $this->db->update($this->table('orchestrator_page_metrics_daily'), $payload, ['id' => $existing_id]);
+            return;
+        }
+
+        $payload['created_at'] = $this->now();
+        $this->db->insert($this->table('orchestrator_page_metrics_daily'), $payload);
+    }
+
+    private function ingest_wp_content_events(): void {
+        $posts = get_posts([
+            'post_type' => 'post',
+            'post_status' => ['publish', 'future', 'draft', 'pending', 'private'],
+            'posts_per_page' => 100,
+            'orderby' => 'modified',
+            'order' => 'DESC',
+            'date_query' => [
+                [
+                    'after' => gmdate('Y-m-d H:i:s', time() - DAY_IN_SECONDS),
+                    'column' => 'post_modified_gmt',
+                ],
+            ],
+        ]);
+        foreach ($posts as $post) {
+            $site_id = (int) $this->db->get_var($this->db->prepare(
+                "SELECT id FROM {$this->table('sites')} WHERE base_url LIKE %s LIMIT 1",
+                '%' . $this->db->esc_like((string) parse_url(get_permalink((int) $post->ID), PHP_URL_HOST)) . '%'
+            ));
+            $published = strtotime((string) $post->post_date_gmt) >= (time() - DAY_IN_SECONDS);
+            $event_type = $published ? 'content_published' : 'content_updated';
+            $this->log_orchestrator_event(1, $site_id, 0, 'url', $this->normalize_page_path((string) get_permalink((int) $post->ID)), $event_type, 'wp_content_connector', [
+                'post_id' => (int) $post->ID,
+                'post_status' => (string) $post->post_status,
+                'post_modified_gmt' => (string) $post->post_modified_gmt,
+            ]);
+        }
+    }
+
+    private function recompute_opportunities_for_client(int $client_id): void {
+        $rows = $this->db->get_results($this->db->prepare(
+            "SELECT page_path, MAX(page_url) AS page_url, MAX(site_id) AS site_id, MAX(article_id) AS article_id,
+                    SUM(CASE WHEN metric_date>=DATE_SUB(CURDATE(), INTERVAL 28 DAY) THEN clicks ELSE 0 END) AS clicks_28,
+                    SUM(CASE WHEN metric_date>=DATE_SUB(CURDATE(), INTERVAL 28 DAY) THEN impressions ELSE 0 END) AS impr_28,
+                    AVG(CASE WHEN metric_date>=DATE_SUB(CURDATE(), INTERVAL 28 DAY) THEN ctr END) AS ctr_28,
+                    AVG(CASE WHEN metric_date>=DATE_SUB(CURDATE(), INTERVAL 28 DAY) THEN avg_position END) AS pos_28,
+                    SUM(CASE WHEN metric_date>=DATE_SUB(CURDATE(), INTERVAL 28 DAY) THEN sessions ELSE 0 END) AS sessions_28,
+                    SUM(CASE WHEN metric_date<DATE_SUB(CURDATE(), INTERVAL 28 DAY) AND metric_date>=DATE_SUB(CURDATE(), INTERVAL 56 DAY) THEN clicks ELSE 0 END) AS clicks_prev_28,
+                    AVG(source_quality) AS source_quality
+             FROM {$this->table('orchestrator_page_metrics_daily')}
+             WHERE client_id=%d
+             GROUP BY page_path
+             HAVING impr_28 > 0
+             ORDER BY impr_28 DESC
+             LIMIT 250",
+            $client_id
+        ));
+
+        foreach ((array) $rows as $row) {
+            $score_data = $this->calculate_opportunity_score([
+                'impressions_28' => (float) ($row->impr_28 ?? 0),
+                'ctr_28' => (float) ($row->ctr_28 ?? 0),
+                'position_28' => (float) ($row->pos_28 ?? 0),
+                'clicks_28' => (float) ($row->clicks_28 ?? 0),
+                'clicks_prev_28' => (float) ($row->clicks_prev_28 ?? 0),
+                'source_quality' => (float) ($row->source_quality ?? 0),
+            ]);
+            $this->upsert_opportunity_row($client_id, $row, $score_data);
+        }
+    }
+
+    private function calculate_opportunity_score(array $input): array {
+        $impressions = max(0.0, (float) ($input['impressions_28'] ?? 0));
+        $ctr = max(0.0, min(1.0, (float) ($input['ctr_28'] ?? 0)));
+        $position = max(0.0, (float) ($input['position_28'] ?? 0));
+        $clicks = max(0.0, (float) ($input['clicks_28'] ?? 0));
+        $clicks_prev = max(0.0, (float) ($input['clicks_prev_28'] ?? 0));
+        $source_quality = max(0.0, min(1.0, (float) ($input['source_quality'] ?? 0)));
+
+        $potential_norm = min(1.0, log(1 + $impressions) / log(1 + 50000));
+        $target_ctr = $position > 0 ? max(0.02, min(0.35, 0.32 - (($position - 1) * 0.015))) : 0.12;
+        $ctr_gap = max(0.0, min(1.0, ($target_ctr - $ctr) / max(0.01, $target_ctr)));
+        $position_factor = ($position >= 4 && $position <= 20) ? 1.0 : (($position > 20 && $position <= 35) ? 0.5 : 0.2);
+        $trend = ($clicks_prev > 0) ? (($clicks - $clicks_prev) / $clicks_prev) : 0.0;
+        $decline_factor = max(0.0, min(1.0, -$trend));
+
+        $score = (($potential_norm * 0.35) + ($ctr_gap * 0.30) + ($position_factor * 0.20) + ($decline_factor * 0.15)) * 100;
+        $score = round(max(0.0, min(100.0, $score)), 2);
+        $confidence = round(max(0.05, min(1.0, $source_quality)), 4);
+
+        $quick_reason = 'CTR-gap met rankingkans';
+        if ($decline_factor >= 0.35) {
+            $quick_reason = 'Dalende clicks met herstelpotentieel';
+        } elseif ($position_factor < 0.5) {
+            $quick_reason = 'Veel impressies buiten quick-win band';
+        }
+
+        return [
+            'score' => $score,
+            'confidence' => $confidence,
+            'quick_reason' => $quick_reason,
+            'breakdown' => [
+                'potential_norm' => round($potential_norm, 4),
+                'ctr_gap' => round($ctr_gap, 4),
+                'position_factor' => round($position_factor, 4),
+                'decline_factor' => round($decline_factor, 4),
+                'target_ctr' => round($target_ctr, 4),
+            ],
+        ];
+    }
+
+    private function upsert_opportunity_row(int $client_id, object $row, array $score_data): void {
+        $page_path = (string) ($row->page_path ?? '');
+        if ($page_path === '') {
+            return;
+        }
+        $existing_id = (int) $this->db->get_var($this->db->prepare(
+            "SELECT id FROM {$this->table('orchestrator_opportunities')} WHERE client_id=%d AND page_path=%s LIMIT 1",
+            $client_id,
+            $page_path
+        ));
+        $payload = [
+            'tenant_id' => 1,
+            'site_id' => (int) ($row->site_id ?? 0) ?: null,
+            'client_id' => $client_id,
+            'article_id' => (int) ($row->article_id ?? 0) ?: null,
+            'page_url' => (string) ($row->page_url ?? ''),
+            'page_path' => $page_path,
+            'score' => (float) ($score_data['score'] ?? 0),
+            'confidence' => (float) ($score_data['confidence'] ?? 0),
+            'quick_reason' => (string) ($score_data['quick_reason'] ?? ''),
+            'score_breakdown' => wp_json_encode($score_data['breakdown'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            'status' => 'open',
+            'updated_at' => $this->now(),
+        ];
+        if ($existing_id > 0) {
+            $this->db->update($this->table('orchestrator_opportunities'), $payload, ['id' => $existing_id]);
+        } else {
+            $payload['created_at'] = $this->now();
+            $this->db->insert($this->table('orchestrator_opportunities'), $payload);
+        }
+    }
+
+    private function log_orchestrator_event(int $tenant_id, int $site_id, int $client_id, string $object_type, string $object_id, string $event_type, string $actor_source, array $payload = []): void {
+        $this->db->insert($this->table('orchestrator_events'), [
+            'tenant_id' => max(1, $tenant_id),
+            'site_id' => $site_id > 0 ? $site_id : null,
+            'client_id' => $client_id > 0 ? $client_id : null,
+            'object_type' => sanitize_key($object_type),
+            'object_id' => sanitize_text_field($object_id),
+            'event_type' => sanitize_key($event_type),
+            'actor_source' => sanitize_key($actor_source),
+            'payload' => $payload ? wp_json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null,
+            'event_time' => $this->now(),
+            'created_at' => $this->now(),
+        ]);
+    }
+
+    private function get_url_events(int $client_id, string $page_path, int $days = 14): array {
+        $page_path = $this->normalize_page_path($page_path);
+        if ($client_id <= 0 || $page_path === '') {
+            return [];
+        }
+        return (array) $this->db->get_results($this->db->prepare(
+            "SELECT * FROM {$this->table('orchestrator_events')}
+             WHERE client_id=%d AND object_type='url' AND object_id=%s
+               AND event_time>=DATE_SUB(NOW(), INTERVAL %d DAY)
+             ORDER BY event_time DESC LIMIT 100",
+            $client_id,
+            $page_path,
+            max(1, $days)
+        ));
+    }
+
+    private function explain_page_change(int $client_id, string $page_path, int $days = 14): array {
+        $page_path = $this->normalize_page_path($page_path);
+        if ($client_id <= 0 || $page_path === '') {
+            return [
+                'primary_reason' => 'Niet genoeg context.',
+                'supporting_signals' => [],
+                'confidence' => 0.1,
+                'recommended_next_action' => 'Selecteer eerst een geldige klant en pagina.',
+            ];
+        }
+
+        $recent = $this->db->get_row($this->db->prepare(
+            "SELECT SUM(clicks) AS clicks, AVG(ctr) AS ctr, AVG(avg_position) AS pos
+             FROM {$this->table('orchestrator_page_metrics_daily')}
+             WHERE client_id=%d AND page_path=%s AND metric_date>=DATE_SUB(CURDATE(), INTERVAL %d DAY)",
+            $client_id,
+            $page_path,
+            max(2, $days)
+        ));
+        $previous = $this->db->get_row($this->db->prepare(
+            "SELECT SUM(clicks) AS clicks, AVG(ctr) AS ctr, AVG(avg_position) AS pos
+             FROM {$this->table('orchestrator_page_metrics_daily')}
+             WHERE client_id=%d AND page_path=%s
+               AND metric_date<DATE_SUB(CURDATE(), INTERVAL %d DAY)
+               AND metric_date>=DATE_SUB(CURDATE(), INTERVAL %d DAY)",
+            $client_id,
+            $page_path,
+            max(2, $days),
+            max(4, $days * 2)
+        ));
+        $recent_clicks = (float) ($recent->clicks ?? 0);
+        $prev_clicks = (float) ($previous->clicks ?? 0);
+        $delta_clicks = $prev_clicks > 0 ? (($recent_clicks - $prev_clicks) / $prev_clicks) : 0;
+        $events = $this->get_url_events($client_id, $page_path, $days);
+
+        $primary_reason = 'Stabiele trend zonder duidelijke trigger';
+        $next_action = 'Monitor nog 7 dagen en optimaliseer title/meta op CTR.';
+        $confidence = 0.45;
+        $signals = [];
+
+        if ($delta_clicks <= -0.15) {
+            $primary_reason = 'Click-daling in recente periode';
+            $next_action = 'Start refresh-task met focus op intent alignment en snippet verbeteringen.';
+            $confidence = 0.62;
+            $signals[] = 'Clicks veranderden met ' . round($delta_clicks * 100, 2) . '%.';
+        } elseif ($delta_clicks >= 0.15) {
+            $primary_reason = 'Click-groei in recente periode';
+            $next_action = 'Schaal wat werkt: voeg interne links toe vanaf relevante pagina’s.';
+            $confidence = 0.58;
+            $signals[] = 'Clicks stegen met ' . round($delta_clicks * 100, 2) . '%.';
+        }
+
+        if (!empty($events)) {
+            $latest_event = $events[0];
+            $signals[] = 'Laatste event: ' . (string) ($latest_event->event_type ?? 'unknown') . ' op ' . (string) ($latest_event->event_time ?? '');
+            if (in_array((string) ($latest_event->event_type ?? ''), ['content_updated', 'content_published'], true)) {
+                $confidence = min(0.85, $confidence + 0.15);
+            }
+        }
+
+        return [
+            'primary_reason' => $primary_reason,
+            'supporting_signals' => $signals,
+            'confidence' => round($confidence, 2),
+            'recommended_next_action' => $next_action,
+        ];
+    }
+
+    public function render_intelligence(): void {
+        $client_id = max(0, (int) ($_GET['client_id'] ?? 0));
+        $selected_path = $this->normalize_page_path(sanitize_text_field((string) ($_GET['page_path'] ?? '')));
+        $clients = $this->db->get_results("SELECT id, name FROM {$this->table('clients')} ORDER BY name ASC");
+
+        $rows = [];
+        if ($client_id > 0) {
+            $rows = $this->db->get_results($this->db->prepare(
+                "SELECT * FROM {$this->table('orchestrator_opportunities')} WHERE client_id=%d AND status='open' ORDER BY score DESC, id DESC LIMIT 100",
+                $client_id
+            ));
+        }
+
+        $selected = null;
+        if ($client_id > 0 && $selected_path !== '') {
+            $selected = $this->db->get_row($this->db->prepare(
+                "SELECT * FROM {$this->table('orchestrator_opportunities')} WHERE client_id=%d AND page_path=%s LIMIT 1",
+                $client_id,
+                $selected_path
+            ));
+        } elseif (!empty($rows)) {
+            $selected = $rows[0];
+            $selected_path = (string) ($selected->page_path ?? '');
+        }
+
+        $history = [];
+        $events = [];
+        $explanation = null;
+        if ($client_id > 0 && $selected_path !== '') {
+            $history = $this->db->get_results($this->db->prepare(
+                "SELECT metric_date, clicks, impressions, ctr, avg_position, sessions
+                 FROM {$this->table('orchestrator_page_metrics_daily')}
+                 WHERE client_id=%d AND page_path=%s
+                 ORDER BY metric_date DESC LIMIT 30",
+                $client_id,
+                $selected_path
+            ));
+            $events = $this->get_url_events($client_id, $selected_path, 21);
+            $explanation = $this->explain_page_change($client_id, $selected_path, 14);
+        }
+
+        $connectors = $this->get_connector_registry();
+        ?>
+        <div class="wrap">
+            <h1>Intelligence</h1>
+            <?php $this->render_admin_notice(); ?>
+            <p><strong>Connector registry:</strong>
+                <?php foreach ($connectors as $key => $connector) : ?>
+                    <span style="margin-right:10px;"><?php echo esc_html((string) $connector['label']); ?> <?php echo !empty($connector['enabled']) ? '✅' : '⚠️'; ?></span>
+                <?php endforeach; ?>
+            </p>
+
+            <form method="get" style="margin-bottom:12px;">
+                <input type="hidden" name="page" value="sch-intelligence">
+                <label>Klant
+                    <select name="client_id">
+                        <option value="0">-- kies klant --</option>
+                        <?php foreach ((array) $clients as $client) : ?>
+                            <option value="<?php echo (int) $client->id; ?>" <?php selected($client_id, (int) $client->id); ?>><?php echo esc_html((string) $client->name); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <button class="button button-primary">Filter</button>
+            </form>
+
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-bottom:16px;">
+                <?php wp_nonce_field('sch_run_intelligence_ingest'); ?>
+                <input type="hidden" name="action" value="sch_run_intelligence_ingest">
+                <input type="hidden" name="client_id" value="<?php echo (int) $client_id; ?>">
+                <button class="button">Run ingest now</button>
+            </form>
+
+            <div class="sch-two-col">
+                <div class="sch-card">
+                    <h2>Opportunity Queue</h2>
+                    <table class="widefat striped">
+                        <thead><tr><th>Pagina</th><th>Score</th><th>Confidence</th><th>Reason</th><th>Acties</th></tr></thead>
+                        <tbody>
+                        <?php if ($rows) : foreach ($rows as $row) : ?>
+                            <tr>
+                                <td>
+                                    <a href="<?php echo esc_url(add_query_arg(['page' => 'sch-intelligence', 'client_id' => $client_id, 'page_path' => rawurlencode((string) $row->page_path)], admin_url('admin.php'))); ?>">
+                                        <code><?php echo esc_html((string) $row->page_path); ?></code>
+                                    </a>
+                                </td>
+                                <td><?php echo esc_html((string) round((float) $row->score, 2)); ?></td>
+                                <td><?php echo esc_html((string) round((float) $row->confidence, 2)); ?></td>
+                                <td><?php echo esc_html((string) $row->quick_reason); ?></td>
+                                <td>
+                                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
+                                        <?php wp_nonce_field('sch_create_intelligence_task'); ?>
+                                        <input type="hidden" name="action" value="sch_create_intelligence_task">
+                                        <input type="hidden" name="opportunity_id" value="<?php echo (int) $row->id; ?>">
+                                        <input type="hidden" name="task_type" value="create_refresh_task">
+                                        <button class="button">Refresh task</button>
+                                    </form>
+                                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
+                                        <?php wp_nonce_field('sch_create_intelligence_task'); ?>
+                                        <input type="hidden" name="action" value="sch_create_intelligence_task">
+                                        <input type="hidden" name="opportunity_id" value="<?php echo (int) $row->id; ?>">
+                                        <input type="hidden" name="task_type" value="create_internal_link_review_task">
+                                        <button class="button">Internal links</button>
+                                    </form>
+                                </td>
+                            </tr>
+                        <?php endforeach; else : ?>
+                            <tr><td colspan="5">Geen opportunities gevonden voor selectie.</td></tr>
+                        <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="sch-card">
+                    <h2>URL Detail</h2>
+                    <?php if ($selected_path === '') : ?>
+                        <p>Selecteer eerst een opportunity.</p>
+                    <?php else : ?>
+                        <p><strong>Pagina:</strong> <code><?php echo esc_html($selected_path); ?></code></p>
+                        <?php if ($explanation) : ?>
+                            <p><strong>Explanation:</strong> <?php echo esc_html((string) ($explanation['primary_reason'] ?? '')); ?> (confidence: <?php echo esc_html((string) ($explanation['confidence'] ?? '0')); ?>)</p>
+                            <?php if (!empty($explanation['supporting_signals'])) : ?>
+                                <ul><?php foreach ((array) $explanation['supporting_signals'] as $signal) : ?><li><?php echo esc_html((string) $signal); ?></li><?php endforeach; ?></ul>
+                            <?php endif; ?>
+                            <p><strong>Recommended action:</strong> <?php echo esc_html((string) ($explanation['recommended_next_action'] ?? '')); ?></p>
+                        <?php endif; ?>
+
+                        <h3>Metrics (laatste 30 dagen)</h3>
+                        <table class="widefat striped">
+                            <thead><tr><th>Datum</th><th>Clicks</th><th>Impr.</th><th>CTR</th><th>Pos</th><th>Sessions</th></tr></thead>
+                            <tbody><?php if ($history) : foreach ($history as $h) : ?><tr><td><?php echo esc_html((string) $h->metric_date); ?></td><td><?php echo esc_html((string) round((float) $h->clicks)); ?></td><td><?php echo esc_html((string) round((float) $h->impressions)); ?></td><td><?php echo esc_html((string) round(((float) $h->ctr) * 100, 2)); ?>%</td><td><?php echo esc_html((string) round((float) $h->avg_position, 2)); ?></td><td><?php echo esc_html((string) round((float) $h->sessions)); ?></td></tr><?php endforeach; else : ?><tr><td colspan="6">Geen metrics.</td></tr><?php endif; ?></tbody>
+                        </table>
+
+                        <h3>Event timeline</h3>
+                        <table class="widefat striped">
+                            <thead><tr><th>Tijd</th><th>Type</th><th>Source</th><th>Payload</th></tr></thead>
+                            <tbody>
+                            <?php if ($events) : foreach ($events as $event) : ?>
+                                <tr>
+                                    <td><?php echo esc_html((string) $event->event_time); ?></td>
+                                    <td><?php echo esc_html((string) $event->event_type); ?></td>
+                                    <td><?php echo esc_html((string) $event->actor_source); ?></td>
+                                    <td class="sch-log-payload"><?php echo esc_html((string) $event->payload); ?></td>
+                                </tr>
+                            <?php endforeach; else : ?>
+                                <tr><td colspan="4">Geen events gevonden.</td></tr>
+                            <?php endif; ?>
+                            </tbody>
+                        </table>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+        <?php
     }
 
     private function sanitize_blog_categories(array $categories): array {
