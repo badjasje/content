@@ -760,13 +760,15 @@ final class SCH_Orchestrator {
             object_id VARCHAR(191) NOT NULL DEFAULT '',
             event_type VARCHAR(100) NOT NULL DEFAULT '',
             actor_source VARCHAR(100) NOT NULL DEFAULT '',
+            fingerprint VARCHAR(64) NULL,
             payload LONGTEXT NULL,
             event_time DATETIME NOT NULL,
             created_at DATETIME NOT NULL,
             PRIMARY KEY (id),
             KEY tenant_site_time (tenant_id, site_id, event_time),
             KEY client_object_time (client_id, object_type, object_id, event_time),
-            KEY event_type_time (event_type, event_time)
+            KEY event_type_time (event_type, event_time),
+            UNIQUE KEY fingerprint_unique (fingerprint)
         ) {$charset};");
 
         dbDelta("CREATE TABLE {$orchestrator_page_metrics_daily} (
@@ -9513,17 +9515,20 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             ],
         ]);
         foreach ($posts as $post) {
+            $page_path = $this->normalize_page_path((string) get_permalink((int) $post->ID));
             $site_id = (int) $this->db->get_var($this->db->prepare(
                 "SELECT id FROM {$this->table('sites')} WHERE base_url LIKE %s LIMIT 1",
                 '%' . $this->db->esc_like((string) parse_url(get_permalink((int) $post->ID), PHP_URL_HOST)) . '%'
             ));
             $published = strtotime((string) $post->post_date_gmt) >= (time() - DAY_IN_SECONDS);
             $event_type = $published ? 'content_published' : 'content_updated';
-            $this->log_orchestrator_event(1, $site_id, 0, 'url', $this->normalize_page_path((string) get_permalink((int) $post->ID)), $event_type, 'wp_content_connector', [
+            $post_modified_gmt = (string) $post->post_modified_gmt;
+            $fingerprint = md5($event_type . '|' . $page_path . '|' . $post_modified_gmt);
+            $this->log_orchestrator_event(1, $site_id, 0, 'url', $page_path, $event_type, 'wp_content_connector', [
                 'post_id' => (int) $post->ID,
                 'post_status' => (string) $post->post_status,
-                'post_modified_gmt' => (string) $post->post_modified_gmt,
-            ]);
+                'post_modified_gmt' => $post_modified_gmt,
+            ], $fingerprint);
         }
     }
 
@@ -9631,7 +9636,20 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
     }
 
-    private function log_orchestrator_event(int $tenant_id, int $site_id, int $client_id, string $object_type, string $object_id, string $event_type, string $actor_source, array $payload = []): void {
+    private function log_orchestrator_event(int $tenant_id, int $site_id, int $client_id, string $object_type, string $object_id, string $event_type, string $actor_source, array $payload = [], ?string $fingerprint = null): void {
+        $fingerprint = $fingerprint !== null ? strtolower(trim($fingerprint)) : null;
+        if ($fingerprint !== null && $fingerprint !== '') {
+            $exists = (int) $this->db->get_var($this->db->prepare(
+                "SELECT id FROM {$this->table('orchestrator_events')} WHERE fingerprint=%s LIMIT 1",
+                $fingerprint
+            ));
+            if ($exists > 0) {
+                return;
+            }
+        } else {
+            $fingerprint = null;
+        }
+
         $this->db->insert($this->table('orchestrator_events'), [
             'tenant_id' => max(1, $tenant_id),
             'site_id' => $site_id > 0 ? $site_id : null,
@@ -9640,6 +9658,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'object_id' => sanitize_text_field($object_id),
             'event_type' => sanitize_key($event_type),
             'actor_source' => sanitize_key($actor_source),
+            'fingerprint' => $fingerprint,
             'payload' => $payload ? wp_json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null,
             'event_time' => $this->now(),
             'created_at' => $this->now(),
@@ -9652,10 +9671,18 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             return [];
         }
         return (array) $this->db->get_results($this->db->prepare(
-            "SELECT * FROM {$this->table('orchestrator_events')}
-             WHERE client_id=%d AND object_type='url' AND object_id=%s
-               AND event_time>=DATE_SUB(NOW(), INTERVAL %d DAY)
-             ORDER BY event_time DESC LIMIT 100",
+            "SELECT e.*
+               FROM {$this->table('orchestrator_events')} e
+               INNER JOIN (
+                   SELECT MAX(id) AS id
+                     FROM {$this->table('orchestrator_events')}
+                    WHERE client_id=%d
+                      AND object_type='url'
+                      AND object_id=%s
+                      AND event_time>=DATE_SUB(NOW(), INTERVAL %d DAY)
+                    GROUP BY event_time, event_type
+               ) grouped ON grouped.id=e.id
+             ORDER BY e.event_time DESC LIMIT 100",
             $client_id,
             $page_path,
             max(1, $days)
