@@ -140,6 +140,7 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_complete_intelligence_task', [$this, 'handle_complete_intelligence_task']);
         add_action('admin_post_sch_run_intelligence_ingest', [$this, 'handle_run_intelligence_ingest']);
         add_action('rest_api_init', [$this, 'register_intelligence_rest_routes']);
+        add_action('rest_api_init', [$this, 'register_frontend_rest_routes']);
         add_action('admin_post_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
         add_action('admin_post_nopriv_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
 
@@ -229,6 +230,30 @@ final class SCH_Orchestrator {
         wp_register_script('sch-admin-inline', '', [], false, true);
         wp_enqueue_script('sch-admin-inline');
         wp_add_inline_script('sch-admin-inline', $js);
+
+        $page = isset($_GET['page']) ? sanitize_key((string) wp_unslash($_GET['page'])) : '';
+        if ($page === 'sch-app') {
+            $base_url = plugin_dir_url(__FILE__) . 'frontend/';
+            wp_enqueue_style(
+                'sch-frontend-app',
+                $base_url . 'app.css',
+                [],
+                self::VERSION
+            );
+            wp_enqueue_script(
+                'sch-frontend-app',
+                $base_url . 'app.js',
+                [],
+                self::VERSION,
+                true
+            );
+            wp_script_add_data('sch-frontend-app', 'type', 'module');
+            wp_localize_script('sch-frontend-app', 'SCH_APP_CONFIG', [
+                'restBase' => esc_url_raw(rest_url('sch/v1/app')),
+                'restNonce' => wp_create_nonce('wp_rest'),
+                'adminUrl' => esc_url_raw(admin_url()),
+            ]);
+        }
     }
 
     private function schedule_cron(): void {
@@ -921,6 +946,7 @@ final class SCH_Orchestrator {
     public function admin_menu(): void {
         add_menu_page('Content Hub', 'Content Hub', 'manage_options', 'sch-content-hub', [$this, 'render_dashboard'], 'dashicons-admin-site-alt3', 56);
         add_submenu_page('sch-content-hub', 'Dashboard', 'Dashboard', 'manage_options', 'sch-content-hub', [$this, 'render_dashboard']);
+        add_submenu_page('sch-content-hub', 'App', 'App', 'manage_options', 'sch-app', [$this, 'render_frontend_app']);
         add_submenu_page('sch-content-hub', 'Klanten', 'Klanten', 'manage_options', 'sch-clients', [$this, 'render_clients']);
         add_submenu_page('sch-content-hub', 'Blogs', 'Blogs', 'manage_options', 'sch-sites', [$this, 'render_sites']);
         add_submenu_page('sch-content-hub', 'Keywords', 'Keywords', 'manage_options', 'sch-keywords', [$this, 'render_keywords']);
@@ -964,6 +990,10 @@ final class SCH_Orchestrator {
             'sch-content-hub' => [
                 'title' => 'Dashboard',
                 'text' => 'Hier zie je direct de status van de pipeline: hoeveel jobs in de wachtrij staan, draaien, op redactie wachten, gepubliceerd zijn of zijn mislukt. Je kunt vanaf deze pagina ook direct de worker handmatig starten.',
+            ],
+            'sch-app' => [
+                'title' => 'App',
+                'text' => 'Deze moderne app-shell bundelt dashboard, keyword-optimalisatie, technical issues, queue en instellingen op één plek bovenop bestaande plugin-data en acties.',
             ],
             'sch-clients' => [
                 'title' => 'Klanten',
@@ -1067,6 +1097,17 @@ final class SCH_Orchestrator {
                 <button class="button button-primary">Worker nu draaien</button>
             </form>
             <p style="margin-top:20px;">Gebruik daarnaast een echte server cron die iedere minuut wp-cron.php aanroept.</p>
+        </div>
+        <?php
+    }
+
+    public function render_frontend_app(): void {
+        ?>
+        <div class="wrap">
+            <h1>Content Hub App</h1>
+            <?php $this->render_admin_notice(); ?>
+            <div id="sch-frontend-app-root"></div>
+            <noscript>Deze app vereist JavaScript om te laden.</noscript>
         </div>
         <?php
     }
@@ -2312,6 +2353,62 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     'sanitize_callback' => 'absint',
                 ],
             ],
+        ]);
+    }
+
+    public function register_frontend_rest_routes(): void {
+        register_rest_route('sch/v1/app', '/bootstrap', [
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => [$this, 'rest_frontend_bootstrap'],
+            'permission_callback' => [$this, 'rest_can_access_intelligence_read'],
+        ]);
+
+        register_rest_route('sch/v1/app', '/keywords', [
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => [$this, 'rest_frontend_keywords'],
+            'permission_callback' => [$this, 'rest_can_access_intelligence_read'],
+        ]);
+
+        register_rest_route('sch/v1/app', '/keywords/(?P<id>\d+)', [
+            'methods' => WP_REST_Server::EDITABLE,
+            'callback' => [$this, 'rest_frontend_update_keyword'],
+            'permission_callback' => [$this, 'rest_can_access_intelligence_write'],
+        ]);
+
+        register_rest_route('sch/v1/app', '/issues', [
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => [$this, 'rest_frontend_issues'],
+            'permission_callback' => [$this, 'rest_can_access_intelligence_read'],
+        ]);
+
+        register_rest_route('sch/v1/app', '/issues/(?P<type>[a-zA-Z0-9_-]+)/(?P<id>\d+)', [
+            'methods' => WP_REST_Server::EDITABLE,
+            'callback' => [$this, 'rest_frontend_issue_status'],
+            'permission_callback' => [$this, 'rest_can_access_intelligence_write'],
+        ]);
+
+        register_rest_route('sch/v1/app', '/queue', [
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => [$this, 'rest_frontend_queue'],
+            'permission_callback' => [$this, 'rest_can_access_intelligence_read'],
+        ]);
+
+        register_rest_route('sch/v1/app', '/queue/run-worker', [
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => [$this, 'rest_frontend_run_worker'],
+            'permission_callback' => [$this, 'rest_can_access_intelligence_write'],
+        ]);
+
+        register_rest_route('sch/v1/app', '/settings', [
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => [$this, 'rest_frontend_settings'],
+            'permission_callback' => [$this, 'rest_can_access_intelligence_read'],
+        ]);
+
+        register_rest_route('sch/v1/app', '/settings', [
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => [$this, 'rest_frontend_save_settings'],
+            'permission_callback' => [$this, 'rest_can_access_intelligence_write'],
         ]);
     }
 
@@ -9491,6 +9588,283 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
 
         return new WP_REST_Response($task, 201);
+    }
+
+    public function rest_frontend_bootstrap(): WP_REST_Response {
+        $jobs_table = $this->table('jobs');
+        $keywords_table = $this->table('keywords');
+        $clients_table = $this->table('clients');
+        $sites_table = $this->table('sites');
+        $feedback_table = $this->table('feedback_signals');
+        $serp_table = $this->table('serp_signals');
+
+        $job_rows = (array) $this->db->get_results(
+            "SELECT status, COUNT(*) AS total FROM {$jobs_table} GROUP BY status",
+            ARRAY_A
+        );
+        $job_totals = [
+            'queued' => 0,
+            'running' => 0,
+            'awaiting_approval' => 0,
+            'published' => 0,
+            'failed' => 0,
+        ];
+        foreach ($job_rows as $row) {
+            $status = sanitize_key((string) ($row['status'] ?? ''));
+            $job_totals[$status] = (int) ($row['total'] ?? 0);
+        }
+
+        $keyword_rows = (array) $this->db->get_results(
+            "SELECT lifecycle_status, COUNT(*) AS total FROM {$keywords_table} GROUP BY lifecycle_status",
+            ARRAY_A
+        );
+        $keyword_totals = ['active' => 0, 'trashed' => 0];
+        foreach ($keyword_rows as $row) {
+            $status = sanitize_key((string) ($row['lifecycle_status'] ?? ''));
+            $keyword_totals[$status] = (int) ($row['total'] ?? 0);
+        }
+
+        $clients = (array) $this->db->get_results("SELECT id, name FROM {$clients_table} WHERE is_active=1 ORDER BY name ASC", ARRAY_A);
+        $issue_feedback_open = (int) $this->db->get_var("SELECT COUNT(*) FROM {$feedback_table} WHERE status='open'");
+        $issue_serp_open = (int) $this->db->get_var("SELECT COUNT(*) FROM {$serp_table} WHERE status='open'");
+
+        return new WP_REST_Response([
+            'metrics' => [
+                'jobs' => $job_totals,
+                'keywords' => $keyword_totals,
+                'clients_active' => (int) $this->db->get_var("SELECT COUNT(*) FROM {$clients_table} WHERE is_active=1"),
+                'sites_active' => (int) $this->db->get_var("SELECT COUNT(*) FROM {$sites_table} WHERE is_active=1"),
+                'open_issues' => $issue_feedback_open + $issue_serp_open,
+            ],
+            'clients' => $clients,
+            'integrations' => [
+                'gsc_enabled' => get_option(self::OPTION_GSC_ENABLED, '0') === '1',
+                'ga_enabled' => get_option(self::OPTION_GA_ENABLED, '0') === '1',
+                'serp_provider' => (string) get_option(self::OPTION_SERP_PROVIDER, 'dataforseo'),
+            ],
+        ], 200);
+    }
+
+    public function rest_frontend_keywords(WP_REST_Request $request): WP_REST_Response {
+        $search = sanitize_text_field((string) $request->get_param('search'));
+        $lifecycle = sanitize_key((string) $request->get_param('lifecycle_status'));
+        $limit = max(1, min(200, (int) $request->get_param('per_page')));
+        if ($limit <= 1) {
+            $limit = 50;
+        }
+
+        $where = ['1=1'];
+        $params = [];
+        if ($search !== '') {
+            $where[] = '(k.main_keyword LIKE %s OR c.name LIKE %s)';
+            $like = '%' . $this->db->esc_like($search) . '%';
+            $params[] = $like;
+            $params[] = $like;
+        }
+        if (in_array($lifecycle, ['active', 'trashed'], true)) {
+            $where[] = 'k.lifecycle_status=%s';
+            $params[] = $lifecycle;
+        }
+
+        $sql = "SELECT k.id, k.client_id, c.name AS client_name, k.main_keyword, k.content_type, k.priority, k.status, k.lifecycle_status, k.updated_at
+                FROM {$this->table('keywords')} k
+                LEFT JOIN {$this->table('clients')} c ON c.id=k.client_id
+                WHERE " . implode(' AND ', $where) . "
+                ORDER BY k.updated_at DESC
+                LIMIT %d";
+        $params[] = $limit;
+
+        $prepared = $this->db->prepare($sql, ...$params);
+        $rows = (array) $this->db->get_results($prepared, ARRAY_A);
+        return new WP_REST_Response([
+            'items' => $rows,
+            'count' => count($rows),
+        ], 200);
+    }
+
+    public function rest_frontend_update_keyword(WP_REST_Request $request): WP_REST_Response {
+        $keyword_id = max(0, (int) $request['id']);
+        if ($keyword_id <= 0) {
+            return new WP_REST_Response(['message' => 'Ongeldig keyword ID.'], 400);
+        }
+
+        $keyword = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('keywords')} WHERE id=%d", $keyword_id));
+        if (!$keyword) {
+            return new WP_REST_Response(['message' => 'Keyword niet gevonden.'], 404);
+        }
+
+        $payload = (array) $request->get_json_params();
+        $update = ['updated_at' => $this->now()];
+        if (isset($payload['priority'])) {
+            $update['priority'] = max(0, min(999, (int) $payload['priority']));
+        }
+        if (isset($payload['status'])) {
+            $status = sanitize_key((string) $payload['status']);
+            if (in_array($status, ['queued', 'processing', 'done', 'failed'], true)) {
+                $update['status'] = $status;
+            }
+        }
+        if (isset($payload['lifecycle_status'])) {
+            $life = sanitize_key((string) $payload['lifecycle_status']);
+            if (in_array($life, ['active', 'trashed'], true)) {
+                $update['lifecycle_status'] = $life;
+            }
+        }
+        if (count($update) === 1) {
+            return new WP_REST_Response(['message' => 'Geen geldige velden om bij te werken.'], 400);
+        }
+
+        $updated = $this->db->update($this->table('keywords'), $update, ['id' => $keyword_id]);
+        if ($updated === false) {
+            return new WP_REST_Response(['message' => 'Keyword opslaan mislukt.'], 500);
+        }
+
+        return new WP_REST_Response(['success' => true, 'id' => $keyword_id], 200);
+    }
+
+    public function rest_frontend_issues(WP_REST_Request $request): WP_REST_Response {
+        $type = sanitize_key((string) $request->get_param('type'));
+        $status = sanitize_key((string) $request->get_param('status'));
+        $status = in_array($status, ['open', 'resolved', 'ignored'], true) ? $status : 'open';
+
+        $items = [];
+        if ($type === '' || $type === 'feedback') {
+            $rows = (array) $this->db->get_results($this->db->prepare(
+                "SELECT id, client_id, signal_type, severity, status, title, recommended_action, page_url, priority_score, updated_at
+                 FROM {$this->table('feedback_signals')}
+                 WHERE status=%s
+                 ORDER BY priority_score DESC, id DESC LIMIT 100",
+                $status
+            ), ARRAY_A);
+            foreach ($rows as $row) {
+                $row['type'] = 'feedback';
+                $items[] = $row;
+            }
+        }
+        if ($type === '' || $type === 'serp') {
+            $rows = (array) $this->db->get_results($this->db->prepare(
+                "SELECT id, client_id, signal_type, severity, status, title, recommended_action, page_url, priority_score, updated_at
+                 FROM {$this->table('serp_signals')}
+                 WHERE status=%s
+                 ORDER BY priority_score DESC, id DESC LIMIT 100",
+                $status
+            ), ARRAY_A);
+            foreach ($rows as $row) {
+                $row['type'] = 'serp';
+                $items[] = $row;
+            }
+        }
+
+        usort($items, static function ($a, $b) {
+            return (float) ($b['priority_score'] ?? 0) <=> (float) ($a['priority_score'] ?? 0);
+        });
+
+        return new WP_REST_Response(['items' => $items, 'count' => count($items)], 200);
+    }
+
+    public function rest_frontend_issue_status(WP_REST_Request $request): WP_REST_Response {
+        $id = max(0, (int) $request['id']);
+        $type = sanitize_key((string) $request['type']);
+        $payload = (array) $request->get_json_params();
+        $status = sanitize_key((string) ($payload['status'] ?? ''));
+        if (!in_array($status, ['open', 'resolved', 'ignored'], true)) {
+            return new WP_REST_Response(['message' => 'Ongeldige status.'], 400);
+        }
+
+        if ($type === 'feedback') {
+            $updated = $this->db->update($this->table('feedback_signals'), ['status' => $status, 'updated_at' => $this->now()], ['id' => $id]);
+        } elseif ($type === 'serp') {
+            $updated = $this->db->update($this->table('serp_signals'), ['status' => $status, 'updated_at' => $this->now()], ['id' => $id]);
+        } else {
+            return new WP_REST_Response(['message' => 'Ongeldig issue type.'], 400);
+        }
+
+        if ($updated === false) {
+            return new WP_REST_Response(['message' => 'Issue bijwerken mislukt.'], 500);
+        }
+
+        return new WP_REST_Response(['success' => true], 200);
+    }
+
+    public function rest_frontend_queue(): WP_REST_Response {
+        $jobs = (array) $this->db->get_results(
+            "SELECT id, job_type, status, attempts, created_at, updated_at FROM {$this->table('jobs')} ORDER BY id DESC LIMIT 100",
+            ARRAY_A
+        );
+        $tasks = (array) $this->db->get_results(
+            "SELECT id, task_type, status, client_id, page_path, created_at, updated_at FROM {$this->table('orchestrator_tasks')} ORDER BY id DESC LIMIT 100",
+            ARRAY_A
+        );
+
+        return new WP_REST_Response([
+            'jobs' => $jobs,
+            'tasks' => $tasks,
+        ], 200);
+    }
+
+    public function rest_frontend_run_worker(): WP_REST_Response {
+        $this->run_worker();
+        return new WP_REST_Response([
+            'success' => true,
+            'message' => 'Worker gestart.',
+        ], 200);
+    }
+
+    public function rest_frontend_settings(): WP_REST_Response {
+        return new WP_REST_Response([
+            'openai_model' => (string) get_option(self::OPTION_OPENAI_MODEL, 'gpt-5.4-mini'),
+            'openai_temperature' => (string) get_option(self::OPTION_OPENAI_TEMPERATURE, '0.6'),
+            'enable_featured_images' => get_option(self::OPTION_ENABLE_FEATURED_IMAGES, '1') === '1',
+            'enable_supporting' => get_option(self::OPTION_ENABLE_SUPPORTING, '1') === '1',
+            'enable_auto_discovery' => get_option(self::OPTION_ENABLE_AUTO_DISCOVERY, '0') === '1',
+            'gsc_enabled' => get_option(self::OPTION_GSC_ENABLED, '0') === '1',
+            'ga_enabled' => get_option(self::OPTION_GA_ENABLED, '0') === '1',
+            'random_machine_enabled' => get_option(self::OPTION_RANDOM_MACHINE_ENABLED, '0') === '1',
+            'random_daily_max' => (int) get_option(self::OPTION_RANDOM_DAILY_MAX, '10'),
+            'serp_provider' => (string) get_option(self::OPTION_SERP_PROVIDER, 'dataforseo'),
+        ], 200);
+    }
+
+    public function rest_frontend_save_settings(WP_REST_Request $request): WP_REST_Response {
+        $payload = (array) $request->get_json_params();
+
+        if (array_key_exists('openai_model', $payload)) {
+            update_option(self::OPTION_OPENAI_MODEL, sanitize_text_field((string) $payload['openai_model']));
+        }
+        if (array_key_exists('openai_temperature', $payload)) {
+            $temperature = (float) $payload['openai_temperature'];
+            update_option(self::OPTION_OPENAI_TEMPERATURE, (string) max(0.0, min(2.0, $temperature)));
+        }
+        if (array_key_exists('enable_featured_images', $payload)) {
+            update_option(self::OPTION_ENABLE_FEATURED_IMAGES, !empty($payload['enable_featured_images']) ? '1' : '0');
+        }
+        if (array_key_exists('enable_supporting', $payload)) {
+            update_option(self::OPTION_ENABLE_SUPPORTING, !empty($payload['enable_supporting']) ? '1' : '0');
+        }
+        if (array_key_exists('enable_auto_discovery', $payload)) {
+            update_option(self::OPTION_ENABLE_AUTO_DISCOVERY, !empty($payload['enable_auto_discovery']) ? '1' : '0');
+        }
+        if (array_key_exists('gsc_enabled', $payload)) {
+            update_option(self::OPTION_GSC_ENABLED, !empty($payload['gsc_enabled']) ? '1' : '0');
+        }
+        if (array_key_exists('ga_enabled', $payload)) {
+            update_option(self::OPTION_GA_ENABLED, !empty($payload['ga_enabled']) ? '1' : '0');
+        }
+        if (array_key_exists('random_machine_enabled', $payload)) {
+            update_option(self::OPTION_RANDOM_MACHINE_ENABLED, !empty($payload['random_machine_enabled']) ? '1' : '0');
+        }
+        if (array_key_exists('random_daily_max', $payload)) {
+            update_option(self::OPTION_RANDOM_DAILY_MAX, (string) max(1, min(100, (int) $payload['random_daily_max'])));
+        }
+        if (array_key_exists('serp_provider', $payload)) {
+            $provider = sanitize_key((string) $payload['serp_provider']);
+            if (!in_array($provider, ['dataforseo', 'none'], true)) {
+                $provider = 'dataforseo';
+            }
+            update_option(self::OPTION_SERP_PROVIDER, $provider);
+        }
+
+        return new WP_REST_Response(['success' => true], 200);
     }
 
     private function map_external_task_type_to_internal(string $task_type): string {
