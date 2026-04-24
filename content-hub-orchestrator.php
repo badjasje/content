@@ -355,6 +355,7 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_ga_save_property', [$this, 'handle_ga_save_property']);
         add_action('admin_post_sch_mark_signal_resolved', [$this, 'mark_signal_resolved']);
         add_action('admin_post_sch_mark_signal_ignored', [$this, 'mark_signal_ignored']);
+        add_action('admin_post_sch_generate_feedback_ai_suggestion', [$this, 'handle_generate_feedback_ai_suggestion']);
         add_action('admin_post_sch_mark_serp_signal_resolved', [$this, 'mark_serp_signal_resolved']);
         add_action('admin_post_sch_mark_serp_signal_ignored', [$this, 'mark_serp_signal_ignored']);
         add_action('admin_post_sch_create_intelligence_task', [$this, 'handle_create_intelligence_task']);
@@ -10144,6 +10145,130 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $this->redirect_with_message('sch-feedback', 'Signaal gemarkeerd als ignored.');
     }
 
+    public function handle_generate_feedback_ai_suggestion(): void {
+        $this->verify_admin_nonce('sch_mark_signal');
+
+        $signal_id = (int) ($_POST['signal_id'] ?? 0);
+        if ($signal_id <= 0) {
+            $this->redirect_with_message('sch-feedback', 'Ongeldig signaal-ID.');
+        }
+
+        $signal = $this->db->get_row($this->db->prepare("SELECT * FROM {$this->table('feedback_signals')} WHERE id=%d", $signal_id));
+        if (!$signal) {
+            $this->redirect_with_message('sch-feedback', 'Feedbacksignaal niet gevonden.');
+        }
+
+        if ((string) ($signal->recommended_action ?? '') !== 'optimize_title_meta') {
+            $this->redirect_with_message('sch-feedback', 'AI suggesties zijn alleen beschikbaar voor optimize_title_meta.');
+        }
+
+        try {
+            $source_url = $this->resolve_feedback_signal_source_url($signal);
+            if ($source_url === '') {
+                throw new RuntimeException('Geen geldige pagina-URL gevonden.');
+            }
+
+            $page = $this->fetch_and_extract_page($source_url);
+            $original_title = trim((string) ($page['title'] ?? ''));
+            if ($original_title === '') {
+                $original_title = trim((string) ($signal->title ?? ''));
+            }
+            if ($original_title === '') {
+                throw new RuntimeException('Originele titel kon niet worden opgehaald uit de GET response.');
+            }
+
+            $suggestion = $this->generate_title_meta_feedback_suggestion(
+                $original_title,
+                $source_url,
+                (string) ($signal->description ?? '')
+            );
+
+            $evidence = json_decode((string) ($signal->evidence_json ?? ''), true);
+            if (!is_array($evidence)) {
+                $evidence = [];
+            }
+            $evidence['ai_title_meta_suggestion'] = [
+                'original_title' => $original_title,
+                'source_url' => $source_url,
+                'meta_title' => sanitize_text_field((string) ($suggestion['meta_title'] ?? '')),
+                'meta_description' => sanitize_text_field((string) ($suggestion['meta_description'] ?? '')),
+                'reasoning' => sanitize_textarea_field((string) ($suggestion['reasoning'] ?? '')),
+                'generated_at' => $this->now(),
+            ];
+
+            $this->db->update(
+                $this->table('feedback_signals'),
+                ['evidence_json' => wp_json_encode($evidence), 'updated_at' => $this->now()],
+                ['id' => $signal_id]
+            );
+
+            $this->redirect_with_message('sch-feedback', 'AI suggestie opgeslagen voor dit feedbacksignaal.');
+        } catch (Throwable $e) {
+            $this->log('error', 'feedback_ai_suggestion', 'AI suggestie genereren mislukt', [
+                'signal_id' => $signal_id,
+                'error' => $e->getMessage(),
+            ]);
+            $this->redirect_with_message('sch-feedback', 'AI suggestie mislukt: ' . $e->getMessage());
+        }
+    }
+
+    private function resolve_feedback_signal_source_url(object $signal): string {
+        $page_url = trim((string) ($signal->page_url ?? ''));
+        if ($page_url === '') {
+            return '';
+        }
+        if (preg_match('#^https?://#i', $page_url)) {
+            return esc_url_raw($page_url);
+        }
+
+        $client = $this->db->get_row($this->db->prepare("SELECT website_url FROM {$this->table('clients')} WHERE id=%d", (int) ($signal->client_id ?? 0)));
+        $base_url = trim((string) ($client->website_url ?? ''));
+        if ($base_url === '') {
+            return '';
+        }
+        $base_url = untrailingslashit($base_url);
+        $path = '/' . ltrim($page_url, '/');
+        return esc_url_raw($base_url . $path);
+    }
+
+    private function generate_title_meta_feedback_suggestion(string $original_title, string $page_url, string $signal_description = ''): array {
+        $schema = [
+            'type' => 'object',
+            'additionalProperties' => false,
+            'required' => ['meta_title', 'meta_description', 'reasoning'],
+            'properties' => [
+                'meta_title' => ['type' => 'string'],
+                'meta_description' => ['type' => 'string'],
+                'reasoning' => ['type' => 'string'],
+            ],
+        ];
+
+        $result = $this->openai_json_call(
+            'feedback_title_meta_suggestion',
+            [
+                'role' => 'Je bent een Nederlandse SEO-copywriter.',
+                'goal' => 'Verbeter title/meta op basis van de originele paginatitel. Houd output concreet en direct bruikbaar.',
+            ],
+            [
+                'page_url' => $page_url,
+                'original_title' => $original_title,
+                'signal_description' => $signal_description,
+                'constraints' => [
+                    'meta_title_length' => '50-60 tekens',
+                    'meta_description_length' => '120-155 tekens',
+                    'language' => 'Nederlands',
+                ],
+            ],
+            $schema
+        );
+
+        return [
+            'meta_title' => trim((string) ($result['meta_title'] ?? '')),
+            'meta_description' => trim((string) ($result['meta_description'] ?? '')),
+            'reasoning' => trim((string) ($result['reasoning'] ?? '')),
+        ];
+    }
+
     private function create_job_from_signal(int $client_id, int $article_id, string $job_type, array $payload): int {
         $keyword_id = (int) $this->db->get_var($this->db->prepare("SELECT keyword_id FROM {$this->table('articles')} WHERE id=%d", $article_id));
         if ($keyword_id <= 0) {
@@ -13183,10 +13308,37 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         <div class="wrap"><h1>Feedback</h1><?php $this->render_admin_notice(); ?>
             <form method="get"><input type="hidden" name="page" value="sch-feedback"><label>Klant ID <input type="number" name="client_id" value="<?php echo (int) $client_id; ?>"></label> <label>Status <select name="status"><?php foreach (['open', 'ignored', 'resolved'] as $s) : ?><option value="<?php echo esc_attr($s); ?>" <?php selected($status, $s); ?>><?php echo esc_html($s); ?></option><?php endforeach; ?></select></label> <button class="button button-primary">Filter</button></form>
             <table class="widefat striped"><thead><tr><th>Type</th><th>Severity</th><th>Status</th><th>Priority</th><th>Titel</th><th>Actie</th><th>Pagina</th><th>Actions</th></tr></thead><tbody>
-            <?php if ($rows) : foreach ($rows as $row) : ?><tr><td><?php echo esc_html((string) $row->signal_type); ?></td><td><?php echo esc_html((string) $row->severity); ?></td><td><?php echo esc_html((string) $row->status); ?></td><td><?php echo esc_html((string) $row->priority_score); ?></td><td><?php echo esc_html((string) $row->title); ?></td><td><?php echo esc_html((string) $row->recommended_action); ?></td><td><code><?php echo esc_html($this->normalize_page_path((string) $row->page_url)); ?></code></td><td>
-                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_signal'); ?><input type="hidden" name="action" value="sch_mark_signal_resolved"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button">Resolve</button></form>
-                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_signal'); ?><input type="hidden" name="action" value="sch_mark_signal_ignored"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button">Ignore</button></form>
-            </td></tr><?php endforeach; else : ?><tr><td colspan="8">Geen signalen gevonden.</td></tr><?php endif; ?></tbody></table>
+            <?php if ($rows) : foreach ($rows as $row) : ?>
+                <?php
+                $evidence = json_decode((string) ($row->evidence_json ?? ''), true);
+                $ai_suggestion = is_array($evidence) ? ($evidence['ai_title_meta_suggestion'] ?? null) : null;
+                ?>
+                <tr>
+                    <td><?php echo esc_html((string) $row->signal_type); ?></td>
+                    <td><?php echo esc_html((string) $row->severity); ?></td>
+                    <td><?php echo esc_html((string) $row->status); ?></td>
+                    <td><?php echo esc_html((string) $row->priority_score); ?></td>
+                    <td><?php echo esc_html((string) $row->title); ?></td>
+                    <td><?php echo esc_html((string) $row->recommended_action); ?></td>
+                    <td><code><?php echo esc_html($this->normalize_page_path((string) $row->page_url)); ?></code></td>
+                    <td>
+                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_signal'); ?><input type="hidden" name="action" value="sch_mark_signal_resolved"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button">Resolve</button></form>
+                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_signal'); ?><input type="hidden" name="action" value="sch_mark_signal_ignored"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button">Ignore</button></form>
+                        <?php if ((string) $row->recommended_action === 'optimize_title_meta') : ?>
+                            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_signal'); ?><input type="hidden" name="action" value="sch_generate_feedback_ai_suggestion"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button button-primary">Genereer AI title/meta</button></form>
+                        <?php endif; ?>
+                        <?php if (is_array($ai_suggestion)) : ?>
+                            <div style="margin-top:8px; font-size:12px; line-height:1.45;">
+                                <strong>AI suggestie</strong><br>
+                                <strong>Originele titel:</strong> <?php echo esc_html((string) ($ai_suggestion['original_title'] ?? '')); ?><br>
+                                <strong>Meta title:</strong> <?php echo esc_html((string) ($ai_suggestion['meta_title'] ?? '')); ?><br>
+                                <strong>Meta description:</strong> <?php echo esc_html((string) ($ai_suggestion['meta_description'] ?? '')); ?><br>
+                                <strong>Waarom:</strong> <?php echo esc_html((string) ($ai_suggestion['reasoning'] ?? '')); ?>
+                            </div>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+            <?php endforeach; else : ?><tr><td colspan="8">Geen signalen gevonden.</td></tr><?php endif; ?></tbody></table>
         </div>
         <?php
     }
