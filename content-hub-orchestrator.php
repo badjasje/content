@@ -7815,6 +7815,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         ];
 
         if ($existing_id > 0) {
+
             $existing_status = (string) $this->db->get_var($this->db->prepare(
                 "SELECT status FROM {$this->table('seo_page_tasks')} WHERE id=%d LIMIT 1",
                 $existing_id
@@ -7828,6 +7829,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     ? (string) $this->db->get_var($this->db->prepare("SELECT ignored_at FROM {$this->table('seo_page_tasks')} WHERE id=%d LIMIT 1", $existing_id))
                     : null;
             }
+
             $updated = $this->db->update($this->table('seo_page_tasks'), $payload, ['id' => $existing_id]);
             if ($updated === false) {
                 $this->log('error', 'seo_tasks', 'SEO taak updaten mislukt', ['task_id' => $existing_id, 'db_error' => $this->db->last_error]);
