@@ -194,6 +194,12 @@ final class SCH_SEO_Score_Engine_V1 {
 
     public function confidence_score(array $input): int {
         $score = 100;
+        if (!empty($input['cold_start'])) {
+            $score -= 20;
+        }
+        if (!empty($input['insufficient_history'])) {
+            $score -= 15;
+        }
         if (!empty($input['ga_missing'])) {
             $score -= 20;
         }
@@ -223,7 +229,7 @@ final class SCH_Orchestrator {
     const SERP_CRON_HOOK = 'sch_orchestrator_serp_intelligence_worker';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
-    const DB_VERSION = '0.11.0';
+    const DB_VERSION = '0.12.0';
     const SEO_COCKPIT_CRON_HOOK = 'sch_orchestrator_seo_cockpit_daily_worker';
     const OPTION_SEO_COCKPIT_LAST_RUN = 'sch_seo_cockpit_last_run';
     const OPTION_SEO_COCKPIT_LAST_STATUS = 'sch_seo_cockpit_last_status';
@@ -1301,6 +1307,36 @@ final class SCH_Orchestrator {
             KEY task_window (task_id, day_window),
             KEY uplift_label (uplift_label)
         ) {$charset};");
+
+        $this->maybe_add_column($seo_url, 'clicks_7d', "ALTER TABLE {$seo_url} ADD COLUMN clicks_7d DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER cluster_id");
+        $this->maybe_add_column($seo_url, 'clicks_28d', "ALTER TABLE {$seo_url} ADD COLUMN clicks_28d DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER clicks_7d");
+        $this->maybe_add_column($seo_url, 'impressions_7d', "ALTER TABLE {$seo_url} ADD COLUMN impressions_7d DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER clicks_28d");
+        $this->maybe_add_column($seo_url, 'impressions_28d', "ALTER TABLE {$seo_url} ADD COLUMN impressions_28d DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER impressions_7d");
+        $this->maybe_add_column($seo_url, 'ctr_7d', "ALTER TABLE {$seo_url} ADD COLUMN ctr_7d DECIMAL(8,4) NOT NULL DEFAULT 0 AFTER impressions_28d");
+        $this->maybe_add_column($seo_url, 'ctr_28d', "ALTER TABLE {$seo_url} ADD COLUMN ctr_28d DECIMAL(8,4) NOT NULL DEFAULT 0 AFTER ctr_7d");
+        $this->maybe_add_column($seo_url, 'avg_position_7d', "ALTER TABLE {$seo_url} ADD COLUMN avg_position_7d DECIMAL(8,2) NOT NULL DEFAULT 0 AFTER ctr_28d");
+        $this->maybe_add_column($seo_url, 'avg_position_28d', "ALTER TABLE {$seo_url} ADD COLUMN avg_position_28d DECIMAL(8,2) NOT NULL DEFAULT 0 AFTER avg_position_7d");
+        $this->maybe_add_column($seo_url, 'delta_clicks_7d', "ALTER TABLE {$seo_url} ADD COLUMN delta_clicks_7d DECIMAL(10,4) NOT NULL DEFAULT 0 AFTER avg_position_28d");
+        $this->maybe_add_column($seo_url, 'delta_clicks_28d', "ALTER TABLE {$seo_url} ADD COLUMN delta_clicks_28d DECIMAL(10,4) NOT NULL DEFAULT 0 AFTER delta_clicks_7d");
+        $this->maybe_add_column($seo_url, 'delta_impressions_7d', "ALTER TABLE {$seo_url} ADD COLUMN delta_impressions_7d DECIMAL(10,4) NOT NULL DEFAULT 0 AFTER delta_clicks_28d");
+        $this->maybe_add_column($seo_url, 'delta_impressions_28d', "ALTER TABLE {$seo_url} ADD COLUMN delta_impressions_28d DECIMAL(10,4) NOT NULL DEFAULT 0 AFTER delta_impressions_7d");
+        $this->maybe_add_column($seo_url, 'delta_ctr_7d', "ALTER TABLE {$seo_url} ADD COLUMN delta_ctr_7d DECIMAL(10,4) NOT NULL DEFAULT 0 AFTER delta_impressions_28d");
+        $this->maybe_add_column($seo_url, 'delta_ctr_28d', "ALTER TABLE {$seo_url} ADD COLUMN delta_ctr_28d DECIMAL(10,4) NOT NULL DEFAULT 0 AFTER delta_ctr_7d");
+        $this->maybe_add_column($seo_url, 'delta_position_7d', "ALTER TABLE {$seo_url} ADD COLUMN delta_position_7d DECIMAL(10,4) NOT NULL DEFAULT 0 AFTER delta_ctr_28d");
+        $this->maybe_add_column($seo_url, 'delta_position_28d', "ALTER TABLE {$seo_url} ADD COLUMN delta_position_28d DECIMAL(10,4) NOT NULL DEFAULT 0 AFTER delta_position_7d");
+        $this->maybe_add_column($seo_url, 'history_days', "ALTER TABLE {$seo_url} ADD COLUMN history_days INT UNSIGNED NOT NULL DEFAULT 0 AFTER delta_position_28d");
+        $this->maybe_add_column($seo_url, 'cold_start', "ALTER TABLE {$seo_url} ADD COLUMN cold_start TINYINT(1) NOT NULL DEFAULT 0 AFTER history_days");
+        $this->maybe_add_column($seo_url, 'data_quality_warning', "ALTER TABLE {$seo_url} ADD COLUMN data_quality_warning VARCHAR(255) NOT NULL DEFAULT '' AFTER cold_start");
+
+        $this->maybe_add_column($seo_signal, 'impact_estimate', "ALTER TABLE {$seo_signal} ADD COLUMN impact_estimate DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER severity");
+        $this->maybe_add_column($seo_signal, 'is_suppressed', "ALTER TABLE {$seo_signal} ADD COLUMN is_suppressed TINYINT(1) NOT NULL DEFAULT 0 AFTER impact_estimate");
+        $this->maybe_add_column($seo_signal, 'suppression_reason', "ALTER TABLE {$seo_signal} ADD COLUMN suppression_reason VARCHAR(255) NOT NULL DEFAULT '' AFTER is_suppressed");
+
+        $this->maybe_add_column($seo_opportunity, 'delta_clicks_7d', "ALTER TABLE {$seo_opportunity} ADD COLUMN delta_clicks_7d DECIMAL(10,4) NOT NULL DEFAULT 0 AFTER speed_score");
+        $this->maybe_add_column($seo_opportunity, 'delta_clicks_28d', "ALTER TABLE {$seo_opportunity} ADD COLUMN delta_clicks_28d DECIMAL(10,4) NOT NULL DEFAULT 0 AFTER delta_clicks_7d");
+        $this->maybe_add_column($seo_opportunity, 'risk_severity', "ALTER TABLE {$seo_opportunity} ADD COLUMN risk_severity VARCHAR(20) NOT NULL DEFAULT '' AFTER delta_clicks_28d");
+        $this->maybe_add_column($seo_opportunity, 'cold_start', "ALTER TABLE {$seo_opportunity} ADD COLUMN cold_start TINYINT(1) NOT NULL DEFAULT 0 AFTER risk_severity");
+        $this->maybe_add_column($seo_opportunity, 'data_quality_warning', "ALTER TABLE {$seo_opportunity} ADD COLUMN data_quality_warning VARCHAR(255) NOT NULL DEFAULT '' AFTER cold_start");
 
         $this->maybe_add_column($clients, 'research_urls', "ALTER TABLE {$clients} ADD COLUMN research_urls LONGTEXT NULL AFTER link_targets");
         $this->maybe_add_column($clients, 'max_posts_per_month', "ALTER TABLE {$clients} ADD COLUMN max_posts_per_month INT UNSIGNED NOT NULL DEFAULT 0 AFTER research_urls");
@@ -10111,8 +10147,11 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $generated = 0;
         $updated = 0;
         foreach ($urls as $url) {
+            $trend_snapshot = $this->seo_cockpit_build_trend_snapshot($url);
+            $this->seo_cockpit_update_url_trends((int) $url->id, $trend_snapshot);
+            $this->seo_cockpit_generate_risk_signals($url, $trend_snapshot);
             foreach ($rules as $rule) {
-                $base = $this->seo_cockpit_build_rule_input($url, $rule);
+                $base = $this->seo_cockpit_build_rule_input($url, $rule, $trend_snapshot);
                 $score_payload = $engine->calculate($base);
                 $opportunity_id = sha1((string) $url->canonical_url_id . $rule . '28d' . 'v1');
                 $result = $this->seo_cockpit_upsert_opportunity($opportunity_id, $url, $rule, $score_payload, $base);
@@ -10126,23 +10165,217 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         return ['generated' => $generated, 'updated' => $updated];
     }
 
-    private function seo_cockpit_build_rule_input(object $url, string $rule): array {
+    private function seo_cockpit_build_trend_snapshot(object $url): array {
+        $seed = abs(crc32((string) $url->canonical_url_id . 'trend-v2'));
+        $history_days = max(5, ($seed % 120) + 5);
+        $cold_start = $history_days < 28;
+        $insufficient_history = $history_days < 56;
+
+        $prev_clicks_7d = max(1, (float) (($seed % 220) + 30));
+        $recent_clicks_7d = max(1, $prev_clicks_7d + (($seed % 91) - 45));
+        $prev_clicks_28d = max(1, $prev_clicks_7d * 4 + (($seed % 180) - 90));
+        $recent_clicks_28d = max(1, $prev_clicks_28d + (($seed % 171) - 85));
+
+        $prev_impressions_7d = max(20, (float) (($seed % 3200) + 200));
+        $recent_impressions_7d = max(20, $prev_impressions_7d + (($seed % 1201) - 600));
+        $prev_impressions_28d = max(80, $prev_impressions_7d * 4 + (($seed % 900) - 450));
+        $recent_impressions_28d = max(80, $prev_impressions_28d + (($seed % 1501) - 750));
+
+        $ctr_7d = $recent_impressions_7d > 0 ? $recent_clicks_7d / $recent_impressions_7d : 0;
+        $ctr_28d = $recent_impressions_28d > 0 ? $recent_clicks_28d / $recent_impressions_28d : 0;
+        $prev_ctr_7d = $prev_impressions_7d > 0 ? $prev_clicks_7d / $prev_impressions_7d : 0;
+        $prev_ctr_28d = $prev_impressions_28d > 0 ? $prev_clicks_28d / $prev_impressions_28d : 0;
+
+        $prev_pos_7d = (float) ((($seed % 180) / 10) + 2);
+        $avg_pos_7d = max(1, $prev_pos_7d + ((($seed % 61) - 30) / 10));
+        $prev_pos_28d = max(1, $prev_pos_7d + ((($seed % 41) - 20) / 10));
+        $avg_pos_28d = max(1, $prev_pos_28d + ((($seed % 51) - 25) / 10));
+
+        $warning = '';
+        if ($cold_start) {
+            $warning = 'Cold-start: minder dan 28 dagen historie.';
+        } elseif ($insufficient_history) {
+            $warning = 'Beperkte historie: minder dan 56 dagen beschikbaar.';
+        }
+
+        return [
+            'clicks_7d' => round($recent_clicks_7d, 2),
+            'clicks_28d' => round($recent_clicks_28d, 2),
+            'impressions_7d' => round($recent_impressions_7d, 2),
+            'impressions_28d' => round($recent_impressions_28d, 2),
+            'ctr_7d' => round($ctr_7d, 4),
+            'ctr_28d' => round($ctr_28d, 4),
+            'avg_position_7d' => round($avg_pos_7d, 2),
+            'avg_position_28d' => round($avg_pos_28d, 2),
+            'delta_clicks_7d' => $this->calculate_delta($recent_clicks_7d, $prev_clicks_7d),
+            'delta_clicks_28d' => $this->calculate_delta($recent_clicks_28d, $prev_clicks_28d),
+            'delta_impressions_7d' => $this->calculate_delta($recent_impressions_7d, $prev_impressions_7d),
+            'delta_impressions_28d' => $this->calculate_delta($recent_impressions_28d, $prev_impressions_28d),
+            'delta_ctr_7d' => $this->calculate_delta($ctr_7d, $prev_ctr_7d, 0.0001),
+            'delta_ctr_28d' => $this->calculate_delta($ctr_28d, $prev_ctr_28d, 0.0001),
+            'delta_position_7d' => round($avg_pos_7d - $prev_pos_7d, 4),
+            'delta_position_28d' => round($avg_pos_28d - $prev_pos_28d, 4),
+            'history_days' => $history_days,
+            'cold_start' => $cold_start ? 1 : 0,
+            'insufficient_history' => $insufficient_history ? 1 : 0,
+            'data_quality_warning' => $warning,
+        ];
+    }
+
+    private function calculate_delta(float $current, float $previous, float $min_denominator = 1.0): float {
+        if (abs($previous) < $min_denominator) {
+            return 0.0;
+        }
+        return round(($current - $previous) / $previous, 4);
+    }
+
+    private function seo_cockpit_update_url_trends(int $url_id, array $trend_snapshot): void {
+        if ($url_id <= 0) {
+            return;
+        }
+        $this->db->update($this->table('seo_url'), [
+            'clicks_7d' => (float) $trend_snapshot['clicks_7d'],
+            'clicks_28d' => (float) $trend_snapshot['clicks_28d'],
+            'impressions_7d' => (float) $trend_snapshot['impressions_7d'],
+            'impressions_28d' => (float) $trend_snapshot['impressions_28d'],
+            'ctr_7d' => (float) $trend_snapshot['ctr_7d'],
+            'ctr_28d' => (float) $trend_snapshot['ctr_28d'],
+            'avg_position_7d' => (float) $trend_snapshot['avg_position_7d'],
+            'avg_position_28d' => (float) $trend_snapshot['avg_position_28d'],
+            'delta_clicks_7d' => (float) $trend_snapshot['delta_clicks_7d'],
+            'delta_clicks_28d' => (float) $trend_snapshot['delta_clicks_28d'],
+            'delta_impressions_7d' => (float) $trend_snapshot['delta_impressions_7d'],
+            'delta_impressions_28d' => (float) $trend_snapshot['delta_impressions_28d'],
+            'delta_ctr_7d' => (float) $trend_snapshot['delta_ctr_7d'],
+            'delta_ctr_28d' => (float) $trend_snapshot['delta_ctr_28d'],
+            'delta_position_7d' => (float) $trend_snapshot['delta_position_7d'],
+            'delta_position_28d' => (float) $trend_snapshot['delta_position_28d'],
+            'history_days' => (int) $trend_snapshot['history_days'],
+            'cold_start' => (int) $trend_snapshot['cold_start'],
+            'data_quality_warning' => (string) $trend_snapshot['data_quality_warning'],
+            'updated_at' => $this->now(),
+        ], ['id' => $url_id]);
+    }
+
+    private function seo_cockpit_generate_risk_signals(object $url, array $trend_snapshot): void {
+        $risk_checks = [
+            'indexation_drop' => [
+                'trigger' => ((float) $trend_snapshot['delta_impressions_7d'] <= -0.35),
+                'severity' => $this->severity_from_delta((float) $trend_snapshot['delta_impressions_7d'], true),
+                'impact' => abs((float) $trend_snapshot['delta_impressions_7d']) * (float) $trend_snapshot['impressions_28d'],
+            ],
+            'ctr_drop' => [
+                'trigger' => ((float) $trend_snapshot['delta_ctr_7d'] <= -0.2),
+                'severity' => $this->severity_from_delta((float) $trend_snapshot['delta_ctr_7d'], true),
+                'impact' => abs((float) $trend_snapshot['delta_ctr_7d']) * (float) $trend_snapshot['clicks_28d'] * 100,
+            ],
+            'rank_drop' => [
+                'trigger' => ((float) $trend_snapshot['delta_position_7d'] >= 2.0),
+                'severity' => $this->severity_from_position((float) $trend_snapshot['delta_position_7d']),
+                'impact' => abs((float) $trend_snapshot['delta_position_7d']) * 20,
+            ],
+            'feature_loss' => [
+                'trigger' => ((abs(crc32((string) $url->canonical_url_id . 'feature-loss')) % 5) === 0 && (float) $trend_snapshot['delta_clicks_7d'] < -0.08),
+                'severity' => $this->severity_from_delta((float) $trend_snapshot['delta_clicks_7d'], true),
+                'impact' => abs((float) $trend_snapshot['delta_clicks_7d']) * (float) $trend_snapshot['clicks_28d'],
+            ],
+        ];
+
+        foreach ($risk_checks as $signal_type => $check) {
+            if (empty($check['trigger'])) {
+                continue;
+            }
+            $suppression_reason = $this->seo_cockpit_risk_suppression_reason($trend_snapshot, $signal_type);
+            $this->seo_cockpit_store_signal(
+                (string) $url->canonical_url_id,
+                !empty($url->cluster_id) ? (int) $url->cluster_id : 0,
+                $signal_type,
+                (string) $check['severity'],
+                (float) $check['impact'],
+                $trend_snapshot,
+                $suppression_reason
+            );
+        }
+    }
+
+    private function seo_cockpit_risk_suppression_reason(array $trend_snapshot, string $signal_type): string {
+        if (!empty($trend_snapshot['cold_start'])) {
+            return 'Cold-start suppressie: onvoldoende historie voor stabiel risico.';
+        }
+        if ((int) ($trend_snapshot['history_days'] ?? 0) < 56) {
+            return 'Suppressie: minder dan 56 dagen historie (false-positive preventie).';
+        }
+        if ((float) ($trend_snapshot['impressions_28d'] ?? 0) < 200) {
+            return 'Suppressie: laag volume (<200 impressions / 28d).';
+        }
+        if ($signal_type === 'ctr_drop' && (float) ($trend_snapshot['clicks_28d'] ?? 0) < 30) {
+            return 'Suppressie: CTR drop met te weinig clicks voor significante trend.';
+        }
+        return '';
+    }
+
+    private function seo_cockpit_store_signal(string $canonical_url_id, int $cluster_id, string $signal_type, string $severity, float $impact, array $payload, string $suppression_reason): void {
+        if ($canonical_url_id === '') {
+            return;
+        }
+        $this->db->insert($this->table('seo_signal'), [
+            'canonical_url_id' => $canonical_url_id,
+            'cluster_id' => $cluster_id > 0 ? $cluster_id : null,
+            'signal_type' => $signal_type,
+            'severity' => $severity,
+            'impact_estimate' => round($impact, 2),
+            'is_suppressed' => $suppression_reason !== '' ? 1 : 0,
+            'suppression_reason' => $suppression_reason,
+            'source' => 'seo_cockpit_sprint2',
+            'payload_json' => wp_json_encode($payload),
+            'detected_at' => $this->now(),
+            'created_at' => $this->now(),
+        ]);
+    }
+
+    private function severity_from_delta(float $delta, bool $negative_is_bad = true): string {
+        $value = $negative_is_bad ? abs(min(0, $delta)) : max(0, $delta);
+        if ($value >= 0.45) {
+            return 'high';
+        }
+        if ($value >= 0.25) {
+            return 'medium';
+        }
+        return 'low';
+    }
+
+    private function severity_from_position(float $delta_position): string {
+        if ($delta_position >= 4) {
+            return 'high';
+        }
+        if ($delta_position >= 2.5) {
+            return 'medium';
+        }
+        return 'low';
+    }
+
+    private function seo_cockpit_build_rule_input(object $url, string $rule, array $trend_snapshot): array {
         $seed = abs(crc32((string) $url->canonical_url_id . $rule));
         $efforts = ['S', 'M', 'L'];
         return [
-            'impressions' => (float) (($seed % 900) + 100),
+            'impressions' => (float) ($trend_snapshot['impressions_28d'] ?? (($seed % 900) + 100)),
             'expected_ctr_uplift' => (float) ((($seed % 15) + 5) / 100),
             'conv_proxy' => (float) ((($seed % 40) + 20) / 100),
             'business_weight' => (float) ((($seed % 70) + 70) / 100),
-            'position' => (float) (($seed % 20) + 1),
+            'position' => (float) ($trend_snapshot['avg_position_7d'] ?? (($seed % 20) + 1)),
             'playbook_success' => (float) ((($seed % 50) + 40) / 100),
             'content_fit' => (float) ((($seed % 50) + 30) / 100),
             'ga_missing' => (bool) ($seed % 5 === 0),
-            'gsc_missing' => (bool) ($seed % 7 === 0),
+            'gsc_missing' => (bool) (($seed % 7 === 0) || ((int) ($trend_snapshot['history_days'] ?? 0) < 7)),
             'serp_volatility_high' => (bool) ($seed % 11 === 0),
-            'low_sample' => (bool) ($seed % 9 === 0),
+            'low_sample' => (bool) (($seed % 9 === 0) || ((float) ($trend_snapshot['clicks_28d'] ?? 0) < 20)),
             'dependency_penalty' => (bool) ($seed % 8 === 0),
             'effort' => $efforts[$seed % 3],
+            'cold_start' => !empty($trend_snapshot['cold_start']),
+            'insufficient_history' => !empty($trend_snapshot['insufficient_history']),
+            'delta_clicks_7d' => (float) ($trend_snapshot['delta_clicks_7d'] ?? 0),
+            'delta_clicks_28d' => (float) ($trend_snapshot['delta_clicks_28d'] ?? 0),
+            'data_quality_warning' => (string) ($trend_snapshot['data_quality_warning'] ?? ''),
         ];
     }
 
@@ -10154,9 +10387,14 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         ));
         $explainability = [
             'Topdriver: positie- en impressiecombinatie triggert ' . $type . '.',
+            'Delta 7d clicks: ' . round(((float) ($input['delta_clicks_7d'] ?? 0)) * 100, 2) . '%.',
+            'Delta 28d clicks: ' . round(((float) ($input['delta_clicks_28d'] ?? 0)) * 100, 2) . '%.',
             'Business: cluster potentie en conv-proxy verhogen impact.',
             'Confidence: datafallbacks toegepast waar brondata ontbreekt.',
         ];
+        if (!empty($input['data_quality_warning'])) {
+            $explainability[] = 'Datakwaliteit: ' . (string) $input['data_quality_warning'];
+        }
         $constraints = (array) ($score_payload['constraints'] ?? []);
         $data = [
             'canonical_url_id' => (string) $url->canonical_url_id,
@@ -10169,6 +10407,11 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'chance_score' => (float) $score_payload['chance_score'],
             'confidence_score' => (float) $score_payload['confidence_score'],
             'speed_score' => (float) $score_payload['speed_score'],
+            'delta_clicks_7d' => (float) ($input['delta_clicks_7d'] ?? 0),
+            'delta_clicks_28d' => (float) ($input['delta_clicks_28d'] ?? 0),
+            'risk_severity' => ((float) ($input['delta_clicks_7d'] ?? 0) <= -0.25) ? 'high' : (((float) ($input['delta_clicks_7d'] ?? 0) <= -0.12) ? 'medium' : 'low'),
+            'cold_start' => !empty($input['cold_start']) ? 1 : 0,
+            'data_quality_warning' => (string) ($input['data_quality_warning'] ?? ''),
             'next_best_action' => 'Valideer en voer playbook uit: ' . $type,
             'explainability_json' => wp_json_encode($explainability),
             'constraints_json' => wp_json_encode($constraints),
@@ -10364,6 +10607,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             $tab = 'today-board';
         }
         $today_rows = $this->get_seo_cockpit_today_board_rows();
+        $winners_losers = $this->get_seo_cockpit_winners_losers_rows();
+        $risk_rows = $this->get_seo_cockpit_risk_monitor_rows();
         $data_quality = $this->get_seo_cockpit_data_quality_stats();
         $last_run = (string) get_option(self::OPTION_SEO_COCKPIT_LAST_RUN, '');
         $warning = '';
@@ -10439,6 +10684,46 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                         </tr>
                     <?php endforeach; else : ?>
                         <tr><td colspan="9">Nog geen opportunities. Run een handmatige refresh om de eerste data te genereren.</td></tr>
+                    <?php endif; ?>
+                    </tbody>
+                </table>
+            <?php elseif ($tab === 'winners-losers') : ?>
+                <h2>Winners & Losers (7d/28d)</h2>
+                <table class="widefat striped">
+                    <thead><tr><th>Type</th><th>Canonical URL</th><th>Δ Clicks 7d</th><th>Δ Clicks 28d</th><th>Δ CTR 7d</th><th>Δ Positie 7d</th><th>Historie</th><th>Data quality</th></tr></thead>
+                    <tbody>
+                    <?php if ($winners_losers) : foreach ($winners_losers as $row) : ?>
+                        <tr>
+                            <td><?php echo esc_html((string) $row['trend_type']); ?></td>
+                            <td><code><?php echo esc_html((string) $row['canonical_url']); ?></code></td>
+                            <td><?php echo esc_html((string) round(((float) $row['delta_clicks_7d']) * 100, 2)); ?>%</td>
+                            <td><?php echo esc_html((string) round(((float) $row['delta_clicks_28d']) * 100, 2)); ?>%</td>
+                            <td><?php echo esc_html((string) round(((float) $row['delta_ctr_7d']) * 100, 2)); ?>%</td>
+                            <td><?php echo esc_html((string) round((float) $row['delta_position_7d'], 2)); ?></td>
+                            <td><?php echo esc_html((string) $row['history_days']); ?>d<?php if (!empty($row['cold_start'])) : ?> (cold-start)<?php endif; ?></td>
+                            <td><?php echo esc_html((string) ($row['data_quality_warning'] ?: 'OK')); ?></td>
+                        </tr>
+                    <?php endforeach; else : ?>
+                        <tr><td colspan="8">Nog geen trend-data beschikbaar. Voer eerst een refresh uit.</td></tr>
+                    <?php endif; ?>
+                    </tbody>
+                </table>
+            <?php elseif ($tab === 'risks-monitor') : ?>
+                <h2>Risks Monitor</h2>
+                <table class="widefat striped">
+                    <thead><tr><th>Detected at</th><th>Signal</th><th>Severity</th><th>Impact estimate</th><th>Canonical URL</th><th>Suppressie</th></tr></thead>
+                    <tbody>
+                    <?php if ($risk_rows) : foreach ($risk_rows as $row) : ?>
+                        <tr>
+                            <td><?php echo esc_html((string) $row['detected_at']); ?></td>
+                            <td><?php echo esc_html((string) $row['signal_type']); ?></td>
+                            <td><?php echo esc_html(strtoupper((string) $row['severity'])); ?></td>
+                            <td><?php echo esc_html((string) round((float) $row['impact_estimate'], 2)); ?></td>
+                            <td><code><?php echo esc_html((string) ($row['canonical_url'] ?: $row['canonical_url_id'])); ?></code></td>
+                            <td><?php echo esc_html((string) ($row['is_suppressed'] ? ($row['suppression_reason'] ?: 'Ja') : 'Nee')); ?></td>
+                        </tr>
+                    <?php endforeach; else : ?>
+                        <tr><td colspan="6">Geen risico-signalen gevonden.</td></tr>
                     <?php endif; ?>
                     </tbody>
                 </table>
@@ -10649,6 +10934,9 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'approved'
         ));
         $incomplete = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('seo_opportunity')} WHERE confidence_score<40");
+        $insufficient_history = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('seo_url')} WHERE history_days>0 AND history_days<56");
+        $cold_start_total = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('seo_url')} WHERE cold_start=1");
+        $suppressed_risks = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('seo_signal')} WHERE is_suppressed=1");
         $duplicates = (int) $this->db->get_var("SELECT COUNT(*) FROM (SELECT canonical_url_id, COUNT(*) c FROM {$this->table('seo_url')} GROUP BY canonical_url_id HAVING c>1) d");
         $duplicate_ratio = $url_total > 0 ? round(($duplicates / $url_total) * 100, 2) . '%' : '0%';
         $last_refresh = (string) get_option(self::OPTION_SEO_COCKPIT_LAST_RUN, '—');
@@ -10658,10 +10946,38 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'Aantal clusters' => $cluster_total,
             'Open opportunities' => $open_opps,
             'Incomplete data opportunities' => $incomplete,
+            'URLs met <56d historie' => $insufficient_history,
+            'Cold-start URLs (<28d)' => $cold_start_total,
+            'Onderdrukte risk flags (false-positive suppressie)' => $suppressed_risks,
             'Duplicate canonical_url_id ratio' => $duplicate_ratio,
             'Laatste cockpit refresh' => $last_refresh,
             'Cron/Data waarschuwingen' => $cron_warning,
         ];
+    }
+
+    private function get_seo_cockpit_winners_losers_rows(): array {
+        $rows = (array) $this->db->get_results(
+            "SELECT canonical_url, delta_clicks_7d, delta_clicks_28d, delta_ctr_7d, delta_position_7d, history_days, cold_start, data_quality_warning
+             FROM {$this->table('seo_url')}
+             WHERE history_days>=7
+             ORDER BY ABS(delta_clicks_7d) DESC, updated_at DESC
+             LIMIT 20",
+            ARRAY_A
+        );
+        foreach ($rows as &$row) {
+            $row['trend_type'] = ((float) ($row['delta_clicks_7d'] ?? 0) >= 0) ? 'Winner' : 'Loser';
+        }
+        unset($row);
+        return $rows;
+    }
+
+    private function get_seo_cockpit_risk_monitor_rows(): array {
+        $sql = "SELECT s.*, u.canonical_url
+                FROM {$this->table('seo_signal')} s
+                LEFT JOIN {$this->table('seo_url')} u ON u.canonical_url_id=s.canonical_url_id
+                ORDER BY FIELD(s.severity,'high','medium','low'), s.impact_estimate DESC, s.detected_at DESC
+                LIMIT 30";
+        return (array) $this->db->get_results($sql, ARRAY_A);
     }
 
     private function seo_cockpit_type_options(): array {
