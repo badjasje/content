@@ -17,7 +17,7 @@ final class SCH_Orchestrator {
     const SERP_CRON_HOOK = 'sch_orchestrator_serp_intelligence_worker';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
-    const DB_VERSION = '0.9.0';
+    const DB_VERSION = '0.10.0';
     const EXACT_MATCH_THRESHOLD_PERCENT = 30;
 
     const OPTION_OPENAI_API_KEY = 'sch_openai_api_key';
@@ -142,6 +142,9 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_start_intelligence_task', [$this, 'handle_start_intelligence_task']);
         add_action('admin_post_sch_complete_intelligence_task', [$this, 'handle_complete_intelligence_task']);
         add_action('admin_post_sch_run_intelligence_ingest', [$this, 'handle_run_intelligence_ingest']);
+        add_action('admin_post_sch_seo_sync_pages', [$this, 'handle_seo_sync_pages']);
+        add_action('admin_post_sch_seo_run_recommendations', [$this, 'handle_seo_run_recommendations']);
+        add_action('admin_post_sch_seo_update_task_status', [$this, 'handle_seo_update_task_status']);
         add_action('rest_api_init', [$this, 'register_intelligence_rest_routes']);
         add_action('rest_api_init', [$this, 'register_frontend_rest_routes']);
         add_action('admin_post_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
@@ -204,6 +207,9 @@ final class SCH_Orchestrator {
         .sch-code{font-family:monospace}
         .sch-editorial-content{max-height:320px;overflow:auto;padding:10px;background:#fff;border:1px solid #dcdcde}
         .sch-editorial-content details{margin:0}
+        .sch-badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600}
+        .sch-badge-open{background:#fff8e5;color:#8a4b00}
+        .sch-badge-done{background:#edfaef;color:#0a5b1e}
         @media (max-width:1100px){.sch-two-col{grid-template-columns:1fr}.sch-grid-stats{grid-template-columns:1fr 1fr}}
         ';
         wp_register_style('sch-admin-inline', false);
@@ -293,6 +299,11 @@ final class SCH_Orchestrator {
         return $this->db->prefix . 'sch_' . $name;
     }
 
+    private function table_exists(string $table): bool {
+        $result = $this->db->get_var($this->db->prepare("SHOW TABLES LIKE %s", $table));
+        return is_string($result) && $result === $table;
+    }
+
     private function maybe_add_column(string $table, string $column, string $sql): void {
         $exists = $this->db->get_var($this->db->prepare(
             "SHOW COLUMNS FROM {$table} LIKE %s",
@@ -346,6 +357,8 @@ final class SCH_Orchestrator {
         $orchestrator_page_metrics_daily = $this->table('orchestrator_page_metrics_daily');
         $orchestrator_opportunities = $this->table('orchestrator_opportunities');
         $orchestrator_tasks = $this->table('orchestrator_tasks');
+        $seo_pages = $this->table('seo_pages');
+        $seo_page_tasks = $this->table('seo_page_tasks');
 
         dbDelta("CREATE TABLE {$clients} (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -870,6 +883,76 @@ final class SCH_Orchestrator {
             KEY task_type (task_type)
         ) {$charset};");
 
+        dbDelta("CREATE TABLE {$seo_pages} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NULL,
+            article_id BIGINT UNSIGNED NULL,
+            url TEXT NOT NULL,
+            path VARCHAR(255) NOT NULL DEFAULT '',
+            title VARCHAR(255) NOT NULL DEFAULT '',
+            h1 VARCHAR(255) NOT NULL DEFAULT '',
+            meta_title VARCHAR(255) NOT NULL DEFAULT '',
+            meta_description TEXT NULL,
+            canonical_url TEXT NULL,
+            status_code SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+            indexability_status VARCHAR(30) NOT NULL DEFAULT 'unknown',
+            robots_status VARCHAR(50) NOT NULL DEFAULT 'unknown',
+            canonical_status VARCHAR(50) NOT NULL DEFAULT 'unknown',
+            word_count INT UNSIGNED NOT NULL DEFAULT 0,
+            primary_keyword VARCHAR(191) NOT NULL DEFAULT '',
+            secondary_keywords LONGTEXT NULL,
+            page_type VARCHAR(50) NOT NULL DEFAULT 'unknown',
+            seo_score DECIMAL(6,2) NOT NULL DEFAULT 0,
+            content_score DECIMAL(6,2) NOT NULL DEFAULT 0,
+            technical_score DECIMAL(6,2) NOT NULL DEFAULT 0,
+            internal_link_score DECIMAL(6,2) NOT NULL DEFAULT 0,
+            ctr_score DECIMAL(6,2) NOT NULL DEFAULT 0,
+            gsc_clicks DECIMAL(20,6) NOT NULL DEFAULT 0,
+            gsc_impressions DECIMAL(20,6) NOT NULL DEFAULT 0,
+            gsc_ctr DECIMAL(20,10) NOT NULL DEFAULT 0,
+            gsc_position DECIMAL(20,10) NOT NULL DEFAULT 0,
+            last_crawled_at DATETIME NULL,
+            last_gsc_synced_at DATETIME NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY client_path_unique (client_id, path(191)),
+            KEY client_site (client_id, site_id),
+            KEY article_id (article_id),
+            KEY primary_keyword (primary_keyword)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$seo_page_tasks} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NULL,
+            page_id BIGINT UNSIGNED NOT NULL,
+            type VARCHAR(60) NOT NULL DEFAULT '',
+            title VARCHAR(255) NOT NULL DEFAULT '',
+            description TEXT NULL,
+            recommendation TEXT NULL,
+            impact_score DECIMAL(8,4) NOT NULL DEFAULT 0,
+            effort_score DECIMAL(8,4) NOT NULL DEFAULT 0,
+            confidence_score DECIMAL(8,4) NOT NULL DEFAULT 0,
+            priority_score DECIMAL(12,6) NOT NULL DEFAULT 0,
+            status VARCHAR(20) NOT NULL DEFAULT 'open',
+            source VARCHAR(50) NOT NULL DEFAULT 'manual',
+            dedupe_hash CHAR(40) NOT NULL DEFAULT '',
+            detected_at DATETIME NOT NULL,
+            completed_at DATETIME NULL,
+            ignored_at DATETIME NULL,
+            assigned_to BIGINT UNSIGNED NULL,
+            metadata_json LONGTEXT NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY dedupe_hash_unique (dedupe_hash),
+            KEY page_status_priority (page_id, status, priority_score),
+            KEY client_status_priority (client_id, status, priority_score),
+            KEY type (type)
+        ) {$charset};");
+
         $this->maybe_add_column($clients, 'research_urls', "ALTER TABLE {$clients} ADD COLUMN research_urls LONGTEXT NULL AFTER link_targets");
         $this->maybe_add_column($clients, 'max_posts_per_month', "ALTER TABLE {$clients} ADD COLUMN max_posts_per_month INT UNSIGNED NOT NULL DEFAULT 0 AFTER research_urls");
         $this->maybe_add_column($clients, 'gsc_property', "ALTER TABLE {$clients} ADD COLUMN gsc_property VARCHAR(255) NOT NULL DEFAULT '' AFTER max_posts_per_month");
@@ -958,6 +1041,7 @@ final class SCH_Orchestrator {
         add_submenu_page('sch-content-hub', 'Redactie', 'Redactie', 'manage_options', 'sch-editorial', [$this, 'render_editorial']);
         add_submenu_page('sch-content-hub', 'Rapportage', 'Rapportage', 'manage_options', 'sch-reporting', [$this, 'render_reporting']);
         add_submenu_page('sch-content-hub', 'Performance', 'Performance', 'manage_options', 'sch-performance', [$this, 'render_performance']);
+        add_submenu_page('sch-content-hub', 'SEO Cockpit', 'SEO Cockpit', 'manage_options', 'sch-seo-cockpit', [$this, 'render_seo_cockpit']);
         add_submenu_page('sch-content-hub', 'Intelligence', 'Intelligence', 'manage_options', 'sch-intelligence', [$this, 'render_intelligence']);
         add_submenu_page('sch-content-hub', 'Page Intelligence', 'Page Intelligence', 'manage_options', 'sch-page-intelligence', [$this, 'render_page_intelligence']);
         add_submenu_page('sch-content-hub', 'SERP Intelligence', 'SERP Intelligence', 'manage_options', 'sch-serp-intelligence', [$this, 'render_serp_intelligence']);
@@ -997,6 +1081,10 @@ final class SCH_Orchestrator {
             'sch-app' => [
                 'title' => 'App',
                 'text' => 'Deze moderne app-shell bundelt dashboard, keyword-optimalisatie, technical issues, queue en instellingen op één plek bovenop bestaande plugin-data en acties.',
+            ],
+            'sch-seo-cockpit' => [
+                'title' => 'SEO Cockpit',
+                'text' => 'Centrale SEO-regiekamer per klant/site/pagina: performance, issues, quick wins en actiegerichte taken met prioriteit en status.',
             ],
             'sch-clients' => [
                 'title' => 'Klanten',
@@ -7573,6 +7661,191 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         return $path === '' ? '/' : $path;
     }
 
+    private function calculate_seo_task_priority(float $impact_score, float $effort_score, float $confidence_score): float {
+        $effort = max($effort_score, 1.0);
+        return round(($impact_score * $confidence_score) / $effort, 6);
+    }
+
+    private function build_seo_task_dedupe_hash(int $page_id, string $type, array $metadata = []): string {
+        ksort($metadata);
+        return sha1($page_id . '|' . sanitize_key($type) . '|' . wp_json_encode($metadata));
+    }
+
+    private function get_seo_page_by_id(int $page_id): ?array {
+        if ($page_id <= 0) {
+            return null;
+        }
+
+        $row = $this->db->get_row($this->db->prepare(
+            "SELECT * FROM {$this->table('seo_pages')} WHERE id=%d LIMIT 1",
+            $page_id
+        ), ARRAY_A);
+
+        return is_array($row) ? $row : null;
+    }
+
+    private function upsert_seo_page(array $data): int {
+        $client_id = max(0, (int) ($data['client_id'] ?? 0));
+        if ($client_id <= 0) {
+            return 0;
+        }
+
+        $url = $this->normalize_page_url((string) ($data['url'] ?? ''));
+        $path = $this->normalize_page_path((string) ($data['path'] ?? $url));
+        if ($url === '' || $path === '') {
+            return 0;
+        }
+
+        $existing_id = (int) $this->db->get_var($this->db->prepare(
+            "SELECT id FROM {$this->table('seo_pages')} WHERE client_id=%d AND path=%s LIMIT 1",
+            $client_id,
+            $path
+        ));
+
+        $now = $this->now();
+        $payload = [
+            'client_id' => $client_id,
+            'site_id' => !empty($data['site_id']) ? max(0, (int) $data['site_id']) : null,
+            'article_id' => !empty($data['article_id']) ? max(0, (int) $data['article_id']) : null,
+            'url' => $url,
+            'path' => $path,
+            'title' => sanitize_text_field((string) ($data['title'] ?? '')),
+            'h1' => sanitize_text_field((string) ($data['h1'] ?? '')),
+            'meta_title' => sanitize_text_field((string) ($data['meta_title'] ?? '')),
+            'meta_description' => sanitize_textarea_field((string) ($data['meta_description'] ?? '')),
+            'canonical_url' => $this->normalize_page_url((string) ($data['canonical_url'] ?? '')),
+            'status_code' => max(0, (int) ($data['status_code'] ?? 0)),
+            'indexability_status' => sanitize_key((string) ($data['indexability_status'] ?? 'unknown')),
+            'robots_status' => sanitize_key((string) ($data['robots_status'] ?? 'unknown')),
+            'canonical_status' => sanitize_key((string) ($data['canonical_status'] ?? 'unknown')),
+            'word_count' => max(0, (int) ($data['word_count'] ?? 0)),
+            'primary_keyword' => sanitize_text_field((string) ($data['primary_keyword'] ?? '')),
+            'secondary_keywords' => isset($data['secondary_keywords']) ? wp_json_encode(array_values((array) $data['secondary_keywords'])) : null,
+            'page_type' => sanitize_key((string) ($data['page_type'] ?? 'unknown')),
+            'seo_score' => (float) ($data['seo_score'] ?? 0),
+            'content_score' => (float) ($data['content_score'] ?? 0),
+            'technical_score' => (float) ($data['technical_score'] ?? 0),
+            'internal_link_score' => (float) ($data['internal_link_score'] ?? 0),
+            'ctr_score' => (float) ($data['ctr_score'] ?? 0),
+            'gsc_clicks' => (float) ($data['gsc_clicks'] ?? 0),
+            'gsc_impressions' => (float) ($data['gsc_impressions'] ?? 0),
+            'gsc_ctr' => (float) ($data['gsc_ctr'] ?? 0),
+            'gsc_position' => (float) ($data['gsc_position'] ?? 0),
+            'last_crawled_at' => !empty($data['last_crawled_at']) ? gmdate('Y-m-d H:i:s', strtotime((string) $data['last_crawled_at'])) : null,
+            'last_gsc_synced_at' => !empty($data['last_gsc_synced_at']) ? gmdate('Y-m-d H:i:s', strtotime((string) $data['last_gsc_synced_at'])) : null,
+            'updated_at' => $now,
+        ];
+
+        if ($existing_id > 0) {
+            $updated = $this->db->update($this->table('seo_pages'), $payload, ['id' => $existing_id]);
+            if ($updated === false) {
+                $this->log('error', 'seo_pages', 'SEO pagina updaten mislukt', ['client_id' => $client_id, 'path' => $path, 'db_error' => $this->db->last_error]);
+                return 0;
+            }
+            return $existing_id;
+        }
+
+        $payload['created_at'] = $now;
+        $inserted = $this->db->insert($this->table('seo_pages'), $payload);
+        if ($inserted === false) {
+            $this->log('error', 'seo_pages', 'SEO pagina aanmaken mislukt', ['client_id' => $client_id, 'path' => $path, 'db_error' => $this->db->last_error]);
+            return 0;
+        }
+
+        return (int) $this->db->insert_id;
+    }
+
+    private function upsert_seo_page_task(array $data): int {
+        $page_id = max(0, (int) ($data['page_id'] ?? 0));
+        if ($page_id <= 0) {
+            return 0;
+        }
+
+        $page = $this->get_seo_page_by_id($page_id);
+        if (!$page) {
+            return 0;
+        }
+
+        $type = sanitize_key((string) ($data['type'] ?? ''));
+        if ($type === '') {
+            return 0;
+        }
+
+        $metadata = (array) ($data['metadata'] ?? []);
+        $dedupe_hash = $this->build_seo_task_dedupe_hash($page_id, $type, $metadata);
+        $existing_id = (int) $this->db->get_var($this->db->prepare(
+            "SELECT id FROM {$this->table('seo_page_tasks')} WHERE dedupe_hash=%s LIMIT 1",
+            $dedupe_hash
+        ));
+
+        $status = sanitize_key((string) ($data['status'] ?? 'open'));
+        if (!in_array($status, ['open', 'in_progress', 'done', 'ignored'], true)) {
+            $status = 'open';
+        }
+
+        $impact_score = max(0.0, (float) ($data['impact_score'] ?? 0));
+        $effort_score = max(0.0, (float) ($data['effort_score'] ?? 0));
+        $confidence_score = max(0.0, (float) ($data['confidence_score'] ?? 0));
+        $priority_score = isset($data['priority_score'])
+            ? max(0.0, (float) $data['priority_score'])
+            : $this->calculate_seo_task_priority($impact_score, $effort_score, $confidence_score);
+
+        $now = $this->now();
+        $payload = [
+            'client_id' => (int) ($page['client_id'] ?? 0),
+            'site_id' => !empty($page['site_id']) ? (int) $page['site_id'] : null,
+            'page_id' => $page_id,
+            'type' => $type,
+            'title' => sanitize_text_field((string) ($data['title'] ?? '')),
+            'description' => sanitize_textarea_field((string) ($data['description'] ?? '')),
+            'recommendation' => sanitize_textarea_field((string) ($data['recommendation'] ?? '')),
+            'impact_score' => $impact_score,
+            'effort_score' => $effort_score,
+            'confidence_score' => $confidence_score,
+            'priority_score' => $priority_score,
+            'status' => $status,
+            'source' => sanitize_key((string) ($data['source'] ?? 'manual')),
+            'dedupe_hash' => $dedupe_hash,
+            'detected_at' => !empty($data['detected_at']) ? gmdate('Y-m-d H:i:s', strtotime((string) $data['detected_at'])) : $now,
+            'completed_at' => $status === 'done' ? $now : null,
+            'ignored_at' => $status === 'ignored' ? $now : null,
+            'assigned_to' => !empty($data['assigned_to']) ? (int) $data['assigned_to'] : null,
+            'metadata_json' => !empty($metadata) ? wp_json_encode($metadata) : null,
+            'updated_at' => $now,
+        ];
+
+        if ($existing_id > 0) {
+            $existing_status = (string) $this->db->get_var($this->db->prepare(
+                "SELECT status FROM {$this->table('seo_page_tasks')} WHERE id=%d LIMIT 1",
+                $existing_id
+            ));
+            if (in_array($existing_status, ['done', 'ignored'], true) && empty($data['force_status_update'])) {
+                $payload['status'] = $existing_status;
+                $payload['completed_at'] = $existing_status === 'done'
+                    ? (string) $this->db->get_var($this->db->prepare("SELECT completed_at FROM {$this->table('seo_page_tasks')} WHERE id=%d LIMIT 1", $existing_id))
+                    : null;
+                $payload['ignored_at'] = $existing_status === 'ignored'
+                    ? (string) $this->db->get_var($this->db->prepare("SELECT ignored_at FROM {$this->table('seo_page_tasks')} WHERE id=%d LIMIT 1", $existing_id))
+                    : null;
+            }
+            $updated = $this->db->update($this->table('seo_page_tasks'), $payload, ['id' => $existing_id]);
+            if ($updated === false) {
+                $this->log('error', 'seo_tasks', 'SEO taak updaten mislukt', ['task_id' => $existing_id, 'db_error' => $this->db->last_error]);
+                return 0;
+            }
+            return $existing_id;
+        }
+
+        $payload['created_at'] = $now;
+        $inserted = $this->db->insert($this->table('seo_page_tasks'), $payload);
+        if ($inserted === false) {
+            $this->log('error', 'seo_tasks', 'SEO taak aanmaken mislukt', ['page_id' => $page_id, 'type' => $type, 'db_error' => $this->db->last_error]);
+            return 0;
+        }
+
+        return (int) $this->db->insert_id;
+    }
+
     private function match_article_by_url(int $client_id, string $page_url): ?object {
         $normalized_url = $this->normalize_page_url($page_url);
         $article = $this->match_article_by_remote_url($client_id, $normalized_url);
@@ -9382,6 +9655,677 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 $this->log('error', 'feedback_sync', 'Feedback auto sync mislukt voor klant', ['client_id' => (int) $client->id, 'error' => $e->getMessage()]);
             }
         }
+    }
+
+    public function handle_seo_sync_pages(): void {
+        $this->verify_admin_nonce('sch_seo_sync_pages');
+        if (!$this->table_exists($this->table('seo_pages'))) {
+            $this->redirect_with_message('sch-seo-cockpit', 'SEO pagina tabel bestaat nog niet. Heractiveer plugin of run upgrade.', 'error');
+        }
+        $client_id = max(0, (int) ($_POST['client_id'] ?? 0));
+        $inserted = $this->sync_seo_pages($client_id);
+        $this->redirect_with_message('sch-seo-cockpit', 'SEO pagina\'s bijgewerkt: ' . $inserted, 'success', ['client_id' => $client_id]);
+    }
+
+    public function handle_seo_run_recommendations(): void {
+        $this->verify_admin_nonce('sch_seo_run_recommendations');
+        if (!$this->table_exists($this->table('seo_page_tasks')) || !$this->table_exists($this->table('seo_pages'))) {
+            $this->redirect_with_message('sch-seo-cockpit', 'SEO cockpit tabellen ontbreken. Heractiveer plugin of run upgrade.', 'error');
+        }
+        $client_id = max(0, (int) ($_POST['client_id'] ?? 0));
+        $site_id = max(0, (int) ($_POST['site_id'] ?? 0));
+        $created = $this->run_seo_recommendation_engine($client_id, $site_id);
+        $this->redirect_with_message('sch-seo-cockpit', 'SEO aanbevelingen berekend: ' . $created . ' taken aangeraakt.', 'success', [
+            'client_id' => $client_id,
+            'site_id' => $site_id,
+        ]);
+    }
+
+    public function handle_seo_update_task_status(): void {
+        $this->verify_admin_nonce('sch_seo_update_task_status');
+        if (!$this->table_exists($this->table('seo_page_tasks'))) {
+            $this->redirect_with_message('sch-seo-cockpit', 'SEO taken tabel ontbreekt. Heractiveer plugin of run upgrade.', 'error');
+        }
+        $task_id = max(0, (int) ($_POST['task_id'] ?? 0));
+        $status = sanitize_key((string) ($_POST['status'] ?? ''));
+        $page_id = max(0, (int) ($_POST['page_id'] ?? 0));
+        if ($task_id <= 0 || !in_array($status, ['open', 'in_progress', 'done', 'ignored'], true)) {
+            $this->redirect_with_message('sch-seo-cockpit', 'Ongeldige taakstatus update.', 'error');
+        }
+
+        $update = [
+            'status' => $status,
+            'updated_at' => $this->now(),
+            'completed_at' => null,
+            'ignored_at' => null,
+        ];
+        if ($status === 'done') {
+            $update['completed_at'] = $this->now();
+        } elseif ($status === 'ignored') {
+            $update['ignored_at'] = $this->now();
+        }
+        $updated = $this->db->update($this->table('seo_page_tasks'), $update, ['id' => $task_id]);
+        if ($updated === false) {
+            $this->redirect_with_message('sch-seo-cockpit', 'Taakstatus opslaan mislukt.', 'error', ['seo_page_id' => $page_id]);
+        }
+
+        $this->redirect_with_message('sch-seo-cockpit', 'Taakstatus bijgewerkt.', 'success', ['seo_page_id' => $page_id]);
+    }
+
+    public function render_seo_cockpit(): void {
+        if (!$this->table_exists($this->table('seo_pages')) || !$this->table_exists($this->table('seo_page_tasks'))) {
+            ?>
+            <div class="wrap">
+                <h1>SEO Cockpit</h1>
+                <?php $this->render_admin_notice(); ?>
+                <div class="notice notice-warning"><p>SEO cockpit tabellen ontbreken. Activeer de plugin opnieuw om migraties uit te voeren.</p></div>
+            </div>
+            <?php
+            return;
+        }
+        $filters = $this->get_seo_cockpit_filters();
+        if ((int) $filters['seo_page_id'] > 0) {
+            $this->render_seo_page_detail((int) $filters['seo_page_id'], $filters);
+            return;
+        }
+
+        $clients = (array) $this->db->get_results("SELECT id, name FROM {$this->table('clients')} ORDER BY name ASC");
+        $sites = (array) $this->db->get_results("SELECT id, name FROM {$this->table('sites')} ORDER BY name ASC");
+        $cards = $this->get_seo_cockpit_cards($filters);
+        $pages = $this->get_seo_cockpit_pages($filters);
+        ?>
+        <div class="wrap">
+            <h1>SEO Cockpit</h1>
+            <?php $this->render_admin_notice(); ?>
+
+            <div class="sch-card" style="margin-top:12px;margin-bottom:12px;">
+                <form method="get" style="display:grid;grid-template-columns:repeat(6,minmax(120px,1fr));gap:8px;align-items:end;">
+                    <input type="hidden" name="page" value="sch-seo-cockpit">
+                    <label>Klant
+                        <select name="client_id">
+                            <option value="0">Alle klanten</option>
+                            <?php foreach ($clients as $client) : ?>
+                                <option value="<?php echo (int) $client->id; ?>" <?php selected((int) $filters['client_id'], (int) $client->id); ?>><?php echo esc_html((string) $client->name); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                    <label>Site
+                        <select name="site_id">
+                            <option value="0">Alle sites</option>
+                            <?php foreach ($sites as $site) : ?>
+                                <option value="<?php echo (int) $site->id; ?>" <?php selected((int) $filters['site_id'], (int) $site->id); ?>><?php echo esc_html((string) $site->name); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                    <label>Status
+                        <select name="status">
+                            <?php foreach (['all' => 'Alle statussen', 'open' => 'Open', 'in_progress' => 'In behandeling', 'done' => 'Klaar', 'ignored' => 'Genegeerd'] as $status_key => $status_label) : ?>
+                                <option value="<?php echo esc_attr($status_key); ?>" <?php selected((string) $filters['status'], $status_key); ?>><?php echo esc_html($status_label); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                    <label>Prioriteit
+                        <select name="priority">
+                            <?php foreach (['all' => 'Alle prioriteiten', 'critical' => 'Kritiek', 'high' => 'Hoog', 'medium' => 'Medium', 'low' => 'Laag', 'quick_win' => 'Quick win'] as $priority_key => $priority_label) : ?>
+                                <option value="<?php echo esc_attr($priority_key); ?>" <?php selected((string) $filters['priority'], $priority_key); ?>><?php echo esc_html($priority_label); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                    <label>Type
+                        <select name="type">
+                            <?php foreach ($this->seo_cockpit_type_options() as $type_key => $type_label) : ?>
+                                <option value="<?php echo esc_attr($type_key); ?>" <?php selected((string) $filters['type'], $type_key); ?>><?php echo esc_html($type_label); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                    <label>Zoek
+                        <input type="text" name="search" value="<?php echo esc_attr((string) $filters['search']); ?>" placeholder="URL, titel of keyword">
+                    </label>
+                    <p style="grid-column:1/-1;margin:0;">
+                        <button class="button button-primary">Filter</button>
+                        <a class="button" href="<?php echo esc_url(admin_url('admin.php?page=sch-seo-cockpit')); ?>">Reset</a>
+                    </p>
+                </form>
+            </div>
+
+            <div class="sch-card" style="margin-top:12px;margin-bottom:12px;">
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
+                    <?php wp_nonce_field('sch_seo_sync_pages'); ?>
+                    <input type="hidden" name="action" value="sch_seo_sync_pages">
+                    <input type="hidden" name="client_id" value="<?php echo (int) $filters['client_id']; ?>">
+                    <button class="button">Pages synchroniseren</button>
+                </form>
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form" style="margin-left:8px;">
+                    <?php wp_nonce_field('sch_seo_run_recommendations'); ?>
+                    <input type="hidden" name="action" value="sch_seo_run_recommendations">
+                    <input type="hidden" name="client_id" value="<?php echo (int) $filters['client_id']; ?>">
+                    <input type="hidden" name="site_id" value="<?php echo (int) $filters['site_id']; ?>">
+                    <button class="button button-primary">Aanbevelingen opnieuw berekenen</button>
+                </form>
+            </div>
+
+            <div class="sch-grid-stats" style="max-width:1240px;">
+                <?php foreach ($cards as $label => $value) : ?>
+                    <div class="sch-stat"><div class="sch-stat-label"><?php echo esc_html($label); ?></div><div class="sch-stat-value"><?php echo (int) $value; ?></div></div>
+                <?php endforeach; ?>
+            </div>
+
+            <h2 style="margin-top:18px;">Pagina-overzicht</h2>
+            <table class="widefat striped">
+                <thead><tr>
+                    <th>Pagina</th><th>Klant/Site</th><th>GSC</th><th>SEO score</th><th>Open taken</th><th>Prioriteit top</th><th>Focus keyword</th><th>Actie</th>
+                </tr></thead>
+                <tbody>
+                <?php if ($pages) : foreach ($pages as $row) : ?>
+                    <tr>
+                        <td>
+                            <code><?php echo esc_html((string) $row['path']); ?></code><br>
+                            <?php echo esc_html((string) ($row['title'] ?: '—')); ?>
+                        </td>
+                        <td><?php echo esc_html((string) ($row['client_name'] ?: '—')); ?><br><span class="sch-muted"><?php echo esc_html((string) ($row['site_name'] ?: '—')); ?></span></td>
+                        <td><?php echo (int) round((float) $row['gsc_clicks']); ?> clicks / <?php echo (int) round((float) $row['gsc_impressions']); ?> impr<br>CTR <?php echo esc_html((string) round((float) $row['gsc_ctr'] * 100, 2)); ?>% | Pos <?php echo esc_html((string) round((float) $row['gsc_position'], 2)); ?></td>
+                        <td><?php echo esc_html((string) round((float) $row['seo_score'], 1)); ?></td>
+                        <td><span class="sch-badge sch-badge-open"><?php echo (int) $row['open_tasks']; ?></span></td>
+                        <td><?php echo esc_html($this->format_priority_label((float) $row['top_priority'])); ?> (<?php echo esc_html((string) round((float) $row['top_priority'], 2)); ?>)</td>
+                        <td><?php echo esc_html((string) ($row['primary_keyword'] ?: 'Ontbreekt')); ?></td>
+                        <td><a class="button button-small" href="<?php echo esc_url(add_query_arg(['page' => 'sch-seo-cockpit', 'seo_page_id' => (int) $row['id']], admin_url('admin.php'))); ?>">Open analyse</a></td>
+                    </tr>
+                <?php endforeach; else : ?>
+                    <tr><td colspan="8">Geen pagina's gevonden voor de huidige filters.</td></tr>
+                <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+
+    private function render_seo_page_detail(int $page_id, array $filters): void {
+        $page = $this->get_seo_page_by_id($page_id);
+        if (!$page) {
+            $this->redirect_with_message('sch-seo-cockpit', 'Pagina niet gevonden.', 'error');
+        }
+        $history = (array) $this->db->get_results($this->db->prepare(
+            "SELECT metric_date, clicks, impressions, ctr, avg_position
+             FROM {$this->table('orchestrator_page_metrics_daily')}
+             WHERE client_id=%d AND page_path=%s ORDER BY metric_date DESC LIMIT 30",
+            (int) $page['client_id'],
+            (string) $page['path']
+        ));
+        $queries = (array) $this->db->get_results($this->db->prepare(
+            "SELECT query, SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(position) AS position
+             FROM {$this->table('gsc_query_page_metrics')}
+             WHERE client_id=%d AND page_path=%s GROUP BY query ORDER BY impressions DESC LIMIT 10",
+            (int) $page['client_id'],
+            (string) $page['path']
+        ));
+        $tasks = (array) $this->db->get_results($this->db->prepare(
+            "SELECT * FROM {$this->table('seo_page_tasks')} WHERE page_id=%d ORDER BY priority_score DESC, id DESC LIMIT 200",
+            $page_id
+        ));
+        ?>
+        <div class="wrap">
+            <h1>Pagina SEO analyse</h1>
+            <?php $this->render_admin_notice(); ?>
+            <p><a href="<?php echo esc_url(add_query_arg(['page' => 'sch-seo-cockpit'], admin_url('admin.php'))); ?>">&larr; Terug naar SEO Cockpit</a></p>
+
+            <h2>Basisgegevens</h2>
+            <table class="widefat striped">
+                <tbody>
+                    <tr><th>URL</th><td><a href="<?php echo esc_url((string) $page['url']); ?>" target="_blank" rel="noopener"><?php echo esc_html((string) $page['url']); ?></a></td><th>Statuscode</th><td><?php echo (int) $page['status_code']; ?></td></tr>
+                    <tr><th>Titel</th><td><?php echo esc_html((string) ($page['title'] ?: '—')); ?></td><th>H1</th><td><?php echo esc_html((string) ($page['h1'] ?: '—')); ?></td></tr>
+                    <tr><th>Meta title</th><td><?php echo esc_html((string) ($page['meta_title'] ?: '—')); ?></td><th>Meta description</th><td><?php echo esc_html((string) ($page['meta_description'] ?: '—')); ?></td></tr>
+                    <tr><th>Canonical</th><td><?php echo esc_html((string) ($page['canonical_url'] ?: '—')); ?></td><th>Indexability</th><td><?php echo esc_html((string) $page['indexability_status']); ?> / <?php echo esc_html((string) $page['robots_status']); ?></td></tr>
+                    <tr><th>Word count</th><td><?php echo (int) $page['word_count']; ?></td><th>Laatst gesynchroniseerd</th><td><?php echo esc_html((string) ($page['last_gsc_synced_at'] ?: '—')); ?></td></tr>
+                </tbody>
+            </table>
+
+            <h2 style="margin-top:18px;">Performance</h2>
+            <p><strong>Clicks:</strong> <?php echo (int) round((float) $page['gsc_clicks']); ?> |
+               <strong>Impressions:</strong> <?php echo (int) round((float) $page['gsc_impressions']); ?> |
+               <strong>CTR:</strong> <?php echo esc_html((string) round((float) $page['gsc_ctr'] * 100, 2)); ?>% |
+               <strong>Positie:</strong> <?php echo esc_html((string) round((float) $page['gsc_position'], 2)); ?></p>
+            <table class="widefat striped">
+                <thead><tr><th>Datum</th><th>Clicks</th><th>Impressions</th><th>CTR</th><th>Positie</th></tr></thead>
+                <tbody>
+                    <?php if ($history) : foreach ($history as $row) : ?>
+                        <tr><td><?php echo esc_html((string) $row->metric_date); ?></td><td><?php echo (int) round((float) $row->clicks); ?></td><td><?php echo (int) round((float) $row->impressions); ?></td><td><?php echo esc_html((string) round((float) $row->ctr * 100, 2)); ?>%</td><td><?php echo esc_html((string) round((float) $row->avg_position, 2)); ?></td></tr>
+                    <?php endforeach; else : ?>
+                        <tr><td colspan="5">Geen historische data.</td></tr>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+
+            <h3 style="margin-top:14px;">Belangrijkste queries</h3>
+            <table class="widefat striped">
+                <thead><tr><th>Query</th><th>Clicks</th><th>Impressions</th><th>Positie</th></tr></thead>
+                <tbody>
+                    <?php if ($queries) : foreach ($queries as $query) : ?>
+                        <tr><td><?php echo esc_html((string) $query->query); ?></td><td><?php echo (int) round((float) $query->clicks); ?></td><td><?php echo (int) round((float) $query->impressions); ?></td><td><?php echo esc_html((string) round((float) $query->position, 2)); ?></td></tr>
+                    <?php endforeach; else : ?>
+                        <tr><td colspan="4">Geen querydata.</td></tr>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+
+            <h2 style="margin-top:18px;">SEO issues, wins en actielijst</h2>
+            <table class="widefat striped">
+                <thead><tr><th>Type</th><th>Titel</th><th>Aanbeveling</th><th>Impact/Effort/Confidence</th><th>Prioriteit</th><th>Status</th><th>Acties</th></tr></thead>
+                <tbody>
+                    <?php if ($tasks) : foreach ($tasks as $task) : ?>
+                        <tr>
+                            <td><?php echo esc_html((string) $task->type); ?></td>
+                            <td><?php echo esc_html((string) $task->title); ?></td>
+                            <td><?php echo esc_html((string) $task->recommendation); ?></td>
+                            <td><?php echo esc_html((string) round((float) $task->impact_score, 1)); ?> / <?php echo esc_html((string) round((float) $task->effort_score, 1)); ?> / <?php echo esc_html((string) round((float) $task->confidence_score, 1)); ?></td>
+                            <td><?php echo esc_html($this->format_priority_label((float) $task->priority_score)); ?> (<?php echo esc_html((string) round((float) $task->priority_score, 2)); ?>)</td>
+                            <td><?php echo esc_html((string) $task->status); ?></td>
+                            <td>
+                                <?php foreach (['open' => 'Open', 'in_progress' => 'In behandeling', 'done' => 'Klaar', 'ignored' => 'Negeren'] as $status_key => $status_label) : ?>
+                                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form" style="margin-bottom:4px;">
+                                        <?php wp_nonce_field('sch_seo_update_task_status'); ?>
+                                        <input type="hidden" name="action" value="sch_seo_update_task_status">
+                                        <input type="hidden" name="task_id" value="<?php echo (int) $task->id; ?>">
+                                        <input type="hidden" name="page_id" value="<?php echo (int) $page_id; ?>">
+                                        <input type="hidden" name="status" value="<?php echo esc_attr($status_key); ?>">
+                                        <button class="button button-small"><?php echo esc_html($status_label); ?></button>
+                                    </form>
+                                <?php endforeach; ?>
+                            </td>
+                        </tr>
+                    <?php endforeach; else : ?>
+                        <tr><td colspan="7">Geen taken voor deze pagina.</td></tr>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+
+    private function get_seo_cockpit_filters(): array {
+        $status = sanitize_key((string) ($_GET['status'] ?? 'all'));
+        if (!in_array($status, ['all', 'open', 'in_progress', 'done', 'ignored'], true)) {
+            $status = 'all';
+        }
+        $priority = sanitize_key((string) ($_GET['priority'] ?? 'all'));
+        if (!in_array($priority, ['all', 'critical', 'high', 'medium', 'low', 'quick_win'], true)) {
+            $priority = 'all';
+        }
+
+        $type = sanitize_key((string) ($_GET['type'] ?? 'all'));
+        if (!array_key_exists($type, $this->seo_cockpit_type_options())) {
+            $type = 'all';
+        }
+
+        return [
+            'client_id' => max(0, (int) ($_GET['client_id'] ?? 0)),
+            'site_id' => max(0, (int) ($_GET['site_id'] ?? 0)),
+            'status' => $status,
+            'priority' => $priority,
+            'type' => $type,
+            'search' => sanitize_text_field((string) ($_GET['search'] ?? '')),
+            'seo_page_id' => max(0, (int) ($_GET['seo_page_id'] ?? 0)),
+        ];
+    }
+
+    private function seo_cockpit_type_options(): array {
+        return [
+            'all' => 'Alle types',
+            'content' => 'Content',
+            'technical' => 'Technisch',
+            'ctr' => 'CTR',
+            'internal_link' => 'Interne links',
+            'indexability' => 'Indexatie',
+            'meta_title' => 'Meta title',
+            'meta_description' => 'Meta description',
+            'schema' => 'Structured data',
+            'performance' => 'Performance',
+            'duplicate_content' => 'Duplicate content',
+            'missing_keyword' => 'Focus keyword',
+            'outdated_content' => 'Outdated content',
+        ];
+    }
+
+    private function get_seo_cockpit_pages(array $filters): array {
+        $where = ['1=1'];
+        $params = [];
+        if ((int) $filters['client_id'] > 0) {
+            $where[] = 'p.client_id=%d';
+            $params[] = (int) $filters['client_id'];
+        }
+        if ((int) $filters['site_id'] > 0) {
+            $where[] = 'p.site_id=%d';
+            $params[] = (int) $filters['site_id'];
+        }
+        if ((string) $filters['search'] !== '') {
+            $where[] = '(p.path LIKE %s OR p.title LIKE %s OR p.primary_keyword LIKE %s)';
+            $like = '%' . $this->db->esc_like((string) $filters['search']) . '%';
+            $params[] = $like;
+            $params[] = $like;
+            $params[] = $like;
+        }
+
+        $task_filters = [];
+        if ((string) $filters['status'] !== 'all') {
+            $task_filters[] = $this->db->prepare('t.status=%s', (string) $filters['status']);
+        }
+        if ((string) $filters['type'] !== 'all') {
+            $task_filters[] = $this->db->prepare('t.type=%s', (string) $filters['type']);
+        }
+        if ((string) $filters['priority'] === 'critical') {
+            $task_filters[] = 't.priority_score>=8';
+        } elseif ((string) $filters['priority'] === 'high') {
+            $task_filters[] = 't.priority_score>=5 AND t.priority_score<8';
+        } elseif ((string) $filters['priority'] === 'medium') {
+            $task_filters[] = 't.priority_score>=2 AND t.priority_score<5';
+        } elseif ((string) $filters['priority'] === 'low') {
+            $task_filters[] = 't.priority_score<2';
+        } elseif ((string) $filters['priority'] === 'quick_win') {
+            $task_filters[] = 't.effort_score<=3 AND t.impact_score>=7';
+        }
+        $task_filter_sql = $task_filters ? ' AND ' . implode(' AND ', $task_filters) : '';
+
+        $sql = "SELECT p.*, c.name AS client_name, s.name AS site_name,
+                       COUNT(CASE WHEN t.status='open' THEN 1 END) AS open_tasks,
+                       MAX(CASE WHEN t.status IN ('open','in_progress') THEN t.priority_score ELSE 0 END) AS top_priority
+                FROM {$this->table('seo_pages')} p
+                LEFT JOIN {$this->table('clients')} c ON c.id=p.client_id
+                LEFT JOIN {$this->table('sites')} s ON s.id=p.site_id
+                LEFT JOIN {$this->table('seo_page_tasks')} t ON t.page_id=p.id {$task_filter_sql}
+                WHERE " . implode(' AND ', $where) . "
+                GROUP BY p.id";
+        if ((string) $filters['status'] !== 'all' || (string) $filters['type'] !== 'all' || (string) $filters['priority'] !== 'all') {
+            $sql .= " HAVING COUNT(t.id) > 0";
+        }
+        $sql .= "
+                ORDER BY top_priority DESC, p.gsc_impressions DESC, p.id DESC
+                LIMIT 300";
+
+        return (array) ($params ? $this->db->get_results($this->db->prepare($sql, ...$params), ARRAY_A) : $this->db->get_results($sql, ARRAY_A));
+    }
+
+    private function get_seo_cockpit_cards(array $filters): array {
+        $client_sql = (int) $filters['client_id'] > 0 ? $this->db->prepare(' AND p.client_id=%d', (int) $filters['client_id']) : '';
+        $site_sql = (int) $filters['site_id'] > 0 ? $this->db->prepare(' AND p.site_id=%d', (int) $filters['site_id']) : '';
+        $pages_table = $this->table('seo_pages');
+        $tasks_table = $this->table('seo_page_tasks');
+
+        $open_tasks = (int) $this->db->get_var("SELECT COUNT(*) FROM {$tasks_table} t INNER JOIN {$pages_table} p ON p.id=t.page_id WHERE t.status='open' {$client_sql} {$site_sql}");
+        $critical = (int) $this->db->get_var("SELECT COUNT(*) FROM {$tasks_table} t INNER JOIN {$pages_table} p ON p.id=t.page_id WHERE t.status='open' AND t.priority_score>=8 {$client_sql} {$site_sql}");
+        $quick_wins = (int) $this->db->get_var("SELECT COUNT(*) FROM {$tasks_table} t INNER JOIN {$pages_table} p ON p.id=t.page_id WHERE t.status='open' AND t.impact_score>=7 AND t.effort_score<=3 {$client_sql} {$site_sql}");
+        $high_potential = (int) $this->db->get_var("SELECT COUNT(*) FROM {$pages_table} p WHERE p.gsc_impressions>=100 AND p.gsc_position BETWEEN 4 AND 15 {$client_sql} {$site_sql}");
+        $missing_keyword = (int) $this->db->get_var("SELECT COUNT(*) FROM {$pages_table} p WHERE p.primary_keyword='' {$client_sql} {$site_sql}");
+        $low_ctr = (int) $this->db->get_var("SELECT COUNT(*) FROM {$pages_table} p WHERE p.gsc_impressions>=100 AND p.gsc_ctr<0.02 {$client_sql} {$site_sql}");
+        $high_impr_low_click = (int) $this->db->get_var("SELECT COUNT(*) FROM {$pages_table} p WHERE p.gsc_impressions>=500 AND p.gsc_clicks<10 {$client_sql} {$site_sql}");
+        $weak_meta = (int) $this->db->get_var("SELECT COUNT(*) FROM {$pages_table} p WHERE p.meta_title='' OR p.meta_description='' {$client_sql} {$site_sql}");
+        $weak_internal_links = (int) $this->db->get_var("SELECT COUNT(*) FROM {$pages_table} p WHERE p.internal_link_score>0 AND p.internal_link_score<40 {$client_sql} {$site_sql}");
+
+        return [
+            'Open taken' => $open_tasks,
+            'Kritieke issues' => $critical,
+            'Quick wins' => $quick_wins,
+            'Pagina’s met hoge potentie' => $high_potential,
+            'Zonder focus keyword' => $missing_keyword,
+            'Lage CTR' => $low_ctr,
+            'Veel vertoningen, weinig clicks' => $high_impr_low_click,
+            'Zwakke of ontbrekende meta' => $weak_meta,
+            'Interne link kansen' => $weak_internal_links,
+        ];
+    }
+
+    private function sync_seo_pages(int $client_id = 0): int {
+        $count = 0;
+        $where = $client_id > 0 ? $this->db->prepare('WHERE a.client_id=%d', $client_id) : '';
+        $article_rows = (array) $this->db->get_results(
+            "SELECT a.id, a.client_id, a.site_id, a.remote_url, a.canonical_url, a.title, a.meta_title, a.meta_description, a.content, a.updated_at
+             FROM {$this->table('articles')} a {$where} ORDER BY a.id DESC LIMIT 2000"
+        );
+        foreach ($article_rows as $article) {
+            $url = (string) ($article->remote_url ?: $article->canonical_url);
+            if ($url === '') {
+                continue;
+            }
+            $page_id = $this->upsert_seo_page([
+                'client_id' => (int) $article->client_id,
+                'site_id' => (int) $article->site_id,
+                'article_id' => (int) $article->id,
+                'url' => $url,
+                'title' => (string) $article->title,
+                'h1' => (string) $article->title,
+                'meta_title' => (string) $article->meta_title,
+                'meta_description' => (string) ($article->meta_description ?? ''),
+                'canonical_url' => (string) ($article->canonical_url ?? ''),
+                'status_code' => 200,
+                'word_count' => str_word_count(wp_strip_all_tags((string) $article->content)),
+                'page_type' => 'article',
+                'last_crawled_at' => (string) $article->updated_at,
+            ]);
+            if ($page_id > 0) {
+                $count++;
+            }
+        }
+
+        $gsc_where = $client_id > 0 ? $this->db->prepare('WHERE g.client_id=%d', $client_id) : '';
+        $gsc_rows = (array) $this->db->get_results(
+            "SELECT g.client_id, MAX(g.site_id) AS site_id, g.page_url, g.page_path, SUM(g.clicks) AS clicks, SUM(g.impressions) AS impressions, AVG(g.ctr) AS ctr, AVG(g.position) AS position, MAX(g.metric_date) AS last_date
+             FROM {$this->table('gsc_page_metrics')} g {$gsc_where}
+             GROUP BY g.client_id, g.page_path
+             ORDER BY impressions DESC LIMIT 3000"
+        );
+        foreach ($gsc_rows as $row) {
+            $page_id = $this->upsert_seo_page([
+                'client_id' => (int) $row->client_id,
+                'site_id' => (int) ($row->site_id ?? 0),
+                'url' => (string) $row->page_url,
+                'path' => (string) $row->page_path,
+                'gsc_clicks' => (float) $row->clicks,
+                'gsc_impressions' => (float) $row->impressions,
+                'gsc_ctr' => (float) $row->ctr,
+                'gsc_position' => (float) $row->position,
+                'last_gsc_synced_at' => (string) $row->last_date . ' 00:00:00',
+            ]);
+            if ($page_id > 0) {
+                $count++;
+            }
+        }
+        return $count;
+    }
+
+    private function run_seo_recommendation_engine(int $client_id = 0, int $site_id = 0): int {
+        $where = ['1=1'];
+        $params = [];
+        if ($client_id > 0) {
+            $where[] = 'client_id=%d';
+            $params[] = $client_id;
+        }
+        if ($site_id > 0) {
+            $where[] = 'site_id=%d';
+            $params[] = $site_id;
+        }
+        $sql = "SELECT * FROM {$this->table('seo_pages')} WHERE " . implode(' AND ', $where) . " ORDER BY gsc_impressions DESC, id DESC LIMIT 2000";
+        $pages = (array) ($params ? $this->db->get_results($this->db->prepare($sql, ...$params), ARRAY_A) : $this->db->get_results($sql, ARRAY_A));
+        $created = 0;
+
+        foreach ($pages as $page) {
+            $page_id = (int) ($page['id'] ?? 0);
+            if ($page_id <= 0) {
+                continue;
+            }
+            $title = (string) ($page['title'] ?: $page['path']);
+            $impressions = (float) ($page['gsc_impressions'] ?? 0);
+            $ctr = (float) ($page['gsc_ctr'] ?? 0);
+            $position = (float) ($page['gsc_position'] ?? 0);
+            $word_count = (int) ($page['word_count'] ?? 0);
+            $status_code = (int) ($page['status_code'] ?? 0);
+            $meta_title = (string) ($page['meta_title'] ?? '');
+            $meta_description = (string) ($page['meta_description'] ?? '');
+            $meta_title_length = function_exists('mb_strlen') ? mb_strlen($meta_title) : strlen($meta_title);
+            $meta_description_length = function_exists('mb_strlen') ? mb_strlen($meta_description) : strlen($meta_description);
+            $primary_keyword = (string) ($page['primary_keyword'] ?? '');
+            $canonical_url = (string) ($page['canonical_url'] ?? '');
+            $internal_link_score = (float) ($page['internal_link_score'] ?? 0);
+            $tasks = [];
+
+            if ($impressions >= 100 && $ctr > 0 && $ctr < 0.02) {
+                $tasks[] = [
+                    'type' => 'low_ctr',
+                    'title' => 'Lage CTR bij hoge vertoningen',
+                    'description' => $title . ' heeft veel vertoningen maar lage CTR.',
+                    'recommendation' => 'Herschrijf meta title en meta description met sterkere intentie-match en CTA.',
+                    'impact_score' => 8,
+                    'effort_score' => 3,
+                    'confidence_score' => 7,
+                    'source' => 'gsc_detector',
+                    'metadata' => ['rule' => 'high_impressions_low_ctr'],
+                ];
+            }
+            if ($position >= 4 && $position <= 15) {
+                $tasks[] = [
+                    'type' => 'content_gap',
+                    'title' => 'Ranking opportunity (positie 4-15)',
+                    'description' => 'Pagina rankt op positie ' . round($position, 2) . ' met ruimte naar top-3.',
+                    'recommendation' => 'Optimaliseer contentdiepte, headings, semantiek en intent alignment voor top-3 push.',
+                    'impact_score' => 7,
+                    'effort_score' => 4,
+                    'confidence_score' => 7,
+                    'source' => 'gsc_detector',
+                    'metadata' => ['rule' => 'position_4_15'],
+                ];
+            }
+            if ($word_count > 0 && $word_count < 600) {
+                $tasks[] = [
+                    'type' => 'thin_content',
+                    'title' => 'Dunne content',
+                    'description' => 'Lage woordomvang: ' . $word_count . ' woorden.',
+                    'recommendation' => 'Breid de content uit met relevante subtopics, FAQ en bewijs/voorbeelden.',
+                    'impact_score' => 6,
+                    'effort_score' => 5,
+                    'confidence_score' => 6,
+                    'source' => 'content_detector',
+                    'metadata' => ['rule' => 'word_count_low'],
+                ];
+            }
+            if ($meta_title === '' || $meta_title_length > 65) {
+                $tasks[] = [
+                    'type' => 'meta_title',
+                    'title' => 'Meta title ontbreekt of is te lang',
+                    'description' => $meta_title === '' ? 'Meta title ontbreekt.' : 'Meta title lengte: ' . $meta_title_length,
+                    'recommendation' => 'Schrijf een duidelijke title met primary keyword vooraan (50-60 tekens).',
+                    'impact_score' => 8,
+                    'effort_score' => 2,
+                    'confidence_score' => 8,
+                    'source' => 'meta_detector',
+                    'metadata' => ['rule' => 'meta_title_missing_or_long'],
+                ];
+            }
+            if ($meta_description === '' || $meta_description_length < 70 || $meta_description_length > 160) {
+                $tasks[] = [
+                    'type' => 'meta_description',
+                    'title' => 'Meta description ontbreekt of is niet optimaal',
+                    'description' => $meta_description === '' ? 'Meta description ontbreekt.' : 'Meta description lengte: ' . $meta_description_length,
+                    'recommendation' => 'Schrijf een meta description van 120-155 tekens met USP + duidelijke actie.',
+                    'impact_score' => 6,
+                    'effort_score' => 2,
+                    'confidence_score' => 8,
+                    'source' => 'meta_detector',
+                    'metadata' => ['rule' => 'meta_description_quality'],
+                ];
+            }
+            if ($status_code > 0 && $status_code !== 200) {
+                $tasks[] = [
+                    'type' => 'technical',
+                    'title' => 'Technische statuscode issue',
+                    'description' => 'Statuscode gedetecteerd: ' . $status_code,
+                    'recommendation' => 'Herstel responsecode naar 200 of zorg voor correcte redirect/indexatie-afhandeling.',
+                    'impact_score' => 9,
+                    'effort_score' => 5,
+                    'confidence_score' => 8,
+                    'source' => 'technical_detector',
+                    'metadata' => ['rule' => 'status_code_non_200', 'status_code' => $status_code],
+                ];
+            }
+            if ($canonical_url === '') {
+                $tasks[] = [
+                    'type' => 'indexability',
+                    'title' => 'Canonical ontbreekt',
+                    'description' => 'Er is geen canonical URL opgeslagen voor deze pagina.',
+                    'recommendation' => 'Controleer canonical implementatie en wijs self-referencing canonical toe.',
+                    'impact_score' => 6,
+                    'effort_score' => 3,
+                    'confidence_score' => 6,
+                    'source' => 'technical_detector',
+                    'metadata' => ['rule' => 'canonical_missing'],
+                ];
+            }
+            if ($primary_keyword === '') {
+                $tasks[] = [
+                    'type' => 'missing_keyword',
+                    'title' => 'Focus keyword ontbreekt',
+                    'description' => 'Pagina heeft nog geen primary keyword toegewezen.',
+                    'recommendation' => 'Kies een focus keyword en stem title/H1/intro af op zoekintentie.',
+                    'impact_score' => 7,
+                    'effort_score' => 2,
+                    'confidence_score' => 7,
+                    'source' => 'content_detector',
+                    'metadata' => ['rule' => 'primary_keyword_missing'],
+                ];
+            }
+            if ($internal_link_score > 0 && $internal_link_score < 40) {
+                $tasks[] = [
+                    'type' => 'internal_link',
+                    'title' => 'Interne linkkansen',
+                    'description' => 'Interne link score is laag: ' . round($internal_link_score, 1),
+                    'recommendation' => 'Voeg contextuele interne links toe vanaf relevante autoriteitspagina’s.',
+                    'impact_score' => 7,
+                    'effort_score' => 3,
+                    'confidence_score' => 6,
+                    'source' => 'internal_link_detector',
+                    'metadata' => ['rule' => 'internal_link_score_low'],
+                ];
+            }
+            if ($impressions >= 500 && strtotime((string) ($page['updated_at'] ?? 'now')) < strtotime('-120 days')) {
+                $tasks[] = [
+                    'type' => 'outdated_content',
+                    'title' => 'Content refresh kandidaat',
+                    'description' => 'Hoge vertoningen maar pagina is mogelijk verouderd.',
+                    'recommendation' => 'Voer content refresh uit: update feiten, voorbeelden, PAA-vragen en metadata.',
+                    'impact_score' => 8,
+                    'effort_score' => 4,
+                    'confidence_score' => 6,
+                    'source' => 'refresh_detector',
+                    'metadata' => ['rule' => 'impressions_high_old_content'],
+                ];
+            }
+
+            foreach ($tasks as $task) {
+                $id = $this->upsert_seo_page_task(array_merge($task, ['page_id' => $page_id]));
+                if ($id > 0) {
+                    $created++;
+                }
+            }
+        }
+        $this->log('info', 'seo_cockpit', 'Recommendation engine uitgevoerd', [
+            'client_id' => $client_id,
+            'site_id' => $site_id,
+            'processed_pages' => count($pages),
+            'tasks_affected' => $created,
+        ]);
+        return $created;
+    }
+
+    private function format_priority_label(float $priority_score): string {
+        if ($priority_score >= 8) {
+            return 'Kritiek';
+        }
+        if ($priority_score >= 5) {
+            return 'Hoog';
+        }
+        if ($priority_score >= 2) {
+            return 'Medium';
+        }
+        if ($priority_score > 0) {
+            return 'Laag';
+        }
+        return '—';
     }
 
     public function render_performance(): void {
