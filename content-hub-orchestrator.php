@@ -13411,7 +13411,15 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <td><?php echo esc_html((string) $row->priority_score); ?></td>
                     <td><?php echo esc_html((string) $row->title); ?></td>
                     <td><?php echo esc_html((string) $row->recommended_action); ?></td>
-                    <td><code><?php echo esc_html($this->normalize_page_path((string) $row->page_url)); ?></code></td>
+                    <td>
+                        <?php if (!empty($row->page_url)) : ?>
+                            <a href="<?php echo esc_url((string) $row->page_url); ?>" target="_blank" rel="noopener noreferrer">
+                                <code><?php echo esc_html($this->normalize_page_path((string) $row->page_url)); ?></code>
+                            </a>
+                        <?php else : ?>
+                            <code><?php echo esc_html($this->normalize_page_path((string) $row->page_url)); ?></code>
+                        <?php endif; ?>
+                    </td>
                     <td>
                         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_signal'); ?><input type="hidden" name="action" value="sch_mark_signal_resolved"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button">Resolve</button></form>
                         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_signal'); ?><input type="hidden" name="action" value="sch_mark_signal_ignored"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button">Ignore</button></form>
