@@ -17,7 +17,7 @@ final class SCH_Orchestrator {
     const SERP_CRON_HOOK = 'sch_orchestrator_serp_intelligence_worker';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
-    const DB_VERSION = '0.9.0';
+    const DB_VERSION = '0.10.0';
     const EXACT_MATCH_THRESHOLD_PERCENT = 30;
 
     const OPTION_OPENAI_API_KEY = 'sch_openai_api_key';
@@ -346,6 +346,8 @@ final class SCH_Orchestrator {
         $orchestrator_page_metrics_daily = $this->table('orchestrator_page_metrics_daily');
         $orchestrator_opportunities = $this->table('orchestrator_opportunities');
         $orchestrator_tasks = $this->table('orchestrator_tasks');
+        $seo_pages = $this->table('seo_pages');
+        $seo_page_tasks = $this->table('seo_page_tasks');
 
         dbDelta("CREATE TABLE {$clients} (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -868,6 +870,76 @@ final class SCH_Orchestrator {
             KEY client_status_created (client_id, status, created_at),
             KEY opportunity_id (opportunity_id),
             KEY task_type (task_type)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$seo_pages} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NULL,
+            article_id BIGINT UNSIGNED NULL,
+            url TEXT NOT NULL,
+            path VARCHAR(255) NOT NULL DEFAULT '',
+            title VARCHAR(255) NOT NULL DEFAULT '',
+            h1 VARCHAR(255) NOT NULL DEFAULT '',
+            meta_title VARCHAR(255) NOT NULL DEFAULT '',
+            meta_description TEXT NULL,
+            canonical_url TEXT NULL,
+            status_code SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+            indexability_status VARCHAR(30) NOT NULL DEFAULT 'unknown',
+            robots_status VARCHAR(50) NOT NULL DEFAULT 'unknown',
+            canonical_status VARCHAR(50) NOT NULL DEFAULT 'unknown',
+            word_count INT UNSIGNED NOT NULL DEFAULT 0,
+            primary_keyword VARCHAR(191) NOT NULL DEFAULT '',
+            secondary_keywords LONGTEXT NULL,
+            page_type VARCHAR(50) NOT NULL DEFAULT 'unknown',
+            seo_score DECIMAL(6,2) NOT NULL DEFAULT 0,
+            content_score DECIMAL(6,2) NOT NULL DEFAULT 0,
+            technical_score DECIMAL(6,2) NOT NULL DEFAULT 0,
+            internal_link_score DECIMAL(6,2) NOT NULL DEFAULT 0,
+            ctr_score DECIMAL(6,2) NOT NULL DEFAULT 0,
+            gsc_clicks DECIMAL(20,6) NOT NULL DEFAULT 0,
+            gsc_impressions DECIMAL(20,6) NOT NULL DEFAULT 0,
+            gsc_ctr DECIMAL(20,10) NOT NULL DEFAULT 0,
+            gsc_position DECIMAL(20,10) NOT NULL DEFAULT 0,
+            last_crawled_at DATETIME NULL,
+            last_gsc_synced_at DATETIME NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY client_path_unique (client_id, path(191)),
+            KEY client_site (client_id, site_id),
+            KEY article_id (article_id),
+            KEY primary_keyword (primary_keyword)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$seo_page_tasks} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            client_id BIGINT UNSIGNED NOT NULL,
+            site_id BIGINT UNSIGNED NULL,
+            page_id BIGINT UNSIGNED NOT NULL,
+            type VARCHAR(60) NOT NULL DEFAULT '',
+            title VARCHAR(255) NOT NULL DEFAULT '',
+            description TEXT NULL,
+            recommendation TEXT NULL,
+            impact_score DECIMAL(8,4) NOT NULL DEFAULT 0,
+            effort_score DECIMAL(8,4) NOT NULL DEFAULT 0,
+            confidence_score DECIMAL(8,4) NOT NULL DEFAULT 0,
+            priority_score DECIMAL(12,6) NOT NULL DEFAULT 0,
+            status VARCHAR(20) NOT NULL DEFAULT 'open',
+            source VARCHAR(50) NOT NULL DEFAULT 'manual',
+            dedupe_hash CHAR(40) NOT NULL DEFAULT '',
+            detected_at DATETIME NOT NULL,
+            completed_at DATETIME NULL,
+            ignored_at DATETIME NULL,
+            assigned_to BIGINT UNSIGNED NULL,
+            metadata_json LONGTEXT NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY dedupe_hash_unique (dedupe_hash),
+            KEY page_status_priority (page_id, status, priority_score),
+            KEY client_status_priority (client_id, status, priority_score),
+            KEY type (type)
         ) {$charset};");
 
         $this->maybe_add_column($clients, 'research_urls', "ALTER TABLE {$clients} ADD COLUMN research_urls LONGTEXT NULL AFTER link_targets");
@@ -7571,6 +7643,178 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $path = preg_replace('#/+#', '/', $path);
         $path = rtrim($path, '/');
         return $path === '' ? '/' : $path;
+    }
+
+    private function calculate_seo_task_priority(float $impact_score, float $effort_score, float $confidence_score): float {
+        $effort = max($effort_score, 1.0);
+        return round(($impact_score * $confidence_score) / $effort, 6);
+    }
+
+    private function build_seo_task_dedupe_hash(int $page_id, string $type, array $metadata = []): string {
+        ksort($metadata);
+        return sha1($page_id . '|' . sanitize_key($type) . '|' . wp_json_encode($metadata));
+    }
+
+    private function get_seo_page_by_id(int $page_id): ?array {
+        if ($page_id <= 0) {
+            return null;
+        }
+
+        $row = $this->db->get_row($this->db->prepare(
+            "SELECT * FROM {$this->table('seo_pages')} WHERE id=%d LIMIT 1",
+            $page_id
+        ), ARRAY_A);
+
+        return is_array($row) ? $row : null;
+    }
+
+    private function upsert_seo_page(array $data): int {
+        $client_id = max(0, (int) ($data['client_id'] ?? 0));
+        if ($client_id <= 0) {
+            return 0;
+        }
+
+        $url = $this->normalize_page_url((string) ($data['url'] ?? ''));
+        $path = $this->normalize_page_path((string) ($data['path'] ?? $url));
+        if ($url === '' || $path === '') {
+            return 0;
+        }
+
+        $existing_id = (int) $this->db->get_var($this->db->prepare(
+            "SELECT id FROM {$this->table('seo_pages')} WHERE client_id=%d AND path=%s LIMIT 1",
+            $client_id,
+            $path
+        ));
+
+        $now = $this->now();
+        $payload = [
+            'client_id' => $client_id,
+            'site_id' => !empty($data['site_id']) ? max(0, (int) $data['site_id']) : null,
+            'article_id' => !empty($data['article_id']) ? max(0, (int) $data['article_id']) : null,
+            'url' => $url,
+            'path' => $path,
+            'title' => sanitize_text_field((string) ($data['title'] ?? '')),
+            'h1' => sanitize_text_field((string) ($data['h1'] ?? '')),
+            'meta_title' => sanitize_text_field((string) ($data['meta_title'] ?? '')),
+            'meta_description' => sanitize_textarea_field((string) ($data['meta_description'] ?? '')),
+            'canonical_url' => $this->normalize_page_url((string) ($data['canonical_url'] ?? '')),
+            'status_code' => max(0, (int) ($data['status_code'] ?? 0)),
+            'indexability_status' => sanitize_key((string) ($data['indexability_status'] ?? 'unknown')),
+            'robots_status' => sanitize_key((string) ($data['robots_status'] ?? 'unknown')),
+            'canonical_status' => sanitize_key((string) ($data['canonical_status'] ?? 'unknown')),
+            'word_count' => max(0, (int) ($data['word_count'] ?? 0)),
+            'primary_keyword' => sanitize_text_field((string) ($data['primary_keyword'] ?? '')),
+            'secondary_keywords' => isset($data['secondary_keywords']) ? wp_json_encode(array_values((array) $data['secondary_keywords'])) : null,
+            'page_type' => sanitize_key((string) ($data['page_type'] ?? 'unknown')),
+            'seo_score' => (float) ($data['seo_score'] ?? 0),
+            'content_score' => (float) ($data['content_score'] ?? 0),
+            'technical_score' => (float) ($data['technical_score'] ?? 0),
+            'internal_link_score' => (float) ($data['internal_link_score'] ?? 0),
+            'ctr_score' => (float) ($data['ctr_score'] ?? 0),
+            'gsc_clicks' => (float) ($data['gsc_clicks'] ?? 0),
+            'gsc_impressions' => (float) ($data['gsc_impressions'] ?? 0),
+            'gsc_ctr' => (float) ($data['gsc_ctr'] ?? 0),
+            'gsc_position' => (float) ($data['gsc_position'] ?? 0),
+            'last_crawled_at' => !empty($data['last_crawled_at']) ? gmdate('Y-m-d H:i:s', strtotime((string) $data['last_crawled_at'])) : null,
+            'last_gsc_synced_at' => !empty($data['last_gsc_synced_at']) ? gmdate('Y-m-d H:i:s', strtotime((string) $data['last_gsc_synced_at'])) : null,
+            'updated_at' => $now,
+        ];
+
+        if ($existing_id > 0) {
+            $updated = $this->db->update($this->table('seo_pages'), $payload, ['id' => $existing_id]);
+            if ($updated === false) {
+                $this->log('error', 'seo_pages', 'SEO pagina updaten mislukt', ['client_id' => $client_id, 'path' => $path, 'db_error' => $this->db->last_error]);
+                return 0;
+            }
+            return $existing_id;
+        }
+
+        $payload['created_at'] = $now;
+        $inserted = $this->db->insert($this->table('seo_pages'), $payload);
+        if ($inserted === false) {
+            $this->log('error', 'seo_pages', 'SEO pagina aanmaken mislukt', ['client_id' => $client_id, 'path' => $path, 'db_error' => $this->db->last_error]);
+            return 0;
+        }
+
+        return (int) $this->db->insert_id;
+    }
+
+    private function upsert_seo_page_task(array $data): int {
+        $page_id = max(0, (int) ($data['page_id'] ?? 0));
+        if ($page_id <= 0) {
+            return 0;
+        }
+
+        $page = $this->get_seo_page_by_id($page_id);
+        if (!$page) {
+            return 0;
+        }
+
+        $type = sanitize_key((string) ($data['type'] ?? ''));
+        if ($type === '') {
+            return 0;
+        }
+
+        $metadata = (array) ($data['metadata'] ?? []);
+        $dedupe_hash = $this->build_seo_task_dedupe_hash($page_id, $type, $metadata);
+        $existing_id = (int) $this->db->get_var($this->db->prepare(
+            "SELECT id FROM {$this->table('seo_page_tasks')} WHERE dedupe_hash=%s LIMIT 1",
+            $dedupe_hash
+        ));
+
+        $status = sanitize_key((string) ($data['status'] ?? 'open'));
+        if (!in_array($status, ['open', 'in_progress', 'done', 'ignored'], true)) {
+            $status = 'open';
+        }
+
+        $impact_score = max(0.0, (float) ($data['impact_score'] ?? 0));
+        $effort_score = max(0.0, (float) ($data['effort_score'] ?? 0));
+        $confidence_score = max(0.0, (float) ($data['confidence_score'] ?? 0));
+        $priority_score = isset($data['priority_score'])
+            ? max(0.0, (float) $data['priority_score'])
+            : $this->calculate_seo_task_priority($impact_score, $effort_score, $confidence_score);
+
+        $now = $this->now();
+        $payload = [
+            'client_id' => (int) ($page['client_id'] ?? 0),
+            'site_id' => !empty($page['site_id']) ? (int) $page['site_id'] : null,
+            'page_id' => $page_id,
+            'type' => $type,
+            'title' => sanitize_text_field((string) ($data['title'] ?? '')),
+            'description' => sanitize_textarea_field((string) ($data['description'] ?? '')),
+            'recommendation' => sanitize_textarea_field((string) ($data['recommendation'] ?? '')),
+            'impact_score' => $impact_score,
+            'effort_score' => $effort_score,
+            'confidence_score' => $confidence_score,
+            'priority_score' => $priority_score,
+            'status' => $status,
+            'source' => sanitize_key((string) ($data['source'] ?? 'manual')),
+            'dedupe_hash' => $dedupe_hash,
+            'detected_at' => !empty($data['detected_at']) ? gmdate('Y-m-d H:i:s', strtotime((string) $data['detected_at'])) : $now,
+            'completed_at' => $status === 'done' ? $now : null,
+            'ignored_at' => $status === 'ignored' ? $now : null,
+            'assigned_to' => !empty($data['assigned_to']) ? (int) $data['assigned_to'] : null,
+            'metadata_json' => !empty($metadata) ? wp_json_encode($metadata) : null,
+            'updated_at' => $now,
+        ];
+
+        if ($existing_id > 0) {
+            $updated = $this->db->update($this->table('seo_page_tasks'), $payload, ['id' => $existing_id]);
+            if ($updated === false) {
+                $this->log('error', 'seo_tasks', 'SEO taak updaten mislukt', ['task_id' => $existing_id, 'db_error' => $this->db->last_error]);
+                return 0;
+            }
+            return $existing_id;
+        }
+
+        $payload['created_at'] = $now;
+        $inserted = $this->db->insert($this->table('seo_page_tasks'), $payload);
+        if ($inserted === false) {
+            $this->log('error', 'seo_tasks', 'SEO taak aanmaken mislukt', ['page_id' => $page_id, 'type' => $type, 'db_error' => $this->db->last_error]);
+            return 0;
+        }
+
+        return (int) $this->db->insert_id;
     }
 
     private function match_article_by_url(int $client_id, string $page_url): ?object {
