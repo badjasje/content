@@ -10821,11 +10821,11 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             $opportunity_id
         ));
         $explainability = [
-            'Topdriver: positie- en impressiecombinatie triggert ' . $type . '.',
-            'Delta 7d clicks: ' . round(((float) ($input['delta_clicks_7d'] ?? 0)) * 100, 2) . '%.',
-            'Delta 28d clicks: ' . round(((float) ($input['delta_clicks_28d'] ?? 0)) * 100, 2) . '%.',
-            'Business: cluster potentie en conv-proxy verhogen impact.',
-            'Confidence: datafallbacks toegepast waar brondata ontbreekt.',
+            'Belangrijkste reden: combinatie van positie en vertoningen geeft een duidelijke verbeterkans (' . $type . ').',
+            'Verandering in kliks (laatste 7 dagen): ' . round(((float) ($input['delta_clicks_7d'] ?? 0)) * 100, 2) . '%.',
+            'Verandering in kliks (laatste 28 dagen): ' . round(((float) ($input['delta_clicks_28d'] ?? 0)) * 100, 2) . '%.',
+            'Zakelijke impact: pagina zit in een cluster met kans op extra verkeer/conversie.',
+            'Betrouwbaarheid: ontbrekende data is aangevuld met veilige fallback-regels.',
         ];
         if (!empty($input['data_quality_warning'])) {
             $explainability[] = 'Datakwaliteit: ' . (string) $input['data_quality_warning'];
@@ -11302,21 +11302,29 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
             <?php if ($tab === 'today-board') : ?>
                 <h2>Today Board (MVP)</h2>
+                <p class="description" style="max-width:980px;">
+                    Dit overzicht laat zien welke SEO-kansen nu de meeste aandacht verdienen. Beweeg met je muis over termen met een tooltip voor extra uitleg.
+                </p>
                 <table class="widefat striped">
-                    <thead><tr><th>Score</th><th>Type</th><th>Canonical URL</th><th>Cluster</th><th>Next best action</th><th>Subscores</th><th>Explainability</th><th>Status</th><th>Acties</th></tr></thead>
+                    <thead><tr><th title="Hoe hoger deze score, hoe interessanter deze kans op dit moment.">Kansscore</th><th title="Het soort optimalisatie dat waarschijnlijk het meest oplevert.">Soort kans</th><th>Canonical URL</th><th title="Groep van pagina's over hetzelfde onderwerp.">Cluster</th><th title="Eerste concrete stap die je nu kunt uitvoeren.">Eerstvolgende stap</th><th title="Opbouw van de score in eenvoudige onderdelen.">Waarom deze score?</th><th>Uitleg in gewone taal</th><th>Status</th><th>Acties</th></tr></thead>
                     <tbody>
                     <?php if ($today_rows) : foreach ($today_rows as $row) : $bullets = $row['explainability']; ?>
                         <tr>
                             <td><?php echo esc_html((string) round((float) $row['score'], 1)); ?></td>
-                            <td><?php echo esc_html((string) $row['opportunity_type']); ?></td>
+                            <td title="<?php echo esc_attr((string) $row['opportunity_type']); ?>"><?php echo esc_html($this->seo_cockpit_humanize_opportunity_type((string) $row['opportunity_type'])); ?></td>
                             <td><code><?php echo esc_html((string) $row['canonical_url']); ?></code></td>
                             <td><?php echo esc_html((string) ($row['cluster_key'] ?: '—')); ?></td>
-                            <td><?php echo esc_html((string) ($row['next_best_action'] ?: 'Review needed')); ?></td>
-                            <td>I <?php echo esc_html((string) $row['impact_score']); ?> / K <?php echo esc_html((string) $row['chance_score']); ?> / V <?php echo esc_html((string) $row['confidence_score']); ?> / S <?php echo esc_html((string) $row['speed_score']); ?></td>
+                            <td><?php echo esc_html((string) ($row['next_best_action'] ?: 'Handmatige check nodig')); ?></td>
+                            <td>
+                                <abbr title="Impact: verwachte opbrengst als je deze kans uitvoert.">Impact</abbr>: <?php echo esc_html((string) $row['impact_score']); ?><br>
+                                <abbr title="Kans: hoe haalbaar een verbetering is binnen korte tijd.">Kans</abbr>: <?php echo esc_html((string) $row['chance_score']); ?><br>
+                                <abbr title="Betrouwbaarheid: hoe zeker we zijn op basis van de beschikbare data.">Betrouwbaarheid</abbr>: <?php echo esc_html((string) $row['confidence_score']); ?><br>
+                                <abbr title="Snelheid: hoe snel je resultaat kunt verwachten.">Snelheid</abbr>: <?php echo esc_html((string) $row['speed_score']); ?>
+                            </td>
                             <td><ul style="margin:0;padding-left:18px;"><?php foreach ($bullets as $bullet) : ?><li><?php echo esc_html((string) $bullet); ?></li><?php endforeach; ?></ul></td>
                             <td><?php echo esc_html((string) $row['status']); ?></td>
                             <td>
-                                <?php $actions = ['approve' => 'Approve', 'dismiss' => 'Dismiss']; foreach ($actions as $action_key => $label) : ?>
+                                <?php $actions = ['approve' => 'Goedkeuren', 'dismiss' => 'Verbergen']; foreach ($actions as $action_key => $label) : ?>
                                     <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form" style="margin-bottom:4px;">
                                         <?php wp_nonce_field('sch_seo_cockpit_' . $action_key); ?>
                                         <input type="hidden" name="action" value="sch_seo_cockpit_<?php echo esc_attr($action_key); ?>">
@@ -11328,15 +11336,15 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                                     <?php wp_nonce_field('sch_seo_cockpit_create_task'); ?>
                                     <input type="hidden" name="action" value="sch_seo_cockpit_create_task">
                                     <input type="hidden" name="opportunity_id" value="<?php echo esc_attr((string) $row['opportunity_id']); ?>">
-                                    <input type="number" name="owner_user_id" min="1" placeholder="Owner ID" style="width:90px;">
+                                    <input type="number" name="owner_user_id" min="1" placeholder="Eigenaar ID" style="width:90px;">
                                     <input type="date" name="due_date">
                                     <select name="effort">
                                         <?php foreach (['S', 'M', 'L'] as $effort_option) : ?>
                                             <option value="<?php echo esc_attr($effort_option); ?>" <?php selected((string) ($row['task_effort'] ?? 'M'), $effort_option); ?>><?php echo esc_html($effort_option); ?></option>
                                         <?php endforeach; ?>
                                     </select>
-                                    <input type="number" step="0.0001" min="0" name="expected_uplift" placeholder="Uplift">
-                                    <button class="button button-small button-primary"><?php echo !empty($row['active_task_id']) ? 'Open task' : 'Create task'; ?></button>
+                                    <input type="number" step="0.0001" min="0" name="expected_uplift" placeholder="Verwachte groei">
+                                    <button class="button button-small button-primary"><?php echo !empty($row['active_task_id']) ? 'Taak openen' : 'Taak maken'; ?></button>
                                 </form>
                                 <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
                                     <?php wp_nonce_field('sch_seo_cockpit_due_date'); ?>
@@ -12697,6 +12705,21 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'missing_keyword' => 'Focus keyword',
             'outdated_content' => 'Outdated content',
         ];
+    }
+
+    private function seo_cockpit_humanize_opportunity_type(string $type): string {
+        $map = [
+            'quick_win' => 'Snelle winst',
+            'defensief' => 'Verdedigen (daling stoppen)',
+            'groei' => 'Groei kans',
+            'technisch' => 'Technische kans',
+            'content' => 'Content kans',
+            'internal_link' => 'Interne-link kans',
+            'meta_title' => 'Meta title kans',
+            'meta_description' => 'Meta description kans',
+        ];
+        $key = sanitize_key($type);
+        return $map[$key] ?? ($type !== '' ? ucfirst(str_replace('_', ' ', $type)) : 'Onbekend');
     }
 
     private function get_seo_cockpit_pages(array $filters): array {
@@ -14302,11 +14325,11 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $confidence = round(max(0.05, min(1.0, $source_quality)), 4);
         $business_weight = $sessions > 0 ? min(2.0, max(0.1, $clicks / max(1.0, $sessions))) : 0.3;
 
-        $quick_reason = 'CTR-gap met rankingkans';
+        $quick_reason = 'Veel vertoningen, maar nog relatief weinig kliks (titel/meta snel te verbeteren).';
         if ($decline_factor >= 0.35) {
-            $quick_reason = 'Dalende clicks met herstelpotentieel';
+            $quick_reason = 'Kliks dalen: update van inhoud en snippet kan herstel geven.';
         } elseif ($position_factor < 0.5) {
-            $quick_reason = 'Veel impressies buiten quick-win band';
+            $quick_reason = 'Veel vertoningen, maar positie is nog te laag voor een snelle winst.';
         }
         $playbooks = $this->resolve_playbooks($opportunity_type, [
             'position' => $position,
