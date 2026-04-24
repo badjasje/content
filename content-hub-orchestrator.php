@@ -571,6 +571,30 @@ final class SCH_Orchestrator {
         }
     }
 
+    private function maybe_add_index(string $table, string $index_name, string $sql): void {
+        $index_exists = $this->db->get_var($this->db->prepare(
+            "SHOW INDEX FROM {$table} WHERE Key_name=%s",
+            $index_name
+        ));
+        if ($index_exists) {
+            return;
+        }
+        $result = $this->db->query($sql);
+        if ($result === false) {
+            $this->log('error', 'migration', 'Index toevoegen mislukt', [
+                'table' => $table,
+                'index' => $index_name,
+                'sql' => $sql,
+                'db_error' => $this->db->last_error,
+            ]);
+            return;
+        }
+        $this->log('info', 'migration', 'Index toegevoegd', [
+            'table' => $table,
+            'index' => $index_name,
+        ]);
+    }
+
     private function create_tables(): void {
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
 
@@ -1384,6 +1408,12 @@ final class SCH_Orchestrator {
         $this->maybe_add_column($orchestrator_opportunities, 'score_version', "ALTER TABLE {$orchestrator_opportunities} ADD COLUMN score_version VARCHAR(64) NOT NULL DEFAULT 'v1' AFTER score");
         $this->maybe_add_column($orchestrator_opportunities, 'active_playbook', "ALTER TABLE {$orchestrator_opportunities} ADD COLUMN active_playbook VARCHAR(100) NOT NULL DEFAULT '' AFTER score_version");
         $this->maybe_add_column($orchestrator_opportunities, 'anti_gaming_notes', "ALTER TABLE {$orchestrator_opportunities} ADD COLUMN anti_gaming_notes LONGTEXT NULL AFTER score_breakdown");
+        $this->maybe_add_index($seo_task, 'status_effort_updated', "ALTER TABLE {$seo_task} ADD INDEX status_effort_updated (status, effort, updated_at)");
+        $this->maybe_add_index($seo_task, 'playbook_status_updated', "ALTER TABLE {$seo_task} ADD INDEX playbook_status_updated (playbook_type, status, updated_at)");
+        $this->maybe_add_index($seo_task, 'opportunity_status', "ALTER TABLE {$seo_task} ADD INDEX opportunity_status (opportunity_id, status)");
+        $this->maybe_add_index($seo_uplift_measurement, 'measurement_status_scheduled_for', "ALTER TABLE {$seo_uplift_measurement} ADD INDEX measurement_status_scheduled_for (measurement_status, scheduled_for)");
+        $this->maybe_add_index($seo_signal, 'severity_detected_at', "ALTER TABLE {$seo_signal} ADD INDEX severity_detected_at (severity, detected_at)");
+        $this->maybe_add_index($seo_url, 'history_updated', "ALTER TABLE {$seo_url} ADD INDEX history_updated (history_days, updated_at)");
 
         $this->maybe_add_column($clients, 'research_urls', "ALTER TABLE {$clients} ADD COLUMN research_urls LONGTEXT NULL AFTER link_targets");
         $this->maybe_add_column($clients, 'max_posts_per_month', "ALTER TABLE {$clients} ADD COLUMN max_posts_per_month INT UNSIGNED NOT NULL DEFAULT 0 AFTER research_urls");
@@ -10207,6 +10237,19 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     }
 
     public function run_seo_cockpit_daily_refresh(): void {
+        if (
+            !$this->table_exists($this->table('seo_url')) ||
+            !$this->table_exists($this->table('seo_cluster')) ||
+            !$this->table_exists($this->table('seo_opportunity')) ||
+            !$this->table_exists($this->table('seo_task')) ||
+            !$this->table_exists($this->table('seo_uplift_measurement'))
+        ) {
+            update_option(self::OPTION_SEO_COCKPIT_LAST_STATUS, 'blocked_missing_tables');
+            $this->log('error', 'seo_cockpit', 'Cockpit refresh skipped: vereiste tabellen ontbreken.', [
+                'required_tables' => ['seo_url', 'seo_cluster', 'seo_opportunity', 'seo_task', 'seo_uplift_measurement'],
+            ]);
+            return;
+        }
         $started_at = $this->now();
         update_option(self::OPTION_SEO_COCKPIT_LAST_STATUS, 'running');
         $this->log('info', 'seo_cockpit', 'Cockpit refresh started', ['started_at' => $started_at]);
@@ -10960,16 +11003,38 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         if (!in_array($tab, ['today-board', 'winners-losers', 'risks-monitor', 'execution-funnel', 'adoption-sla', 'workload-overview', 'overdue-tasks', 'playbook-performance', 'business-lens', 'settings-data-quality'], true)) {
             $tab = 'today-board';
         }
-        $today_rows = $this->get_seo_cockpit_today_board_rows();
-        $winners_losers = $this->get_seo_cockpit_winners_losers_rows();
-        $risk_rows = $this->get_seo_cockpit_risk_monitor_rows();
-        $data_quality = $this->get_seo_cockpit_data_quality_stats();
-        $execution = $this->get_seo_cockpit_execution_funnel_data();
-        $adoption_sla = $this->get_seo_cockpit_adoption_sla_dashboard_data();
-        $workload = $this->get_seo_cockpit_workload_overview_data();
-        $overdue = $this->get_seo_cockpit_overdue_tasks_data();
-        $playbook_performance = $this->get_seo_cockpit_playbook_performance_overview_data();
-        $business_lens = $this->get_seo_cockpit_business_lens_data();
+        $today_rows = [];
+        $winners_losers = [];
+        $risk_rows = [];
+        $data_quality = [];
+        $execution = ['rows' => [], 'metrics' => ['counts' => [], 'conversion' => [], 'cycle_time_days' => []], 'filter_options' => ['owners' => [], 'playbooks' => [], 'sites' => []], 'filters' => [], 'pagination' => ['page' => 1, 'per_page' => 50, 'total' => 0, 'total_pages' => 1]];
+        $adoption_sla = [];
+        $workload = ['owners' => [], 'teams' => []];
+        $overdue = [];
+        $playbook_performance = [];
+        $business_lens = ['filters' => [], 'has_data' => false, 'cluster_rows' => [], 'playbook_rows' => [], 'filter_options' => ['sites' => [], 'clusters' => [], 'playbooks' => []]];
+
+        if ($tab === 'today-board') {
+            $today_rows = $this->get_seo_cockpit_today_board_rows();
+        } elseif ($tab === 'winners-losers') {
+            $winners_losers = $this->get_seo_cockpit_winners_losers_rows();
+        } elseif ($tab === 'risks-monitor') {
+            $risk_rows = $this->get_seo_cockpit_risk_monitor_rows();
+        } elseif ($tab === 'execution-funnel') {
+            $execution = $this->get_seo_cockpit_execution_funnel_data();
+        } elseif ($tab === 'adoption-sla') {
+            $adoption_sla = $this->get_seo_cockpit_adoption_sla_dashboard_data();
+        } elseif ($tab === 'workload-overview') {
+            $workload = $this->get_seo_cockpit_workload_overview_data();
+        } elseif ($tab === 'overdue-tasks') {
+            $overdue = $this->get_seo_cockpit_overdue_tasks_data();
+        } elseif ($tab === 'playbook-performance') {
+            $playbook_performance = $this->get_seo_cockpit_playbook_performance_overview_data();
+        } elseif ($tab === 'business-lens') {
+            $business_lens = $this->get_seo_cockpit_business_lens_data();
+        } elseif ($tab === 'settings-data-quality') {
+            $data_quality = $this->get_seo_cockpit_data_quality_stats();
+        }
         $last_run = (string) get_option(self::OPTION_SEO_COCKPIT_LAST_RUN, '');
         $warning = '';
         if ($last_run === '' || strtotime($last_run) < strtotime('-36 hours')) {
@@ -11164,6 +11229,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 </table>
 
                 <h3 style="margin-top:14px;">Taken</h3>
+                <p class="description">Pagina <?php echo (int) ($execution['pagination']['page'] ?? 1); ?> van <?php echo (int) ($execution['pagination']['total_pages'] ?? 1); ?> (<?php echo (int) ($execution['pagination']['total'] ?? 0); ?> totaal).</p>
                 <table class="widefat striped">
                     <thead><tr><th>Opportunity</th><th>Site</th><th>Status</th><th>Owner</th><th>Due</th><th>Effort</th><th>Expected uplift</th><th>Playbook</th><th>Acties</th></tr></thead>
                     <tbody>
@@ -11211,6 +11277,20 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <?php endif; ?>
                     </tbody>
                 </table>
+                <?php if (($execution['pagination']['total_pages'] ?? 1) > 1) : ?>
+                    <p style="margin-top:8px;">
+                        <?php
+                        $current_page = (int) ($execution['pagination']['page'] ?? 1);
+                        $total_pages = (int) ($execution['pagination']['total_pages'] ?? 1);
+                        if ($current_page > 1) :
+                            ?>
+                            <a class="button button-secondary" href="<?php echo esc_url(add_query_arg(['page' => 'sch-seo-cockpit', 'tab' => 'execution-funnel', 'funnel_page' => $current_page - 1])); ?>">Vorige pagina</a>
+                        <?php endif; ?>
+                        <?php if ($current_page < $total_pages) : ?>
+                            <a class="button button-secondary" href="<?php echo esc_url(add_query_arg(['page' => 'sch-seo-cockpit', 'tab' => 'execution-funnel', 'funnel_page' => $current_page + 1])); ?>">Volgende pagina</a>
+                        <?php endif; ?>
+                    </p>
+                <?php endif; ?>
             <?php elseif ($tab === 'adoption-sla') : ?>
                 <h2>Adoption & SLA dashboard</h2>
                 <table class="widefat striped">
@@ -11543,7 +11623,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 LIMIT 15";
         $rows = $params ? (array) $this->db->get_results($this->db->prepare($sql, ...$params), ARRAY_A) : (array) $this->db->get_results($sql, ARRAY_A);
         foreach ($rows as &$row) {
-            $decoded = $row['explainability_json'] ? json_decode((string) $row['explainability_json'], true) : [];
+            $decoded = $this->decode_json_array($row['explainability_json'] ?? '');
             $bullets = is_array($decoded) ? array_values($decoded) : [];
             while (count($bullets) < 3) {
                 $bullets[] = 'Nog onvoldoende bewijs, handmatige validatie aanbevolen.';
@@ -11565,6 +11645,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'effort' => strtolower(sanitize_key((string) ($_GET['funnel_effort'] ?? 'all'))),
             'playbook_type' => sanitize_key((string) ($_GET['funnel_playbook'] ?? '')),
             'site_id' => max(0, (int) ($_GET['funnel_site'] ?? 0)),
+            'page' => max(1, (int) ($_GET['funnel_page'] ?? 1)),
+            'per_page' => 50,
         ];
         if (!in_array($filters['status'], array_merge(['all'], $this->seo_cockpit_lifecycle_statuses()), true)) {
             $filters['status'] = 'all';
@@ -11596,6 +11678,18 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             $params[] = $filters['site_id'];
         }
 
+        $count_sql = "SELECT COUNT(*)
+                FROM {$this->table('seo_task')} t
+                INNER JOIN {$this->table('seo_opportunity')} o ON o.opportunity_id=t.opportunity_id
+                LEFT JOIN {$this->table('seo_url')} u ON u.canonical_url_id=o.canonical_url_id
+                WHERE " . implode(' AND ', $where);
+        $total_rows = $params ? (int) $this->db->get_var($this->db->prepare($count_sql, ...$params)) : (int) $this->db->get_var($count_sql);
+        $total_pages = max(1, (int) ceil($total_rows / $filters['per_page']));
+        if ($filters['page'] > $total_pages) {
+            $filters['page'] = $total_pages;
+        }
+        $offset = ($filters['page'] - 1) * $filters['per_page'];
+
         $sql = "SELECT t.*, o.canonical_url_id, u.canonical_url, u.site_id, s.label AS site_name
                 FROM {$this->table('seo_task')} t
                 INNER JOIN {$this->table('seo_opportunity')} o ON o.opportunity_id=t.opportunity_id
@@ -11603,8 +11697,9 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 LEFT JOIN {$this->table('sites')} s ON s.id=u.site_id
                 WHERE " . implode(' AND ', $where) . "
                 ORDER BY t.updated_at DESC, t.id DESC
-                LIMIT 200";
-        $rows = $params ? (array) $this->db->get_results($this->db->prepare($sql, ...$params), ARRAY_A) : (array) $this->db->get_results($sql, ARRAY_A);
+                LIMIT %d OFFSET %d";
+        $query_params = array_merge($params, [$filters['per_page'], $offset]);
+        $rows = (array) $this->db->get_results($this->db->prepare($sql, ...$query_params), ARRAY_A);
         $users = get_users(['fields' => ['ID', 'display_name']]);
         $user_map = [];
         foreach ($users as $user) {
@@ -11648,6 +11743,12 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 }, $site_options),
                 'playbooks' => array_values(array_filter(array_map('sanitize_key', $playbook_options))),
                 'owners' => $owner_options,
+            ],
+            'pagination' => [
+                'page' => $filters['page'],
+                'per_page' => $filters['per_page'],
+                'total' => $total_rows,
+                'total_pages' => $total_pages,
             ],
         ];
     }
