@@ -9618,9 +9618,14 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             "SELECT lifecycle_status, COUNT(*) AS total FROM {$keywords_table} GROUP BY lifecycle_status",
             ARRAY_A
         );
-        $keyword_totals = ['active' => 0, 'trashed' => 0];
+        $keyword_totals = ['active' => 0, 'trash' => 0, 'trashed' => 0];
         foreach ($keyword_rows as $row) {
             $status = sanitize_key((string) ($row['lifecycle_status'] ?? ''));
+            if ($status === 'trash') {
+                $keyword_totals['trash'] = (int) ($row['total'] ?? 0);
+                $keyword_totals['trashed'] = (int) ($row['total'] ?? 0);
+                continue;
+            }
             $keyword_totals[$status] = (int) ($row['total'] ?? 0);
         }
 
@@ -9661,9 +9666,9 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             $params[] = $like;
             $params[] = $like;
         }
-        if (in_array($lifecycle, ['active', 'trashed'], true)) {
+        if (in_array($lifecycle, ['active', 'trash', 'trashed'], true)) {
             $where[] = 'k.lifecycle_status=%s';
-            $params[] = $lifecycle;
+            $params[] = $lifecycle === 'trashed' ? 'trash' : $lifecycle;
         }
 
         $sql = "SELECT k.id, k.client_id, c.name AS client_name, k.main_keyword, k.content_type, k.priority, k.status, k.lifecycle_status, k.updated_at
@@ -9706,8 +9711,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
         if (isset($payload['lifecycle_status'])) {
             $life = sanitize_key((string) $payload['lifecycle_status']);
-            if (in_array($life, ['active', 'trashed'], true)) {
-                $update['lifecycle_status'] = $life;
+            if (in_array($life, ['active', 'trash', 'trashed'], true)) {
+                $update['lifecycle_status'] = $life === 'trashed' ? 'trash' : $life;
             }
         }
         if (count($update) === 1) {
