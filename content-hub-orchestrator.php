@@ -367,6 +367,8 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_seo_cockpit_assign', [$this, 'handle_seo_cockpit_assign']);
         add_action('admin_post_sch_seo_cockpit_due_date', [$this, 'handle_seo_cockpit_due_date']);
         add_action('admin_post_sch_seo_cockpit_create_task', [$this, 'handle_seo_cockpit_create_task']);
+        add_action('admin_post_sch_seo_cockpit_update_task', [$this, 'handle_seo_cockpit_update_task']);
+        add_action('admin_post_sch_seo_cockpit_update_status', [$this, 'handle_seo_cockpit_update_status']);
         add_action('admin_post_sch_seo_cockpit_dismiss', [$this, 'handle_seo_cockpit_dismiss']);
         add_action('rest_api_init', [$this, 'register_intelligence_rest_routes']);
         add_action('rest_api_init', [$this, 'register_frontend_rest_routes']);
@@ -10509,53 +10511,101 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     public function handle_seo_cockpit_approve(): void {
         $this->verify_admin_nonce('sch_seo_cockpit_approve');
         $opportunity_id = sanitize_text_field((string) ($_POST['opportunity_id'] ?? ''));
-        $this->seo_cockpit_update_opportunity_status($opportunity_id, 'approved');
-        $this->seo_cockpit_upsert_task_for_status($opportunity_id, 'approved');
-        $this->redirect_with_message('sch-seo-cockpit', 'Opportunity approved.');
+        if ($opportunity_id === '') {
+            $this->redirect_with_message('sch-seo-cockpit', 'Opportunity ontbreekt.', 'error');
+        }
+        $result = $this->seo_cockpit_ensure_task($opportunity_id, 'approved');
+        $this->redirect_with_message('sch-seo-cockpit', $result['created'] ? 'Opportunity approved en taak aangemaakt.' : 'Opportunity approved. Bestaande actieve taak geopend.');
     }
 
     public function handle_seo_cockpit_assign(): void {
         $this->verify_admin_nonce('sch_seo_cockpit_assign');
         $opportunity_id = sanitize_text_field((string) ($_POST['opportunity_id'] ?? ''));
         $owner_user_id = max(0, (int) ($_POST['owner_user_id'] ?? 0));
-        $this->db->query($this->db->prepare(
-            "UPDATE {$this->table('seo_task')} SET owner_user_id=%d, updated_at=%s WHERE opportunity_id=%s",
-            $owner_user_id,
-            $this->now(),
-            $opportunity_id
-        ));
+        $this->seo_cockpit_update_task_fields($opportunity_id, [
+            'owner_user_id' => $owner_user_id > 0 ? $owner_user_id : null,
+        ]);
         $this->redirect_with_message('sch-seo-cockpit', 'Owner toegewezen.');
     }
 
     public function handle_seo_cockpit_due_date(): void {
         $this->verify_admin_nonce('sch_seo_cockpit_due_date');
         $opportunity_id = sanitize_text_field((string) ($_POST['opportunity_id'] ?? ''));
-        $due_date = sanitize_text_field((string) ($_POST['due_date'] ?? ''));
-        if ($due_date !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $due_date)) {
+        $due_date = $this->sanitize_iso_date((string) ($_POST['due_date'] ?? ''));
+        if ($due_date === null) {
             $this->redirect_with_message('sch-seo-cockpit', 'Ongeldige due date.', 'error');
         }
-        $this->db->query($this->db->prepare(
-            "UPDATE {$this->table('seo_task')} SET due_date=%s, updated_at=%s WHERE opportunity_id=%s",
-            $due_date,
-            $this->now(),
-            $opportunity_id
-        ));
+        $this->seo_cockpit_update_task_fields($opportunity_id, [
+            'due_date' => $due_date !== '' ? $due_date : null,
+        ]);
         $this->redirect_with_message('sch-seo-cockpit', 'Due date bijgewerkt.');
     }
 
     public function handle_seo_cockpit_create_task(): void {
         $this->verify_admin_nonce('sch_seo_cockpit_create_task');
         $opportunity_id = sanitize_text_field((string) ($_POST['opportunity_id'] ?? ''));
-        $this->seo_cockpit_upsert_task_for_status($opportunity_id, 'suggested');
-        $this->seo_cockpit_update_opportunity_status($opportunity_id, 'approved');
-        $this->redirect_with_message('sch-seo-cockpit', 'Taak aangemaakt.');
+        if ($opportunity_id === '') {
+            $this->redirect_with_message('sch-seo-cockpit', 'Opportunity ontbreekt.', 'error');
+        }
+        $owner_user_id = max(0, (int) ($_POST['owner_user_id'] ?? 0));
+        $due_date = $this->sanitize_iso_date((string) ($_POST['due_date'] ?? ''));
+        $effort = $this->sanitize_seo_task_effort((string) ($_POST['effort'] ?? 'M'));
+        $expected_uplift = $this->sanitize_decimal_or_null((string) ($_POST['expected_uplift'] ?? ''));
+        if ($due_date === null) {
+            $this->redirect_with_message('sch-seo-cockpit', 'Ongeldige due date.', 'error');
+        }
+        $result = $this->seo_cockpit_ensure_task($opportunity_id, 'approved');
+        $this->seo_cockpit_update_task_fields($opportunity_id, [
+            'owner_user_id' => $owner_user_id > 0 ? $owner_user_id : null,
+            'due_date' => $due_date !== '' ? $due_date : null,
+            'effort' => $effort,
+            'expected_uplift' => $expected_uplift,
+        ]);
+        $this->redirect_with_message('sch-seo-cockpit', $result['created'] ? 'Taak aangemaakt.' : 'Er bestaat al een actieve taak voor deze opportunity.');
+    }
+
+    public function handle_seo_cockpit_update_task(): void {
+        $this->verify_admin_nonce('sch_seo_cockpit_update_task');
+        $opportunity_id = sanitize_text_field((string) ($_POST['opportunity_id'] ?? ''));
+        if ($opportunity_id === '') {
+            $this->redirect_with_message('sch-seo-cockpit', 'Opportunity ontbreekt.', 'error');
+        }
+
+        $owner_user_id = max(0, (int) ($_POST['owner_user_id'] ?? 0));
+        $effort = $this->sanitize_seo_task_effort((string) ($_POST['effort'] ?? 'M'));
+        $expected_uplift = $this->sanitize_decimal_or_null((string) ($_POST['expected_uplift'] ?? ''));
+        $due_date = $this->sanitize_iso_date((string) ($_POST['due_date'] ?? ''));
+        $playbook_type = sanitize_key((string) ($_POST['playbook_type'] ?? ''));
+        if ($due_date === null) {
+            $this->redirect_with_message('sch-seo-cockpit', 'Ongeldige due date.', 'error');
+        }
+
+        $this->seo_cockpit_update_task_fields($opportunity_id, [
+            'owner_user_id' => $owner_user_id > 0 ? $owner_user_id : null,
+            'effort' => $effort,
+            'expected_uplift' => $expected_uplift,
+            'due_date' => $due_date !== '' ? $due_date : null,
+            'playbook_type' => $playbook_type !== '' ? $playbook_type : null,
+        ]);
+
+        $this->redirect_with_message('sch-seo-cockpit', 'Taakdetails bijgewerkt.', 'success', ['tab' => 'execution-funnel']);
+    }
+
+    public function handle_seo_cockpit_update_status(): void {
+        $this->verify_admin_nonce('sch_seo_cockpit_update_status');
+        $opportunity_id = sanitize_text_field((string) ($_POST['opportunity_id'] ?? ''));
+        $status = sanitize_key((string) ($_POST['status'] ?? 'suggested'));
+        if ($opportunity_id === '' || !in_array($status, $this->seo_cockpit_lifecycle_statuses(), true)) {
+            $this->redirect_with_message('sch-seo-cockpit', 'Ongeldige statuswijziging.', 'error', ['tab' => 'execution-funnel']);
+        }
+        $this->seo_cockpit_ensure_task($opportunity_id, $status);
+        $this->redirect_with_message('sch-seo-cockpit', 'Taakstatus bijgewerkt.', 'success', ['tab' => 'execution-funnel']);
     }
 
     public function handle_seo_cockpit_dismiss(): void {
         $this->verify_admin_nonce('sch_seo_cockpit_dismiss');
         $opportunity_id = sanitize_text_field((string) ($_POST['opportunity_id'] ?? ''));
-        $this->seo_cockpit_update_opportunity_status($opportunity_id, 'dismissed');
-        $this->seo_cockpit_upsert_task_for_status($opportunity_id, 'dismissed');
+        $this->seo_cockpit_ensure_task($opportunity_id, 'dismissed');
         $this->redirect_with_message('sch-seo-cockpit', 'Opportunity dismissed.');
     }
 
@@ -10571,27 +10621,100 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         ));
     }
 
-    private function seo_cockpit_upsert_task_for_status(string $opportunity_id, string $status): void {
+    private function seo_cockpit_ensure_task(string $opportunity_id, string $status): array {
+        $task = $this->seo_cockpit_upsert_task_for_status($opportunity_id, $status);
+        return [
+            'created' => !empty($task['created']),
+            'task' => $task['task'] ?? null,
+        ];
+    }
+
+    private function seo_cockpit_upsert_task_for_status(string $opportunity_id, string $status): array {
         if ($opportunity_id === '') {
-            return;
+            return ['created' => false, 'task' => null];
         }
         $table = $this->table('seo_task');
-        $task = $this->db->get_row($this->db->prepare("SELECT id, stage_timestamps_json FROM {$table} WHERE opportunity_id=%s ORDER BY id DESC LIMIT 1", $opportunity_id));
+        if (!in_array($status, $this->seo_cockpit_lifecycle_statuses(), true)) {
+            $status = 'suggested';
+        }
+        $task = $this->db->get_row($this->db->prepare("SELECT * FROM {$table} WHERE opportunity_id=%s ORDER BY id DESC LIMIT 1", $opportunity_id));
         $timestamps = $task && $task->stage_timestamps_json ? (array) json_decode((string) $task->stage_timestamps_json, true) : [];
-        $timestamps[$status] = $this->now();
+        if (!isset($timestamps[$status])) {
+            $timestamps[$status] = $this->now();
+        } else {
+            $timestamps[$status] = $this->now();
+        }
         $payload = [
             'status' => $status,
             'stage_timestamps_json' => wp_json_encode($timestamps),
             'updated_at' => $this->now(),
         ];
         if ($task) {
-            $this->db->update($table, $payload, ['id' => (int) $task->id]);
-            return;
+            if ($this->seo_cockpit_task_is_active((string) $task->status) || !$this->seo_cockpit_task_is_active($status)) {
+                $this->db->update($table, $payload, ['id' => (int) $task->id]);
+                $this->seo_cockpit_update_opportunity_status($opportunity_id, $status);
+                $task = $this->db->get_row($this->db->prepare("SELECT * FROM {$table} WHERE id=%d LIMIT 1", (int) $task->id), ARRAY_A);
+                return ['created' => false, 'task' => $task];
+            }
         }
         $payload['opportunity_id'] = $opportunity_id;
         $payload['effort'] = 'M';
         $payload['created_at'] = $this->now();
         $this->db->insert($table, $payload);
+        $this->seo_cockpit_update_opportunity_status($opportunity_id, $status);
+        $insert_id = (int) $this->db->insert_id;
+        $created_task = $insert_id > 0 ? $this->db->get_row($this->db->prepare("SELECT * FROM {$table} WHERE id=%d LIMIT 1", $insert_id), ARRAY_A) : null;
+        return ['created' => true, 'task' => $created_task];
+    }
+
+    private function seo_cockpit_task_is_active(string $status): bool {
+        return in_array($status, ['suggested', 'approved', 'in_progress'], true);
+    }
+
+    private function seo_cockpit_lifecycle_statuses(): array {
+        return ['suggested', 'approved', 'in_progress', 'done', 'dismissed'];
+    }
+
+    private function sanitize_seo_task_effort(string $effort): string {
+        $candidate = strtoupper(sanitize_key($effort));
+        return in_array($candidate, ['S', 'M', 'L'], true) ? $candidate : 'M';
+    }
+
+    private function sanitize_iso_date(string $value): ?string {
+        $value = sanitize_text_field($value);
+        if ($value === '') {
+            return '';
+        }
+        return preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) ? $value : null;
+    }
+
+    private function sanitize_decimal_or_null(string $value): ?float {
+        $value = trim($value);
+        if ($value === '') {
+            return null;
+        }
+        if (!is_numeric($value)) {
+            return null;
+        }
+        return round((float) $value, 4);
+    }
+
+    private function seo_cockpit_update_task_fields(string $opportunity_id, array $fields): void {
+        if ($opportunity_id === '') {
+            return;
+        }
+        $result = $this->seo_cockpit_upsert_task_for_status($opportunity_id, 'approved');
+        $task = is_array($result['task'] ?? null) ? $result['task'] : null;
+        if (!$task || empty($task['id'])) {
+            return;
+        }
+        $payload = ['updated_at' => $this->now()];
+        foreach (['owner_user_id', 'due_date', 'effort', 'expected_uplift', 'playbook_type'] as $key) {
+            if (array_key_exists($key, $fields)) {
+                $payload[$key] = $fields[$key];
+            }
+        }
+        $this->db->update($this->table('seo_task'), $payload, ['id' => (int) $task['id']]);
     }
 
     public function render_seo_cockpit(): void {
@@ -10610,6 +10733,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $winners_losers = $this->get_seo_cockpit_winners_losers_rows();
         $risk_rows = $this->get_seo_cockpit_risk_monitor_rows();
         $data_quality = $this->get_seo_cockpit_data_quality_stats();
+        $execution = $this->get_seo_cockpit_execution_funnel_data();
         $last_run = (string) get_option(self::OPTION_SEO_COCKPIT_LAST_RUN, '');
         $warning = '';
         if ($last_run === '' || strtotime($last_run) < strtotime('-36 hours')) {
@@ -10658,7 +10782,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                             <td><ul style="margin:0;padding-left:18px;"><?php foreach ($bullets as $bullet) : ?><li><?php echo esc_html((string) $bullet); ?></li><?php endforeach; ?></ul></td>
                             <td><?php echo esc_html((string) $row['status']); ?></td>
                             <td>
-                                <?php $actions = ['approve' => 'Approve', 'create_task' => 'Create task', 'dismiss' => 'Dismiss']; foreach ($actions as $action_key => $label) : ?>
+                                <?php $actions = ['approve' => 'Approve', 'dismiss' => 'Dismiss']; foreach ($actions as $action_key => $label) : ?>
                                     <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form" style="margin-bottom:4px;">
                                         <?php wp_nonce_field('sch_seo_cockpit_' . $action_key); ?>
                                         <input type="hidden" name="action" value="sch_seo_cockpit_<?php echo esc_attr($action_key); ?>">
@@ -10666,12 +10790,19 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                                         <button class="button button-small"><?php echo esc_html($label); ?></button>
                                     </form>
                                 <?php endforeach; ?>
-                                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
-                                    <?php wp_nonce_field('sch_seo_cockpit_assign'); ?>
-                                    <input type="hidden" name="action" value="sch_seo_cockpit_assign">
+                                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form" style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
+                                    <?php wp_nonce_field('sch_seo_cockpit_create_task'); ?>
+                                    <input type="hidden" name="action" value="sch_seo_cockpit_create_task">
                                     <input type="hidden" name="opportunity_id" value="<?php echo esc_attr((string) $row['opportunity_id']); ?>">
-                                    <input type="number" name="owner_user_id" min="1" placeholder="User ID" style="width:85px;">
-                                    <button class="button button-small">Assign</button>
+                                    <input type="number" name="owner_user_id" min="1" placeholder="Owner ID" style="width:90px;">
+                                    <input type="date" name="due_date">
+                                    <select name="effort">
+                                        <?php foreach (['S', 'M', 'L'] as $effort_option) : ?>
+                                            <option value="<?php echo esc_attr($effort_option); ?>" <?php selected((string) ($row['task_effort'] ?? 'M'), $effort_option); ?>><?php echo esc_html($effort_option); ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                    <input type="number" step="0.0001" min="0" name="expected_uplift" placeholder="Uplift">
+                                    <button class="button button-small button-primary"><?php echo !empty($row['active_task_id']) ? 'Open task' : 'Create task'; ?></button>
                                 </form>
                                 <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
                                     <?php wp_nonce_field('sch_seo_cockpit_due_date'); ?>
@@ -10680,6 +10811,9 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                                     <input type="date" name="due_date">
                                     <button class="button button-small">Due date</button>
                                 </form>
+                                <?php if (!empty($row['active_task_id'])) : ?>
+                                    <a class="button button-small" href="<?php echo esc_url(add_query_arg(['page' => 'sch-seo-cockpit', 'tab' => 'execution-funnel', 'opportunity_id' => (string) $row['opportunity_id']], admin_url('admin.php'))); ?>">Bekijk actieve taak</a>
+                                <?php endif; ?>
                             </td>
                         </tr>
                     <?php endforeach; else : ?>
@@ -10724,6 +10858,116 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                         </tr>
                     <?php endforeach; else : ?>
                         <tr><td colspan="6">Geen risico-signalen gevonden.</td></tr>
+                    <?php endif; ?>
+                    </tbody>
+                </table>
+            <?php elseif ($tab === 'execution-funnel') : ?>
+                <h2>Execution Funnel</h2>
+                <p class="description">Filters op owner, status, effort, playbook type en site. Doorlooptijd is berekend op basis van stage_timestamps_json.</p>
+                <form method="get" style="margin:8px 0 12px;">
+                    <input type="hidden" name="page" value="sch-seo-cockpit">
+                    <input type="hidden" name="tab" value="execution-funnel">
+                    <select name="funnel_owner">
+                        <option value="0">Alle owners</option>
+                        <?php foreach ($execution['filter_options']['owners'] as $owner) : ?>
+                            <option value="<?php echo (int) $owner['id']; ?>" <?php selected((int) $execution['filters']['owner_user_id'], (int) $owner['id']); ?>><?php echo esc_html($owner['label']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <select name="funnel_status">
+                        <option value="all">Alle statussen</option>
+                        <?php foreach ($this->seo_cockpit_lifecycle_statuses() as $status_key) : ?>
+                            <option value="<?php echo esc_attr($status_key); ?>" <?php selected((string) $execution['filters']['status'], $status_key); ?>><?php echo esc_html($status_key); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <select name="funnel_effort">
+                        <option value="all">Alle effort</option>
+                        <?php foreach (['S', 'M', 'L'] as $effort_option) : ?>
+                            <option value="<?php echo esc_attr($effort_option); ?>" <?php selected((string) $execution['filters']['effort'], $effort_option); ?>><?php echo esc_html($effort_option); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <select name="funnel_playbook">
+                        <option value="">Alle playbooks</option>
+                        <?php foreach ($execution['filter_options']['playbooks'] as $playbook) : ?>
+                            <option value="<?php echo esc_attr((string) $playbook); ?>" <?php selected((string) $execution['filters']['playbook_type'], (string) $playbook); ?>><?php echo esc_html((string) $playbook); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <select name="funnel_site">
+                        <option value="0">Alle sites</option>
+                        <?php foreach ($execution['filter_options']['sites'] as $site) : ?>
+                            <option value="<?php echo (int) $site['id']; ?>" <?php selected((int) $execution['filters']['site_id'], (int) $site['id']); ?>><?php echo esc_html($site['label']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <button class="button">Filter</button>
+                </form>
+
+                <table class="widefat striped">
+                    <thead><tr><th>Status</th><th>Aantal</th><th>Conversie t.o.v. vorige stap</th></tr></thead>
+                    <tbody>
+                        <?php foreach ($execution['metrics']['counts'] as $status_key => $count) : ?>
+                            <tr>
+                                <td><?php echo esc_html($status_key); ?></td>
+                                <td><?php echo (int) $count; ?></td>
+                                <td><?php echo esc_html((string) ($execution['metrics']['conversion'][$status_key] ?? '—')); ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+
+                <h3 style="margin-top:14px;">Doorlooptijd per funnelstap</h3>
+                <table class="widefat striped">
+                    <thead><tr><th>Stap</th><th>Gemiddelde doorlooptijd (dagen)</th></tr></thead>
+                    <tbody>
+                    <?php foreach ($execution['metrics']['cycle_time_days'] as $step => $value) : ?>
+                        <tr><td><?php echo esc_html((string) $step); ?></td><td><?php echo esc_html((string) $value); ?></td></tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+
+                <h3 style="margin-top:14px;">Taken</h3>
+                <table class="widefat striped">
+                    <thead><tr><th>Opportunity</th><th>Site</th><th>Status</th><th>Owner</th><th>Due</th><th>Effort</th><th>Expected uplift</th><th>Playbook</th><th>Acties</th></tr></thead>
+                    <tbody>
+                    <?php if ($execution['rows']) : foreach ($execution['rows'] as $task_row) : ?>
+                        <tr>
+                            <td><code><?php echo esc_html((string) $task_row['opportunity_id']); ?></code><br><span class="sch-muted"><?php echo esc_html((string) $task_row['canonical_url']); ?></span></td>
+                            <td><?php echo esc_html((string) ($task_row['site_name'] ?: '—')); ?></td>
+                            <td><?php echo esc_html((string) $task_row['status']); ?></td>
+                            <td><?php echo esc_html((string) ($task_row['owner_display'] ?: '—')); ?></td>
+                            <td><?php echo esc_html((string) ($task_row['due_date'] ?: '—')); ?></td>
+                            <td><?php echo esc_html((string) ($task_row['effort'] ?: 'M')); ?></td>
+                            <td><?php echo esc_html($task_row['expected_uplift'] !== null ? (string) $task_row['expected_uplift'] : '—'); ?></td>
+                            <td><?php echo esc_html((string) ($task_row['playbook_type'] ?: '—')); ?></td>
+                            <td>
+                                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form" style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;">
+                                    <?php wp_nonce_field('sch_seo_cockpit_update_task'); ?>
+                                    <input type="hidden" name="action" value="sch_seo_cockpit_update_task">
+                                    <input type="hidden" name="opportunity_id" value="<?php echo esc_attr((string) $task_row['opportunity_id']); ?>">
+                                    <input type="number" min="0" name="owner_user_id" value="<?php echo (int) ($task_row['owner_user_id'] ?? 0); ?>" style="width:70px;">
+                                    <input type="date" name="due_date" value="<?php echo esc_attr((string) ($task_row['due_date'] ?: '')); ?>">
+                                    <select name="effort">
+                                        <?php foreach (['S', 'M', 'L'] as $effort_option) : ?>
+                                            <option value="<?php echo esc_attr($effort_option); ?>" <?php selected((string) ($task_row['effort'] ?: 'M'), $effort_option); ?>><?php echo esc_html($effort_option); ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                    <input type="number" step="0.0001" min="0" name="expected_uplift" value="<?php echo esc_attr($task_row['expected_uplift'] !== null ? (string) $task_row['expected_uplift'] : ''); ?>" style="width:85px;">
+                                    <input type="text" name="playbook_type" value="<?php echo esc_attr((string) ($task_row['playbook_type'] ?: '')); ?>" style="width:100px;">
+                                    <button class="button button-small">Opslaan</button>
+                                </form>
+                                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form" style="margin-top:4px;">
+                                    <?php wp_nonce_field('sch_seo_cockpit_update_status'); ?>
+                                    <input type="hidden" name="action" value="sch_seo_cockpit_update_status">
+                                    <input type="hidden" name="opportunity_id" value="<?php echo esc_attr((string) $task_row['opportunity_id']); ?>">
+                                    <select name="status">
+                                        <?php foreach ($this->seo_cockpit_lifecycle_statuses() as $status_key) : ?>
+                                            <option value="<?php echo esc_attr($status_key); ?>" <?php selected((string) $task_row['status'], $status_key); ?>><?php echo esc_html($status_key); ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                    <button class="button button-small">Status</button>
+                                </form>
+                            </td>
+                        </tr>
+                    <?php endforeach; else : ?>
+                        <tr><td colspan="9">Geen taken gevonden voor de geselecteerde filters.</td></tr>
                     <?php endif; ?>
                     </tbody>
                 </table>
@@ -10901,7 +11145,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             $where[] = 'o.confidence_score<40';
         }
 
-        $sql = "SELECT o.*, u.canonical_url, c.cluster_key, t.status AS task_status
+        $sql = "SELECT o.*, u.canonical_url, c.cluster_key, t.id AS task_id, t.status AS task_status, t.effort AS task_effort
                 FROM {$this->table('seo_opportunity')} o
                 LEFT JOIN {$this->table('seo_url')} u ON u.canonical_url_id=o.canonical_url_id
                 LEFT JOIN {$this->table('seo_cluster')} c ON c.id=o.cluster_id
@@ -10920,9 +11164,151 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             if (!empty($row['task_status'])) {
                 $row['status'] = (string) $row['task_status'];
             }
+            $row['active_task_id'] = (!empty($row['task_id']) && $this->seo_cockpit_task_is_active((string) ($row['task_status'] ?? ''))) ? (int) $row['task_id'] : 0;
         }
         unset($row);
         return $rows;
+    }
+
+    private function get_seo_cockpit_execution_funnel_data(): array {
+        $filters = [
+            'owner_user_id' => max(0, (int) ($_GET['funnel_owner'] ?? 0)),
+            'status' => sanitize_key((string) ($_GET['funnel_status'] ?? 'all')),
+            'effort' => strtolower(sanitize_key((string) ($_GET['funnel_effort'] ?? 'all'))),
+            'playbook_type' => sanitize_key((string) ($_GET['funnel_playbook'] ?? '')),
+            'site_id' => max(0, (int) ($_GET['funnel_site'] ?? 0)),
+        ];
+        if (!in_array($filters['status'], array_merge(['all'], $this->seo_cockpit_lifecycle_statuses()), true)) {
+            $filters['status'] = 'all';
+        }
+        if (!in_array($filters['effort'], ['all', 's', 'm', 'l'], true)) {
+            $filters['effort'] = 'all';
+        }
+
+        $where = ['1=1'];
+        $params = [];
+        if ($filters['owner_user_id'] > 0) {
+            $where[] = 't.owner_user_id=%d';
+            $params[] = $filters['owner_user_id'];
+        }
+        if ($filters['status'] !== 'all') {
+            $where[] = 't.status=%s';
+            $params[] = $filters['status'];
+        }
+        if ($filters['effort'] !== 'all') {
+            $where[] = 't.effort=%s';
+            $params[] = strtoupper($filters['effort']);
+        }
+        if ($filters['playbook_type'] !== '') {
+            $where[] = 't.playbook_type=%s';
+            $params[] = $filters['playbook_type'];
+        }
+        if ($filters['site_id'] > 0) {
+            $where[] = 'u.site_id=%d';
+            $params[] = $filters['site_id'];
+        }
+
+        $sql = "SELECT t.*, o.canonical_url_id, u.canonical_url, u.site_id, s.label AS site_name
+                FROM {$this->table('seo_task')} t
+                INNER JOIN {$this->table('seo_opportunity')} o ON o.opportunity_id=t.opportunity_id
+                LEFT JOIN {$this->table('seo_url')} u ON u.canonical_url_id=o.canonical_url_id
+                LEFT JOIN {$this->table('sites')} s ON s.id=u.site_id
+                WHERE " . implode(' AND ', $where) . "
+                ORDER BY t.updated_at DESC, t.id DESC
+                LIMIT 200";
+        $rows = $params ? (array) $this->db->get_results($this->db->prepare($sql, ...$params), ARRAY_A) : (array) $this->db->get_results($sql, ARRAY_A);
+        $users = get_users(['fields' => ['ID', 'display_name']]);
+        $user_map = [];
+        foreach ($users as $user) {
+            $user_map[(int) $user->ID] = (string) $user->display_name;
+        }
+        foreach ($rows as &$row) {
+            $owner_id = (int) ($row['owner_user_id'] ?? 0);
+            $row['owner_display'] = $owner_id > 0 ? ($user_map[$owner_id] ?? ('User #' . $owner_id)) : '';
+            $row['expected_uplift'] = $row['expected_uplift'] !== null ? (float) $row['expected_uplift'] : null;
+        }
+        unset($row);
+
+        $status_counts = array_fill_keys($this->seo_cockpit_lifecycle_statuses(), 0);
+        foreach ($rows as $row) {
+            $status_key = (string) ($row['status'] ?? 'suggested');
+            if (isset($status_counts[$status_key])) {
+                $status_counts[$status_key]++;
+            }
+        }
+        $conversion = $this->seo_cockpit_calculate_conversions($status_counts);
+        $cycle_time = $this->seo_cockpit_calculate_cycle_times($rows);
+
+        $site_options = (array) $this->db->get_results("SELECT id, label FROM {$this->table('sites')} ORDER BY label ASC", ARRAY_A);
+        $playbook_options = (array) $this->db->get_col("SELECT DISTINCT playbook_type FROM {$this->table('seo_task')} WHERE playbook_type IS NOT NULL AND playbook_type<>'' ORDER BY playbook_type ASC");
+        $owner_options = [];
+        foreach ($user_map as $id => $label) {
+            $owner_options[] = ['id' => $id, 'label' => $label];
+        }
+
+        return [
+            'filters' => $filters,
+            'rows' => $rows,
+            'metrics' => [
+                'counts' => $status_counts,
+                'conversion' => $conversion,
+                'cycle_time_days' => $cycle_time,
+            ],
+            'filter_options' => [
+                'sites' => array_map(static function (array $site): array {
+                    return ['id' => (int) $site['id'], 'label' => (string) $site['label']];
+                }, $site_options),
+                'playbooks' => array_values(array_filter(array_map('sanitize_key', $playbook_options))),
+                'owners' => $owner_options,
+            ],
+        ];
+    }
+
+    private function seo_cockpit_calculate_conversions(array $status_counts): array {
+        $ordered = $this->seo_cockpit_lifecycle_statuses();
+        $conversion = [];
+        $previous_count = null;
+        foreach ($ordered as $status) {
+            $current = (int) ($status_counts[$status] ?? 0);
+            if ($previous_count === null) {
+                $conversion[$status] = '100%';
+            } else {
+                $conversion[$status] = $previous_count > 0 ? round(($current / $previous_count) * 100, 2) . '%' : '—';
+            }
+            $previous_count = $current;
+        }
+        return $conversion;
+    }
+
+    private function seo_cockpit_calculate_cycle_times(array $rows): array {
+        $steps = [
+            'suggested → approved' => ['suggested', 'approved'],
+            'approved → in_progress' => ['approved', 'in_progress'],
+            'in_progress → done' => ['in_progress', 'done'],
+        ];
+        $aggregates = [];
+        foreach ($steps as $label => $_) {
+            $aggregates[$label] = ['sum' => 0.0, 'count' => 0];
+        }
+        foreach ($rows as $row) {
+            $timestamps = !empty($row['stage_timestamps_json']) ? json_decode((string) $row['stage_timestamps_json'], true) : [];
+            if (!is_array($timestamps)) {
+                continue;
+            }
+            foreach ($steps as $label => $pair) {
+                $start = strtotime((string) ($timestamps[$pair[0]] ?? ''));
+                $end = strtotime((string) ($timestamps[$pair[1]] ?? ''));
+                if ($start && $end && $end >= $start) {
+                    $aggregates[$label]['sum'] += ($end - $start) / DAY_IN_SECONDS;
+                    $aggregates[$label]['count']++;
+                }
+            }
+        }
+        $result = [];
+        foreach ($aggregates as $label => $value) {
+            $result[$label] = $value['count'] > 0 ? (string) round($value['sum'] / $value['count'], 2) : '—';
+        }
+        return $result;
     }
 
     private function get_seo_cockpit_data_quality_stats(): array {
