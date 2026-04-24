@@ -2,7 +2,7 @@
 /*
 Plugin Name: Shortcut Content Hub Orchestrator
 Description: Centrale content orchestrator voor klanten, keyword discovery, jobs en distributie naar externe WordPress blogs via een receiver plugin. Inclusief AI schrijf- en redactieflow, website research, Unsplash featured images en bulk blog import.
-Version: 0.7.0
+Version: 0.8.0
 Author: OpenAI
 */
 
@@ -223,13 +223,13 @@ final class SCH_SEO_Score_Engine_V1 {
 }
 
 final class SCH_Orchestrator {
-    const VERSION = '0.7.0';
+    const VERSION = '0.8.0';
     const CRON_HOOK = 'sch_orchestrator_minute_worker';
     const GSC_CRON_HOOK = 'sch_orchestrator_gsc_sync_worker';
     const SERP_CRON_HOOK = 'sch_orchestrator_serp_intelligence_worker';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
-    const DB_VERSION = '0.12.0';
+    const DB_VERSION = '0.13.0';
     const SEO_COCKPIT_CRON_HOOK = 'sch_orchestrator_seo_cockpit_daily_worker';
     const OPTION_SEO_COCKPIT_LAST_RUN = 'sch_seo_cockpit_last_run';
     const OPTION_SEO_COCKPIT_LAST_STATUS = 'sch_seo_cockpit_last_status';
@@ -281,6 +281,7 @@ final class SCH_Orchestrator {
     const OPTION_SERP_RESULTS_DEPTH = 'sch_serp_results_depth';
     const OPTION_SERP_SYNC_BATCH_SIZE = 'sch_serp_sync_batch_size';
     const OPTION_SCORING_WEIGHTS = 'sch_scoring_weights';
+    const OPTION_SCORE_CONFIG = 'sch_score_config';
     const OPTION_DATAFORSEO_LAST_ERROR = 'sch_dataforseo_last_error';
     const OPTION_INTELLIGENCE_LAST_SYNC = 'sch_intelligence_last_sync';
     const OPTION_INTELLIGENCE_LAST_STARTED_AT = 'sch_intelligence_last_started_at';
@@ -311,6 +312,7 @@ final class SCH_Orchestrator {
         if ($current_db_version !== self::DB_VERSION) {
             $this->create_tables();
         }
+        $this->register_score_version_if_missing($this->get_score_config(), 'Autoregister actieve scoreconfig.');
 
         register_activation_hook(__FILE__, [$this, 'activate']);
         register_deactivation_hook(__FILE__, [$this, 'deactivate']);
@@ -595,6 +597,8 @@ final class SCH_Orchestrator {
         $orchestrator_events = $this->table('orchestrator_events');
         $orchestrator_page_metrics_daily = $this->table('orchestrator_page_metrics_daily');
         $orchestrator_opportunities = $this->table('orchestrator_opportunities');
+        $orchestrator_score_versions = $this->table('orchestrator_score_versions');
+        $orchestrator_opportunity_score_history = $this->table('orchestrator_opportunity_score_history');
         $orchestrator_tasks = $this->table('orchestrator_tasks');
         $seo_pages = $this->table('seo_pages');
         $seo_page_tasks = $this->table('seo_page_tasks');
@@ -1105,6 +1109,38 @@ final class SCH_Orchestrator {
             KEY tenant_site_status (tenant_id, site_id, status)
         ) {$charset};");
 
+        dbDelta("CREATE TABLE {$orchestrator_score_versions} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            version_tag VARCHAR(64) NOT NULL,
+            config_json LONGTEXT NOT NULL,
+            changelog TEXT NULL,
+            created_by BIGINT UNSIGNED NULL,
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY version_tag (version_tag),
+            KEY created_at (created_at)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$orchestrator_opportunity_score_history} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            opportunity_id BIGINT UNSIGNED NOT NULL,
+            client_id BIGINT UNSIGNED NOT NULL,
+            page_path VARCHAR(255) NOT NULL DEFAULT '',
+            score_version VARCHAR(64) NOT NULL DEFAULT '',
+            score DECIMAL(10,4) NOT NULL DEFAULT 0,
+            previous_score DECIMAL(10,4) NOT NULL DEFAULT 0,
+            score_delta DECIMAL(10,4) NOT NULL DEFAULT 0,
+            confidence DECIMAL(10,4) NOT NULL DEFAULT 0,
+            active_playbook VARCHAR(100) NOT NULL DEFAULT '',
+            anti_gaming_notes LONGTEXT NULL,
+            breakdown_json LONGTEXT NULL,
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY opportunity_version (opportunity_id, score_version),
+            KEY client_created (client_id, created_at),
+            KEY client_version (client_id, score_version)
+        ) {$charset};");
+
         dbDelta("CREATE TABLE {$orchestrator_tasks} (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             tenant_id BIGINT UNSIGNED NOT NULL DEFAULT 1,
@@ -1339,6 +1375,10 @@ final class SCH_Orchestrator {
         $this->maybe_add_column($seo_opportunity, 'risk_severity', "ALTER TABLE {$seo_opportunity} ADD COLUMN risk_severity VARCHAR(20) NOT NULL DEFAULT '' AFTER delta_clicks_28d");
         $this->maybe_add_column($seo_opportunity, 'cold_start', "ALTER TABLE {$seo_opportunity} ADD COLUMN cold_start TINYINT(1) NOT NULL DEFAULT 0 AFTER risk_severity");
         $this->maybe_add_column($seo_opportunity, 'data_quality_warning', "ALTER TABLE {$seo_opportunity} ADD COLUMN data_quality_warning VARCHAR(255) NOT NULL DEFAULT '' AFTER cold_start");
+        $this->maybe_add_column($orchestrator_opportunities, 'opportunity_type', "ALTER TABLE {$orchestrator_opportunities} ADD COLUMN opportunity_type VARCHAR(50) NOT NULL DEFAULT 'quick_win' AFTER page_path");
+        $this->maybe_add_column($orchestrator_opportunities, 'score_version', "ALTER TABLE {$orchestrator_opportunities} ADD COLUMN score_version VARCHAR(64) NOT NULL DEFAULT 'v1' AFTER score");
+        $this->maybe_add_column($orchestrator_opportunities, 'active_playbook', "ALTER TABLE {$orchestrator_opportunities} ADD COLUMN active_playbook VARCHAR(100) NOT NULL DEFAULT '' AFTER score_version");
+        $this->maybe_add_column($orchestrator_opportunities, 'anti_gaming_notes', "ALTER TABLE {$orchestrator_opportunities} ADD COLUMN anti_gaming_notes LONGTEXT NULL AFTER score_breakdown");
 
         $this->maybe_add_column($clients, 'research_urls', "ALTER TABLE {$clients} ADD COLUMN research_urls LONGTEXT NULL AFTER link_targets");
         $this->maybe_add_column($clients, 'max_posts_per_month', "ALTER TABLE {$clients} ADD COLUMN max_posts_per_month INT UNSIGNED NOT NULL DEFAULT 0 AFTER research_urls");
@@ -1409,6 +1449,7 @@ final class SCH_Orchestrator {
         add_option(self::OPTION_SERP_DEFAULT_LANGUAGE_CODE, 'en');
         add_option(self::OPTION_SERP_DEFAULT_DEVICE, 'desktop');
         add_option(self::OPTION_SCORING_WEIGHTS, wp_json_encode($this->default_scoring_weights(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        add_option(self::OPTION_SCORE_CONFIG, wp_json_encode($this->default_score_config(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
         add_option(self::OPTION_SERP_RESULTS_DEPTH, '10');
         add_option(self::OPTION_SERP_SYNC_BATCH_SIZE, '50');
         add_option(self::OPTION_DATAFORSEO_LAST_ERROR, '');
@@ -1417,6 +1458,7 @@ final class SCH_Orchestrator {
         add_option(self::OPTION_SEO_COCKPIT_LAST_RESULT, wp_json_encode([]));
 
         update_option(self::OPTION_DB_VERSION, self::DB_VERSION);
+        $this->register_score_version_if_missing($this->get_score_config(), 'Initial sprint-5 configuratie.');
     }
 
     public function admin_menu(): void {
@@ -2661,7 +2703,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <tr><th>Auto sync GA4</th><td><label><input type="checkbox" name="ga_auto_sync" value="1" <?php checked(get_option(self::OPTION_GA_AUTO_SYNC, '0'), '1'); ?>> Dagelijks GA4 page metrics syncen</label></td></tr>
                     <tr><th>Auto feedback engine</th><td><label><input type="checkbox" name="feedback_auto_sync" value="1" <?php checked(get_option(self::OPTION_FEEDBACK_AUTO_SYNC, '0'), '1'); ?>> Dagelijks overlay + feedback signalen genereren</label></td></tr>
                     <tr><th colspan="2"><h2 style="margin:10px 0 0;">Intelligence scoring</h2></th></tr>
-                    <?php $scoring_weights = $this->get_opportunity_scoring_weights(); ?>
+                    <?php $scoring_weights = $this->get_opportunity_scoring_weights('quick_win'); ?>
+                    <?php $score_config = $this->get_score_config(); ?>
                     <tr>
                         <th>Scoring gewichten (JSON)</th>
                         <td>
@@ -2677,6 +2720,13 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                             <label style="display:inline-block; margin-right:12px;">position_factor <input type="number" step="0.01" min="0" max="1" name="weight_position_factor" value="<?php echo esc_attr((string) ($scoring_weights['position_factor'] ?? 0.20)); ?>"></label>
                             <label style="display:inline-block; margin-right:12px;">decline_factor <input type="number" step="0.01" min="0" max="1" name="weight_decline_factor" value="<?php echo esc_attr((string) ($scoring_weights['decline_factor'] ?? 0.15)); ?>"></label>
                             <p class="description">Als de som geen 1.0 is, normaliseren we automatisch naar 1.0.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Score config (versie + types)</th>
+                        <td>
+                            <textarea name="score_config_json" rows="8" class="large-text code"><?php echo esc_textarea(wp_json_encode($score_config, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)); ?></textarea>
+                            <p class="description">Bevat versie, guardrails en gewichten per opportunity type. Max delta per release guardrail wordt automatisch afgedwongen.</p>
                         </td>
                     </tr>
                     <tr><th colspan="2"><h2 style="margin:10px 0 0;">SERP Provider</h2></th></tr>
@@ -2979,13 +3029,83 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         return $weights;
     }
 
-    private function get_opportunity_scoring_weights(): array {
-        $raw = get_option(self::OPTION_SCORING_WEIGHTS, wp_json_encode($this->default_scoring_weights(), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+    private function default_score_config(): array {
+        $defaults = $this->default_scoring_weights();
+        return [
+            'version' => 's5-v1',
+            'guardrails' => [
+                'max_weight_delta_per_release' => 0.10,
+                'min_business_weight_for_full_impact' => 0.8,
+                'cooldown_days' => 14,
+            ],
+            'weights_by_type' => [
+                'quick_win' => $defaults,
+                'defensief' => [
+                    'potential_norm' => 0.25,
+                    'ctr_gap' => 0.20,
+                    'position_factor' => 0.20,
+                    'decline_factor' => 0.35,
+                ],
+                'technisch' => [
+                    'potential_norm' => 0.30,
+                    'ctr_gap' => 0.20,
+                    'position_factor' => 0.15,
+                    'decline_factor' => 0.35,
+                ],
+                'groei' => [
+                    'potential_norm' => 0.40,
+                    'ctr_gap' => 0.30,
+                    'position_factor' => 0.20,
+                    'decline_factor' => 0.10,
+                ],
+            ],
+        ];
+    }
+
+    private function get_score_config(): array {
+        $default = $this->default_score_config();
+        $raw = get_option(self::OPTION_SCORE_CONFIG, wp_json_encode($default, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
         $decoded = is_string($raw) ? json_decode($raw, true) : [];
         if (!is_array($decoded)) {
             $decoded = [];
         }
-        return $this->normalize_scoring_weights($decoded);
+        $decoded['version'] = sanitize_key((string) ($decoded['version'] ?? $default['version']));
+        if ($decoded['version'] === '') {
+            $decoded['version'] = $default['version'];
+        }
+        $decoded['guardrails'] = is_array($decoded['guardrails'] ?? null) ? $decoded['guardrails'] : $default['guardrails'];
+        $decoded['weights_by_type'] = is_array($decoded['weights_by_type'] ?? null) ? $decoded['weights_by_type'] : [];
+        foreach ($default['weights_by_type'] as $type => $weights) {
+            $decoded['weights_by_type'][$type] = $this->normalize_scoring_weights((array) ($decoded['weights_by_type'][$type] ?? $weights));
+        }
+        return $decoded;
+    }
+
+    private function get_opportunity_scoring_weights(string $opportunity_type = 'quick_win'): array {
+        $config = $this->get_score_config();
+        $weights = (array) ($config['weights_by_type'][$opportunity_type] ?? $config['weights_by_type']['quick_win'] ?? $this->default_scoring_weights());
+        return $this->normalize_scoring_weights($weights);
+    }
+
+    private function register_score_version_if_missing(array $config, string $changelog): void {
+        $version = sanitize_key((string) ($config['version'] ?? ''));
+        if ($version === '') {
+            return;
+        }
+        $existing = (int) $this->db->get_var($this->db->prepare(
+            "SELECT id FROM {$this->table('orchestrator_score_versions')} WHERE version_tag=%s LIMIT 1",
+            $version
+        ));
+        if ($existing > 0) {
+            return;
+        }
+        $this->db->insert($this->table('orchestrator_score_versions'), [
+            'version_tag' => $version,
+            'config_json' => wp_json_encode($config, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            'changelog' => sanitize_textarea_field($changelog),
+            'created_by' => get_current_user_id() ?: null,
+            'created_at' => $this->now(),
+        ]);
     }
 
     private function implode_target_strings(array $targets): string {
@@ -4225,7 +4345,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         update_option(self::OPTION_RANDOM_TRENDS_GEO, strtoupper(substr(sanitize_text_field((string) ($_POST['random_trends_geo'] ?? 'NL')), 0, 5)));
         update_option(self::OPTION_RANDOM_TRENDS_MAX_TOPICS, (string) max(1, min(20, (int) ($_POST['random_trends_max_topics'] ?? 8))));
 
-        $previous_scoring_weights = $this->get_opportunity_scoring_weights();
+        $previous_scoring_weights = $this->get_opportunity_scoring_weights('quick_win');
+        $previous_score_config = $this->get_score_config();
         $reset_scoring_defaults = isset($_POST['scoring_reset_defaults']) && (string) $_POST['scoring_reset_defaults'] === '1';
         $scoring_weights = $this->default_scoring_weights();
         $sum_before_normalization = array_sum($scoring_weights);
@@ -4268,6 +4389,37 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
         $scoring_weights = $this->normalize_scoring_weights($scoring_weights);
         update_option(self::OPTION_SCORING_WEIGHTS, wp_json_encode($scoring_weights, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        $new_score_config = $previous_score_config;
+        $new_score_config['weights_by_type']['quick_win'] = $scoring_weights;
+        if (!empty($_POST['score_config_json'])) {
+            $decoded_score_config = json_decode((string) wp_unslash($_POST['score_config_json']), true);
+            if (is_array($decoded_score_config)) {
+                $candidate = $this->get_score_config();
+                $candidate['weights_by_type'] = (array) ($decoded_score_config['weights_by_type'] ?? $candidate['weights_by_type']);
+                $candidate['guardrails'] = array_merge((array) ($candidate['guardrails'] ?? []), (array) ($decoded_score_config['guardrails'] ?? []));
+                $candidate['version'] = sanitize_key((string) ($decoded_score_config['version'] ?? $candidate['version']));
+                foreach ((array) ($candidate['weights_by_type'] ?? []) as $type => $weights) {
+                    $candidate['weights_by_type'][$type] = $this->normalize_scoring_weights((array) $weights);
+                }
+                $new_score_config = $candidate;
+            }
+        }
+        $max_delta = (float) ($previous_score_config['guardrails']['max_weight_delta_per_release'] ?? 0.10);
+        foreach ((array) ($new_score_config['weights_by_type'] ?? []) as $type => $weights) {
+            $previous_type_weights = (array) ($previous_score_config['weights_by_type'][$type] ?? $this->default_scoring_weights());
+            foreach ((array) $weights as $key => $value) {
+                $delta = abs((float) $value - (float) ($previous_type_weights[$key] ?? 0));
+                if ($delta > $max_delta) {
+                    $new_score_config['weights_by_type'][$type][$key] = (float) ($previous_type_weights[$key] ?? 0) + (($value > ($previous_type_weights[$key] ?? 0)) ? $max_delta : -$max_delta);
+                }
+            }
+            $new_score_config['weights_by_type'][$type] = $this->normalize_scoring_weights((array) $new_score_config['weights_by_type'][$type]);
+        }
+        if ((string) ($new_score_config['version'] ?? '') === '' || $new_score_config['version'] === $previous_score_config['version']) {
+            $new_score_config['version'] = sanitize_key('s5-' . gmdate('Ymd-His'));
+        }
+        update_option(self::OPTION_SCORE_CONFIG, wp_json_encode($new_score_config, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        $this->register_score_version_if_missing($new_score_config, 'Scoringconfig bijgewerkt via instellingen (guardrails toegepast).');
         $this->log_orchestrator_event(1, 0, 0, 'settings', 'scoring_weights', 'scoring_config_updated', 'admin_ui', [
             'previous' => $previous_scoring_weights,
             'current' => $scoring_weights,
@@ -12922,6 +13074,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'position_28' => (float) ($row->pos_28 ?? 0),
                 'clicks_28' => (float) ($row->clicks_28 ?? 0),
                 'clicks_prev_28' => (float) ($row->clicks_prev_28 ?? 0),
+                'sessions_28' => (float) ($row->sessions_28 ?? 0),
                 'source_quality' => (float) ($row->source_quality ?? 0),
             ]);
             $this->upsert_opportunity_row($client_id, $row, $score_data);
@@ -12934,8 +13087,13 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $position = max(0.0, (float) ($input['position_28'] ?? 0));
         $clicks = max(0.0, (float) ($input['clicks_28'] ?? 0));
         $clicks_prev = max(0.0, (float) ($input['clicks_prev_28'] ?? 0));
+        $sessions = max(0.0, (float) ($input['sessions_28'] ?? 0));
         $source_quality = max(0.0, min(1.0, (float) ($input['source_quality'] ?? 0)));
-        $weights = $this->get_opportunity_scoring_weights();
+        $opportunity_type = $this->infer_opportunity_type($position, $clicks, $clicks_prev);
+        $weights = $this->get_opportunity_scoring_weights($opportunity_type);
+        $score_config = $this->get_score_config();
+        $score_version = (string) ($score_config['version'] ?? 's5-v1');
+        $constraints = [];
 
         $potential_norm = min(1.0, log(1 + $impressions) / log(1 + 50000));
         $target_ctr = $position > 0 ? max(0.02, min(0.35, 0.32 - (($position - 1) * 0.015))) : 0.12;
@@ -12952,6 +13110,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         ) * 100;
         $score = round(max(0.0, min(100.0, $score)), 2);
         $confidence = round(max(0.05, min(1.0, $source_quality)), 4);
+        $business_weight = $sessions > 0 ? min(2.0, max(0.1, $clicks / max(1.0, $sessions))) : 0.3;
 
         $quick_reason = 'CTR-gap met rankingkans';
         if ($decline_factor >= 0.35) {
@@ -12959,11 +13118,31 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         } elseif ($position_factor < 0.5) {
             $quick_reason = 'Veel impressies buiten quick-win band';
         }
+        $playbooks = $this->resolve_playbooks($opportunity_type, [
+            'position' => $position,
+            'ctr_gap' => $ctr_gap,
+            'decline_factor' => $decline_factor,
+            'impressions' => $impressions,
+            'business_weight' => $business_weight,
+        ]);
+        $active_playbook = (string) (($playbooks[0]['id'] ?? ''));
+        $score = $this->apply_anti_gaming_rules($score, [
+            'confidence' => $confidence,
+            'business_weight' => $business_weight,
+            'impressions' => $impressions,
+            'decline_factor' => $decline_factor,
+            'position' => $position,
+            'active_playbook' => $active_playbook,
+        ], $constraints);
 
         return [
             'score' => $score,
             'confidence' => $confidence,
             'quick_reason' => $quick_reason,
+            'opportunity_type' => $opportunity_type,
+            'score_version' => $score_version,
+            'active_playbook' => $active_playbook,
+            'anti_gaming_notes' => $constraints,
             'breakdown' => [
                 'potential_norm' => round($potential_norm, 4),
                 'ctr_gap' => round($ctr_gap, 4),
@@ -12971,8 +13150,70 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'decline_factor' => round($decline_factor, 4),
                 'target_ctr' => round($target_ctr, 4),
                 'weights' => $weights,
+                'playbooks' => $playbooks,
+                'anti_gaming_constraints' => $constraints,
             ],
         ];
+    }
+
+    private function infer_opportunity_type(float $position, float $clicks, float $clicks_prev): string {
+        $trend = $clicks_prev > 0 ? (($clicks - $clicks_prev) / $clicks_prev) : 0.0;
+        if ($trend < -0.2) {
+            return 'defensief';
+        }
+        if ($position > 20) {
+            return 'groei';
+        }
+        if ($position <= 3 || ($clicks < 20 && $position > 25)) {
+            return 'technisch';
+        }
+        return 'quick_win';
+    }
+
+    private function apply_anti_gaming_rules(float $score, array $context, array &$constraints): float {
+        if ((float) ($context['position'] ?? 0) > 20 && (string) ($context['active_playbook'] ?? '') === 'ctr_quick_win') {
+            $score = min($score, 65.0);
+            $constraints[] = 'Effort integrity check: quick-win label bij zware context gecapt op 65.';
+        }
+        if ((float) ($context['decline_factor'] ?? 0) < 0.05) {
+            $score = max(0.0, $score - 5.0);
+            $constraints[] = 'Cooldown anti-spam: beperkte nieuwe evidence, score -5.';
+        }
+        if ((float) ($context['decline_factor'] ?? 0) > 0.40 && (float) ($context['position'] ?? 0) < 5) {
+            $score = min($score, 75.0);
+            $constraints[] = 'Attribution guardrail: overlappende wijzigingen vermoed, cap 75.';
+        }
+        if ((float) ($context['confidence'] ?? 0) < 0.40) {
+            $score = min($score, 70.0);
+            $constraints[] = 'Score cap bij incomplete data: confidence < 0.40.';
+        }
+        if ((float) ($context['business_weight'] ?? 1.0) < 0.8 && (float) ($context['impressions'] ?? 0) > 1000) {
+            $score = max(0.0, $score - 12.0);
+            $constraints[] = 'No vanity inflation: lage business_weight dempt impact.';
+        }
+        return round(max(0.0, min(100.0, $score)), 2);
+    }
+
+    private function resolve_playbooks(string $opportunity_type, array $context): array {
+        $catalog = [
+            'ctr_quick_win' => ['trigger_criteria' => 'Positie 3-12 met CTR-gap > 15%.', 'aanbevolen_actie' => 'Titel/meta varianten en SERP-snippet alignment.', 'expected_impact' => 'Snelle CTR-stijging binnen 7-14 dagen.', 'effort' => 'S', 'meetplan' => 'CTR delta 7d/28d + clicks uplift.', 'stop_rollback' => 'Rollback als CTR na 14 dagen niet stijgt.'],
+            'rank_lift' => ['trigger_criteria' => 'Positie 8-20 met business intent.', 'aanbevolen_actie' => 'Content verdieping + interne links.', 'expected_impact' => 'Top-10 naar top-5 potentieel.', 'effort' => 'M', 'meetplan' => 'Gemiddelde positie + non-brand clicks.', 'stop_rollback' => 'Stop bij verslechtering >10% gedurende 2 weken.'],
+            'cannibalization' => ['trigger_criteria' => 'Meerdere pagina’s concurreren op dezelfde query-set.', 'aanbevolen_actie' => 'Canonical/internal linking herstructureren.', 'expected_impact' => 'Consolidatie van ranking-signalen.', 'effort' => 'M', 'meetplan' => 'Query overlap ratio + position stability.', 'stop_rollback' => 'Rollback mapping als verkeer op hoofd-URL daalt.'],
+            'defensive_drop' => ['trigger_criteria' => 'Clicks daling >15% versus vorige 28 dagen.', 'aanbevolen_actie' => 'Defensieve refresh + intent re-check.', 'expected_impact' => 'Verlies stoppen binnen 7 dagen.', 'effort' => 'M', 'meetplan' => 'Click trend herstel op 7d en 28d.', 'stop_rollback' => 'Escaleren naar technical blocker bij verdere daling.'],
+            'engagement_mismatch' => ['trigger_criteria' => 'Hoge impressies met lage engaged sessions.', 'aanbevolen_actie' => 'Above-the-fold intent/CTA en UX fix.', 'expected_impact' => 'Meer engaged sessions en betere conv_proxy.', 'effort' => 'M', 'meetplan' => 'Engagement rate + conv_proxy uplift.', 'stop_rollback' => 'Rollback copy als engagement niet stijgt binnen 21 dagen.'],
+            'technical_blocker' => ['trigger_criteria' => 'Positie buiten bereik met datakwaliteit/technisch risico.', 'aanbevolen_actie' => 'Indexatie/canonical/schema/CWV blokkades oplossen.', 'expected_impact' => 'Voorwaarden voor rankingherstel.', 'effort' => 'M/L', 'meetplan' => 'Indexdekking + crawlfouten + rankings.', 'stop_rollback' => 'Stop als blocker niet reproduceerbaar is na validatie.'],
+        ];
+        $priority = ['ctr_quick_win', 'rank_lift', 'cannibalization', 'defensive_drop', 'engagement_mismatch', 'technical_blocker'];
+        if ($opportunity_type === 'defensief') {
+            $priority = ['defensive_drop', 'rank_lift', 'technical_blocker', 'ctr_quick_win', 'cannibalization', 'engagement_mismatch'];
+        } elseif ($opportunity_type === 'technisch') {
+            $priority = ['technical_blocker', 'cannibalization', 'defensive_drop', 'rank_lift', 'ctr_quick_win', 'engagement_mismatch'];
+        }
+        $results = [];
+        foreach ($priority as $playbook_id) {
+            $results[] = ['id' => $playbook_id] + $catalog[$playbook_id];
+        }
+        return $results;
     }
 
     private function upsert_opportunity_row(int $client_id, object $row, array $score_data): void {
@@ -12980,11 +13221,13 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         if ($page_path === '') {
             return;
         }
-        $existing_id = (int) $this->db->get_var($this->db->prepare(
-            "SELECT id FROM {$this->table('orchestrator_opportunities')} WHERE client_id=%d AND page_path=%s LIMIT 1",
+        $existing_row = $this->db->get_row($this->db->prepare(
+            "SELECT id, score, updated_at FROM {$this->table('orchestrator_opportunities')} WHERE client_id=%d AND page_path=%s LIMIT 1",
             $client_id,
             $page_path
         ));
+        $existing_id = (int) ($existing_row->id ?? 0);
+        $previous_score = (float) ($existing_row->score ?? 0);
         $payload = [
             'tenant_id' => 1,
             'site_id' => (int) ($row->site_id ?? 0) ?: null,
@@ -12992,10 +13235,14 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'article_id' => (int) ($row->article_id ?? 0) ?: null,
             'page_url' => (string) ($row->page_url ?? ''),
             'page_path' => $page_path,
+            'opportunity_type' => (string) ($score_data['opportunity_type'] ?? 'quick_win'),
             'score' => (float) ($score_data['score'] ?? 0),
+            'score_version' => (string) ($score_data['score_version'] ?? 's5-v1'),
+            'active_playbook' => (string) ($score_data['active_playbook'] ?? ''),
             'confidence' => (float) ($score_data['confidence'] ?? 0),
             'quick_reason' => (string) ($score_data['quick_reason'] ?? ''),
             'score_breakdown' => wp_json_encode($score_data['breakdown'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            'anti_gaming_notes' => wp_json_encode((array) ($score_data['anti_gaming_notes'] ?? []), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
             'status' => 'open',
             'updated_at' => $this->now(),
         ];
@@ -13004,6 +13251,25 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         } else {
             $payload['created_at'] = $this->now();
             $this->db->insert($this->table('orchestrator_opportunities'), $payload);
+            $existing_id = (int) $this->db->insert_id;
+            $previous_score = 0.0;
+        }
+        if ($existing_id > 0) {
+            $current_score = (float) ($score_data['score'] ?? 0);
+            $this->db->insert($this->table('orchestrator_opportunity_score_history'), [
+                'opportunity_id' => $existing_id,
+                'client_id' => $client_id,
+                'page_path' => $page_path,
+                'score_version' => (string) ($score_data['score_version'] ?? 's5-v1'),
+                'score' => $current_score,
+                'previous_score' => $previous_score,
+                'score_delta' => round($current_score - $previous_score, 4),
+                'confidence' => (float) ($score_data['confidence'] ?? 0),
+                'active_playbook' => (string) ($score_data['active_playbook'] ?? ''),
+                'anti_gaming_notes' => wp_json_encode((array) ($score_data['anti_gaming_notes'] ?? []), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'breakdown_json' => wp_json_encode((array) ($score_data['breakdown'] ?? []), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'created_at' => $this->now(),
+            ]);
         }
     }
 
@@ -13128,6 +13394,49 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         ];
     }
 
+    private function get_score_version_changelog(int $limit = 10): array {
+        return (array) $this->db->get_results($this->db->prepare(
+            "SELECT version_tag, changelog, created_at FROM {$this->table('orchestrator_score_versions')} ORDER BY id DESC LIMIT %d",
+            max(1, $limit)
+        ));
+    }
+
+    private function get_score_comparison_report(int $client_id): array {
+        if ($client_id <= 0) {
+            return [];
+        }
+        $versions = (array) $this->db->get_col($this->db->prepare(
+            "SELECT score_version
+             FROM {$this->table('orchestrator_opportunity_score_history')}
+             WHERE client_id=%d
+             GROUP BY score_version
+             ORDER BY MAX(created_at) DESC
+             LIMIT 2",
+            $client_id
+        ));
+        if (count($versions) < 2) {
+            return [];
+        }
+        [$latest, $previous] = $versions;
+        $rows = (array) $this->db->get_results($this->db->prepare(
+            "SELECT page_path,
+                    MAX(CASE WHEN score_version=%s THEN score END) AS latest_score,
+                    MAX(CASE WHEN score_version=%s THEN score END) AS previous_score
+             FROM {$this->table('orchestrator_opportunity_score_history')}
+             WHERE client_id=%d AND score_version IN (%s,%s)
+             GROUP BY page_path
+             HAVING latest_score IS NOT NULL AND previous_score IS NOT NULL
+             ORDER BY ABS(latest_score-previous_score) DESC
+             LIMIT 20",
+            $latest,
+            $previous,
+            $client_id,
+            $latest,
+            $previous
+        ));
+        return ['latest' => $latest, 'previous' => $previous, 'rows' => $rows];
+    }
+
     public function render_intelligence(): void {
         $client_id = max(0, (int) ($_GET['client_id'] ?? 0));
         $selected_path = $this->normalize_page_path(sanitize_text_field((string) ($_GET['page_path'] ?? '')));
@@ -13171,7 +13480,10 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
         $connectors = $this->get_connector_registry();
         $can_manage_task_actions = current_user_can('manage_options');
-        $active_scoring_weights = $this->get_opportunity_scoring_weights();
+        $active_score_config = $this->get_score_config();
+        $active_scoring_weights = $this->get_opportunity_scoring_weights('quick_win');
+        $score_changelog = $this->get_score_version_changelog();
+        $comparison_report = $this->get_score_comparison_report($client_id);
         ?>
         <div class="wrap">
             <h1>Intelligence</h1>
@@ -13182,6 +13494,28 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 <?php endforeach; ?>
             </p>
             <p><strong>Actieve scoring gewichten:</strong> <code><?php echo esc_html(wp_json_encode($active_scoring_weights, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)); ?></code></p>
+            <p><strong>Actieve scoreconfig:</strong> <code><?php echo esc_html(wp_json_encode($active_score_config, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)); ?></code></p>
+
+            <div class="sch-card" style="margin-bottom:16px;">
+                <h2>Score versioning & changelog</h2>
+                <table class="widefat striped">
+                    <thead><tr><th>Versie</th><th>Changelog</th><th>Datum</th></tr></thead>
+                    <tbody>
+                    <?php if ($score_changelog) : foreach ($score_changelog as $item) : ?>
+                        <tr><td><code><?php echo esc_html((string) $item->version_tag); ?></code></td><td><?php echo esc_html((string) ($item->changelog ?: '—')); ?></td><td><?php echo esc_html((string) $item->created_at); ?></td></tr>
+                    <?php endforeach; else : ?>
+                        <tr><td colspan="3">Nog geen scoreversie changelog.</td></tr>
+                    <?php endif; ?>
+                    </tbody>
+                </table>
+                <?php if (!empty($comparison_report)) : ?>
+                    <h3>Vergelijkingsrapport: <?php echo esc_html((string) $comparison_report['previous']); ?> → <?php echo esc_html((string) $comparison_report['latest']); ?></h3>
+                    <table class="widefat striped">
+                        <thead><tr><th>Pagina</th><th>Vorige score</th><th>Nieuwe score</th><th>Delta</th></tr></thead>
+                        <tbody><?php foreach ((array) ($comparison_report['rows'] ?? []) as $report_row) : $delta = (float) ($report_row->latest_score ?? 0) - (float) ($report_row->previous_score ?? 0); ?><tr><td><code><?php echo esc_html((string) $report_row->page_path); ?></code></td><td><?php echo esc_html((string) round((float) ($report_row->previous_score ?? 0), 2)); ?></td><td><?php echo esc_html((string) round((float) ($report_row->latest_score ?? 0), 2)); ?></td><td><?php echo esc_html((string) round($delta, 2)); ?></td></tr><?php endforeach; ?></tbody>
+                    </table>
+                <?php endif; ?>
+            </div>
 
             <form method="get" style="margin-bottom:12px;">
                 <input type="hidden" name="page" value="sch-intelligence">
@@ -13207,7 +13541,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 <div class="sch-card">
                     <h2>Opportunity Queue</h2>
                     <table class="widefat striped">
-                        <thead><tr><th>Pagina</th><th>Score</th><th>Confidence</th><th>Reason</th><th>Acties</th></tr></thead>
+                        <thead><tr><th>Pagina</th><th>Score</th><th>Versie</th><th>Playbook</th><th>Confidence</th><th>Reason</th><th>Acties</th></tr></thead>
                         <tbody>
                         <?php if ($rows) : foreach ($rows as $row_data) : $row = (object) $row_data; ?>
                             <tr>
@@ -13217,6 +13551,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                                     </a>
                                 </td>
                                 <td><?php echo esc_html((string) round((float) $row->score, 2)); ?></td>
+                                <td><code><?php echo esc_html((string) ($row->score_version ?? 'v1')); ?></code></td>
+                                <td><?php echo esc_html((string) ($row->active_playbook ?: '—')); ?></td>
                                 <td><?php echo esc_html((string) round((float) $row->confidence, 2)); ?></td>
                                 <td><?php echo esc_html((string) $row->quick_reason); ?></td>
                                 <td>
@@ -13241,7 +13577,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                                 </td>
                             </tr>
                         <?php endforeach; else : ?>
-                            <tr><td colspan="5">Geen opportunities gevonden voor selectie.</td></tr>
+                            <tr><td colspan="7">Geen opportunities gevonden voor selectie.</td></tr>
                         <?php endif; ?>
                         </tbody>
                     </table>
@@ -13259,6 +13595,19 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                                 <ul><?php foreach ((array) $explanation['supporting_signals'] as $signal) : ?><li><?php echo esc_html((string) $signal); ?></li><?php endforeach; ?></ul>
                             <?php endif; ?>
                             <p><strong>Recommended action:</strong> <?php echo esc_html((string) ($explanation['recommended_next_action'] ?? '')); ?></p>
+                        <?php endif; ?>
+                        <?php $selected_breakdown = is_string($selected->score_breakdown ?? null) ? json_decode((string) $selected->score_breakdown, true) : []; ?>
+                        <?php $selected_constraints = is_string($selected->anti_gaming_notes ?? null) ? json_decode((string) $selected->anti_gaming_notes, true) : []; ?>
+                        <?php if (!empty($selected_constraints)) : ?>
+                            <h3>Anti-gaming constraints</h3>
+                            <ul><?php foreach ((array) $selected_constraints as $constraint) : ?><li><?php echo esc_html((string) $constraint); ?></li><?php endforeach; ?></ul>
+                        <?php endif; ?>
+                        <?php if (!empty($selected_breakdown['playbooks']) && is_array($selected_breakdown['playbooks'])) : ?>
+                            <h3>Top 6 playbooks</h3>
+                            <table class="widefat striped">
+                                <thead><tr><th>Playbook</th><th>Trigger criteria</th><th>Aanbevolen actie</th><th>Expected impact</th><th>Effort</th><th>Meetplan</th><th>Stop/rollback</th></tr></thead>
+                                <tbody><?php foreach ((array) $selected_breakdown['playbooks'] as $playbook) : ?><tr><td><code><?php echo esc_html((string) ($playbook['id'] ?? '')); ?></code></td><td><?php echo esc_html((string) ($playbook['trigger_criteria'] ?? '')); ?></td><td><?php echo esc_html((string) ($playbook['aanbevolen_actie'] ?? '')); ?></td><td><?php echo esc_html((string) ($playbook['expected_impact'] ?? '')); ?></td><td><?php echo esc_html((string) ($playbook['effort'] ?? '')); ?></td><td><?php echo esc_html((string) ($playbook['meetplan'] ?? '')); ?></td><td><?php echo esc_html((string) ($playbook['stop_rollback'] ?? '')); ?></td></tr><?php endforeach; ?></tbody>
+                            </table>
                         <?php endif; ?>
 
                         <h3>Metrics (laatste 30 dagen)</h3>
