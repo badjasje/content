@@ -324,7 +324,6 @@ final class SCH_Orchestrator {
         add_action(self::SERP_CRON_HOOK, [$this, 'run_serp_intelligence_worker']);
         add_action(self::GA_CRON_HOOK, [$this, 'run_ga_auto_sync']);
         add_action(self::FEEDBACK_CRON_HOOK, [$this, 'run_feedback_auto_sync']);
-        add_action(self::SEO_COCKPIT_CRON_HOOK, [$this, 'run_seo_cockpit_daily_refresh']);
 
         add_action('admin_menu', [$this, 'admin_menu']);
         add_action('admin_post_sch_save_client', [$this, 'handle_save_client']);
@@ -365,14 +364,6 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_seo_sync_pages', [$this, 'handle_seo_sync_pages']);
         add_action('admin_post_sch_seo_run_recommendations', [$this, 'handle_seo_run_recommendations']);
         add_action('admin_post_sch_seo_update_task_status', [$this, 'handle_seo_update_task_status']);
-        add_action('admin_post_sch_seo_cockpit_refresh', [$this, 'handle_seo_cockpit_refresh']);
-        add_action('admin_post_sch_seo_cockpit_approve', [$this, 'handle_seo_cockpit_approve']);
-        add_action('admin_post_sch_seo_cockpit_assign', [$this, 'handle_seo_cockpit_assign']);
-        add_action('admin_post_sch_seo_cockpit_due_date', [$this, 'handle_seo_cockpit_due_date']);
-        add_action('admin_post_sch_seo_cockpit_create_task', [$this, 'handle_seo_cockpit_create_task']);
-        add_action('admin_post_sch_seo_cockpit_update_task', [$this, 'handle_seo_cockpit_update_task']);
-        add_action('admin_post_sch_seo_cockpit_update_status', [$this, 'handle_seo_cockpit_update_status']);
-        add_action('admin_post_sch_seo_cockpit_dismiss', [$this, 'handle_seo_cockpit_dismiss']);
         add_action('rest_api_init', [$this, 'register_intelligence_rest_routes']);
         add_action('rest_api_init', [$this, 'register_frontend_rest_routes']);
         add_action('admin_post_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
@@ -383,7 +374,6 @@ final class SCH_Orchestrator {
         $this->schedule_serp_cron();
         $this->schedule_ga_cron();
         $this->schedule_feedback_cron();
-        $this->schedule_seo_cockpit_cron();
     }
 
     public function activate(): void {
@@ -393,7 +383,6 @@ final class SCH_Orchestrator {
         $this->schedule_serp_cron();
         $this->schedule_ga_cron();
         $this->schedule_feedback_cron();
-        $this->schedule_seo_cockpit_cron();
     }
 
     public function deactivate(): void {
@@ -402,7 +391,6 @@ final class SCH_Orchestrator {
         wp_clear_scheduled_hook(self::SERP_CRON_HOOK);
         wp_clear_scheduled_hook(self::GA_CRON_HOOK);
         wp_clear_scheduled_hook(self::FEEDBACK_CRON_HOOK);
-        wp_clear_scheduled_hook(self::SEO_COCKPIT_CRON_HOOK);
     }
 
     public function add_cron_schedule(array $schedules): array {
@@ -1488,9 +1476,6 @@ final class SCH_Orchestrator {
         add_option(self::OPTION_SERP_RESULTS_DEPTH, '10');
         add_option(self::OPTION_SERP_SYNC_BATCH_SIZE, '50');
         add_option(self::OPTION_DATAFORSEO_LAST_ERROR, '');
-        add_option(self::OPTION_SEO_COCKPIT_LAST_RUN, '');
-        add_option(self::OPTION_SEO_COCKPIT_LAST_STATUS, '');
-        add_option(self::OPTION_SEO_COCKPIT_LAST_RESULT, wp_json_encode([]));
 
         update_option(self::OPTION_DB_VERSION, self::DB_VERSION);
         $this->register_score_version_if_missing($this->get_score_config(), 'Initial sprint-5 configuratie.');
@@ -1508,7 +1493,6 @@ final class SCH_Orchestrator {
         add_submenu_page('sch-content-hub', 'Redactie', 'Redactie', 'manage_options', 'sch-editorial', [$this, 'render_editorial']);
         add_submenu_page('sch-content-hub', 'Rapportage', 'Rapportage', 'manage_options', 'sch-reporting', [$this, 'render_reporting']);
         add_submenu_page('sch-content-hub', 'Performance', 'Performance', 'manage_options', 'sch-performance', [$this, 'render_performance']);
-        add_submenu_page('sch-content-hub', 'SEO Cockpit', 'SEO Cockpit', 'manage_options', 'sch-seo-cockpit', [$this, 'render_seo_cockpit']);
         add_submenu_page('sch-content-hub', 'Intelligence', 'Intelligence', 'manage_options', 'sch-intelligence', [$this, 'render_intelligence']);
         add_submenu_page('sch-content-hub', 'Page Intelligence', 'Page Intelligence', 'manage_options', 'sch-page-intelligence', [$this, 'render_page_intelligence']);
         add_submenu_page('sch-content-hub', 'SERP Intelligence', 'SERP Intelligence', 'manage_options', 'sch-serp-intelligence', [$this, 'render_serp_intelligence']);
@@ -1548,10 +1532,6 @@ final class SCH_Orchestrator {
             'sch-app' => [
                 'title' => 'App',
                 'text' => 'Deze moderne app-shell bundelt dashboard, keyword-optimalisatie, technical issues, queue en instellingen op één plek bovenop bestaande plugin-data en acties.',
-            ],
-            'sch-seo-cockpit' => [
-                'title' => 'SEO Cockpit',
-                'text' => 'Centrale SEO-regiekamer per klant/site/pagina: performance, issues, quick wins en actiegerichte taken met prioriteit en status.',
             ],
             'sch-clients' => [
                 'title' => 'Klanten',
@@ -10778,22 +10758,22 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     public function handle_seo_sync_pages(): void {
         $this->verify_admin_nonce('sch_seo_sync_pages');
         if (!$this->table_exists($this->table('seo_pages'))) {
-            $this->redirect_with_message('sch-seo-cockpit', 'SEO pagina tabel bestaat nog niet. Heractiveer plugin of run upgrade.', 'error');
+            $this->redirect_with_message('sch-performance', 'SEO pagina tabel bestaat nog niet. Heractiveer plugin of run upgrade.', 'error');
         }
         $client_id = max(0, (int) ($_POST['client_id'] ?? 0));
         $inserted = $this->sync_seo_pages($client_id);
-        $this->redirect_with_message('sch-seo-cockpit', 'SEO pagina\'s bijgewerkt: ' . $inserted, 'success', ['client_id' => $client_id]);
+        $this->redirect_with_message('sch-performance', 'SEO pagina\'s bijgewerkt: ' . $inserted, 'success', ['client_id' => $client_id]);
     }
 
     public function handle_seo_run_recommendations(): void {
         $this->verify_admin_nonce('sch_seo_run_recommendations');
         if (!$this->table_exists($this->table('seo_page_tasks')) || !$this->table_exists($this->table('seo_pages'))) {
-            $this->redirect_with_message('sch-seo-cockpit', 'SEO cockpit tabellen ontbreken. Heractiveer plugin of run upgrade.', 'error');
+            $this->redirect_with_message('sch-performance', 'SEO cockpit tabellen ontbreken. Heractiveer plugin of run upgrade.', 'error');
         }
         $client_id = max(0, (int) ($_POST['client_id'] ?? 0));
         $site_id = max(0, (int) ($_POST['site_id'] ?? 0));
         $created = $this->run_seo_recommendation_engine($client_id, $site_id);
-        $this->redirect_with_message('sch-seo-cockpit', 'SEO aanbevelingen berekend: ' . $created . ' taken aangeraakt.', 'success', [
+        $this->redirect_with_message('sch-performance', 'SEO aanbevelingen berekend: ' . $created . ' taken aangeraakt.', 'success', [
             'client_id' => $client_id,
             'site_id' => $site_id,
         ]);
@@ -10802,13 +10782,13 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     public function handle_seo_update_task_status(): void {
         $this->verify_admin_nonce('sch_seo_update_task_status');
         if (!$this->table_exists($this->table('seo_page_tasks'))) {
-            $this->redirect_with_message('sch-seo-cockpit', 'SEO taken tabel ontbreekt. Heractiveer plugin of run upgrade.', 'error');
+            $this->redirect_with_message('sch-performance', 'SEO taken tabel ontbreekt. Heractiveer plugin of run upgrade.', 'error');
         }
         $task_id = max(0, (int) ($_POST['task_id'] ?? 0));
         $status = sanitize_key((string) ($_POST['status'] ?? ''));
         $page_id = max(0, (int) ($_POST['page_id'] ?? 0));
         if ($task_id <= 0 || !in_array($status, ['open', 'in_progress', 'done', 'ignored'], true)) {
-            $this->redirect_with_message('sch-seo-cockpit', 'Ongeldige taakstatus update.', 'error');
+            $this->redirect_with_message('sch-performance', 'Ongeldige taakstatus update.', 'error');
         }
 
         $update = [
@@ -10824,10 +10804,10 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
         $updated = $this->db->update($this->table('seo_page_tasks'), $update, ['id' => $task_id]);
         if ($updated === false) {
-            $this->redirect_with_message('sch-seo-cockpit', 'Taakstatus opslaan mislukt.', 'error', ['seo_page_id' => $page_id]);
+            $this->redirect_with_message('sch-performance', 'Taakstatus opslaan mislukt.', 'error', ['seo_page_id' => $page_id]);
         }
 
-        $this->redirect_with_message('sch-seo-cockpit', 'Taakstatus bijgewerkt.', 'success', ['seo_page_id' => $page_id]);
+        $this->redirect_with_message('sch-performance', 'Taakstatus bijgewerkt.', 'success', ['seo_page_id' => $page_id]);
     }
 
     public function handle_seo_cockpit_refresh(): void {
