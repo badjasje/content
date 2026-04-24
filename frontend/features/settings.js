@@ -16,6 +16,9 @@ export async function renderSettings(container, toast) {
         <label><input type="checkbox" name="ga_enabled" ${data.ga_enabled ? 'checked' : ''}> GA enabled</label>
         <label><input type="checkbox" name="random_machine_enabled" ${data.random_machine_enabled ? 'checked' : ''}> Random machine</label>
         <label>Random daily max <input type="number" min="1" max="100" name="random_daily_max" value="${data.random_daily_max || 10}"></label>
+        <label><input type="checkbox" name="random_trends_enabled" ${data.random_trends_enabled ? 'checked' : ''}> Random machine + Google Trends</label>
+        <label>Trends geo <input name="random_trends_geo" maxlength="5" value="${data.random_trends_geo || 'NL'}"></label>
+        <label>Max trends topics <input type="number" min="1" max="20" name="random_trends_max_topics" value="${data.random_trends_max_topics || 8}"></label>
         <button type="submit">Save</button>
       </form>
     `;
@@ -24,7 +27,7 @@ export async function renderSettings(container, toast) {
       event.preventDefault();
       const formData = new FormData(event.currentTarget);
       const payload = Object.fromEntries(formData.entries());
-      ['enable_featured_images', 'enable_supporting', 'enable_auto_discovery', 'gsc_enabled', 'ga_enabled', 'random_machine_enabled'].forEach((k) => {
+      ['enable_featured_images', 'enable_supporting', 'enable_auto_discovery', 'gsc_enabled', 'ga_enabled', 'random_machine_enabled', 'random_trends_enabled'].forEach((k) => {
         payload[k] = event.currentTarget.querySelector(`[name="${k}"]`).checked;
       });
       await api.saveSettings(payload);
