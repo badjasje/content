@@ -13357,6 +13357,51 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         <?php
     }
 
+    private function explain_serp_recommendation_type(string $type): string {
+        return match (sanitize_key($type)) {
+            'snippet_capture' => 'Pak zichtbaarheid in uitgelichte antwoorden (featured snippets): geef direct antwoord in 1 kort blok.',
+            'paa_expansion' => 'Voeg korte Q&A-sectie toe voor "Mensen vragen ook" (People Also Ask).',
+            'video_support' => 'Ondersteun de pagina met video (samenvatting/demo) en verwijs er duidelijk naar op de pagina.',
+            'visual_support' => 'Voeg relevante afbeeldingen/diagrammen toe met duidelijke alt-tekst.',
+            'local_intent' => 'Maak de content lokaler (plaatsnaam, regio, lokale voorbeelden) voor lokale zoekintentie.',
+            'discussion_gap' => 'Beantwoord twijfels en praktijkvragen: voeg ervaringen, voor- en nadelen en concrete cases toe.',
+            'authority_reinforcement' => 'Versterk autoriteit met bronvermelding, expertquotes, auteur-info en bewijs.',
+            'freshness_refresh' => 'Update verouderde info: feiten, jaartallen, prijzen, screenshots en voorbeelden.',
+            default => 'Algemene SEO-verbetering: maak antwoord duidelijker, completer en beter passend bij zoekintentie.',
+        };
+    }
+
+    private function explain_serp_format_type(string $format): string {
+        return match (sanitize_key($format)) {
+            'listicle' => 'Lijstvorm: gebruik duidelijke stappen of bullets.',
+            'faq' => 'FAQ-vorm: korte vraag + direct antwoord.',
+            'howto' => 'How-to: stap-voor-stap instructie.',
+            'comparison' => 'Vergelijking: optie A vs B met keuzehulp.',
+            'guide' => 'Complete gids: van basis tot verdieping.',
+            default => 'Klassieke informatieve pagina met heldere koppen en korte alinea’s.',
+        };
+    }
+
+    private function serp_recommendation_quick_win(object $row): string {
+        $format = sanitize_key((string) ($row->format_type ?? ''));
+        $query = sanitize_text_field((string) ($row->query ?? ''));
+
+        if ($format === 'faq') {
+            return 'Quick win: voeg direct onder de intro 3-5 FAQ-vragen toe rond "' . $query . '".';
+        }
+        if ($format === 'listicle') {
+            return 'Quick win: zet de kern direct bovenaan in een genummerde top-5 of top-10.';
+        }
+        if ($format === 'howto') {
+            return 'Quick win: start met "Stap 1/2/3" en laat elke stap met een concreet resultaat eindigen.';
+        }
+        if ($format === 'comparison') {
+            return 'Quick win: voeg een eenvoudige vergelijkingstabel toe met "voor wie geschikt".';
+        }
+
+        return 'Quick win: herschrijf intro + eerste tussenkop zodat de zoekvraag binnen 2 zinnen wordt beantwoord.';
+    }
+
     public function render_serp_recommendations(): void {
         $client_id = (int) ($_GET['client_id'] ?? 0);
         $status = sanitize_key((string) ($_GET['status'] ?? 'open'));
@@ -13373,9 +13418,29 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $rows = $this->db->get_results($this->db->prepare($sql, ...$params));
         ?>
         <div class="wrap"><h1>SERP Recommendations</h1><?php $this->render_admin_notice(); ?>
+            <p>Deze pagina vertaalt technische SEO-signalen naar simpele taken. Werk per rij van hoge priority naar laag en voer eerst de Quick win uit.</p>
             <form method="get"><input type="hidden" name="page" value="sch-serp-recommendations"><label>Klant ID <input type="number" name="client_id" value="<?php echo (int) $client_id; ?>"></label> <label>Status <select name="status"><?php foreach (['open', 'ignored', 'resolved'] as $s) : ?><option value="<?php echo esc_attr($s); ?>" <?php selected($status, $s); ?>><?php echo esc_html($s); ?></option><?php endforeach; ?></select></label> <button class="button button-primary">Filter</button></form>
-            <table class="widefat striped"><thead><tr><th>Type</th><th>Format</th><th>Confidence</th><th>Priority</th><th>Query</th><th>Reasoning</th><th>Pagina</th></tr></thead><tbody>
-            <?php if ($rows) : foreach ($rows as $row) : ?><tr><td><?php echo esc_html((string) $row->recommendation_type); ?></td><td><?php echo esc_html((string) $row->format_type); ?></td><td><?php echo esc_html((string) round((float) $row->confidence_score, 3)); ?></td><td><?php echo esc_html((string) $row->priority_score); ?></td><td><?php echo esc_html((string) $row->query); ?></td><td><?php echo esc_html((string) $row->reasoning); ?></td><td><code><?php echo esc_html($this->normalize_page_path((string) ($row->page_url ?? ''))); ?></code></td></tr><?php endforeach; else : ?><tr><td colspan="7">Geen aanbevelingen gevonden.</td></tr><?php endif; ?>
+            <table class="widefat striped"><thead><tr><th>Type</th><th>Eenvoudige uitleg</th><th>Format</th><th>Hoe ziet dat eruit?</th><th>Confidence</th><th>Priority</th><th>Query</th><th>Waarom dit advies?</th><th>Quick win (eerste stap)</th><th>Pagina</th></tr></thead><tbody>
+            <?php if ($rows) : foreach ($rows as $row) : ?>
+                <?php
+                $type = (string) ($row->recommendation_type ?? '');
+                $format = (string) ($row->format_type ?? '');
+                $confidence = (float) ($row->confidence_score ?? 0);
+                $confidence_label = $confidence >= 0.75 ? 'Hoog' : ($confidence >= 0.45 ? 'Gemiddeld' : 'Laag');
+                ?>
+                <tr>
+                    <td><code><?php echo esc_html($type); ?></code></td>
+                    <td><?php echo esc_html($this->explain_serp_recommendation_type($type)); ?></td>
+                    <td><code><?php echo esc_html($format); ?></code></td>
+                    <td><?php echo esc_html($this->explain_serp_format_type($format)); ?></td>
+                    <td><?php echo esc_html((string) round($confidence, 3)); ?> (<?php echo esc_html($confidence_label); ?>)</td>
+                    <td><?php echo esc_html((string) $row->priority_score); ?></td>
+                    <td><?php echo esc_html((string) $row->query); ?></td>
+                    <td><?php echo esc_html((string) $row->reasoning); ?></td>
+                    <td><?php echo esc_html($this->serp_recommendation_quick_win($row)); ?></td>
+                    <td><code><?php echo esc_html($this->normalize_page_path((string) ($row->page_url ?? ''))); ?></code></td>
+                </tr>
+            <?php endforeach; else : ?><tr><td colspan="10">Geen aanbevelingen gevonden.</td></tr><?php endif; ?>
             </tbody></table>
         </div>
         <?php
