@@ -10247,7 +10247,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'feedback_title_meta_suggestion',
             [
                 'role' => 'Je bent een Nederlandse SEO-copywriter.',
-                'goal' => 'Verbeter title/meta op basis van de originele paginatitel. Houd output concreet en direct bruikbaar.',
+                'goal' => 'Verbeter title/meta op basis van de originele paginatitel. Houd output concreet en direct bruikbaar. De nieuwe meta title moet duidelijk afwijken van de originele titel (niet exact of bijna gelijk).',
             ],
             [
                 'page_url' => $page_url,
@@ -10257,16 +10257,84 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     'meta_title_length' => '50-60 tekens',
                     'meta_description_length' => '120-155 tekens',
                     'language' => 'Nederlands',
+                    'meta_title_must_be_distinct_from_original' => true,
                 ],
             ],
             $schema
         );
 
+        $meta_title = trim((string) ($result['meta_title'] ?? ''));
+        if ($this->is_feedback_meta_title_too_close($meta_title, $original_title)) {
+            $retry = $this->openai_json_call(
+                'feedback_title_meta_suggestion_retry',
+                [
+                    'role' => 'Je bent een Nederlandse SEO-copywriter.',
+                    'goal' => 'Herschrijf uitsluitend de meta title zodat deze duidelijk anders is dan de originele titel en betere CTR-potentie heeft.',
+                ],
+                [
+                    'page_url' => $page_url,
+                    'original_title' => $original_title,
+                    'signal_description' => $signal_description,
+                    'rejected_meta_title' => $meta_title,
+                    'constraints' => [
+                        'meta_title_length' => '50-60 tekens',
+                        'language' => 'Nederlands',
+                        'must_not_match_original_title' => true,
+                        'must_not_match_rejected_meta_title' => true,
+                    ],
+                ],
+                [
+                    'type' => 'object',
+                    'additionalProperties' => false,
+                    'required' => ['meta_title'],
+                    'properties' => [
+                        'meta_title' => ['type' => 'string'],
+                    ],
+                ]
+            );
+            $retry_meta_title = trim((string) ($retry['meta_title'] ?? ''));
+            if (!$this->is_feedback_meta_title_too_close($retry_meta_title, $original_title)) {
+                $meta_title = $retry_meta_title;
+            }
+        }
+
+        if ($this->is_feedback_meta_title_too_close($meta_title, $original_title)) {
+            $meta_title = $this->build_feedback_meta_title_fallback($original_title);
+        }
+
         return [
-            'meta_title' => trim((string) ($result['meta_title'] ?? '')),
+            'meta_title' => $meta_title,
             'meta_description' => trim((string) ($result['meta_description'] ?? '')),
             'reasoning' => trim((string) ($result['reasoning'] ?? '')),
         ];
+    }
+
+    private function is_feedback_meta_title_too_close(string $candidate, string $original): bool {
+        $normalized_candidate = $this->normalize_title_for_similarity($candidate);
+        $normalized_original = $this->normalize_title_for_similarity($original);
+        if ($normalized_candidate === '' || $normalized_original === '') {
+            return true;
+        }
+        if ($normalized_candidate === $normalized_original) {
+            return true;
+        }
+        similar_text($normalized_candidate, $normalized_original, $similarity);
+        return $similarity >= 82.0;
+    }
+
+    private function build_feedback_meta_title_fallback(string $original_title): string {
+        $base = preg_replace('/\s*[|–-]\s*[^|–-]+$/u', '', $original_title);
+        $base = trim((string) $base);
+        if ($base === '') {
+            $base = trim($original_title);
+        }
+
+        $fallback = trim($base . ' | Tips & vergelijking');
+        if (mb_strlen($fallback) > 60) {
+            $fallback = mb_substr($fallback, 0, 60);
+            $fallback = rtrim($fallback, " \t\n\r\0\x0B|–-");
+        }
+        return $fallback;
     }
 
     private function create_job_from_signal(int $client_id, int $article_id, string $job_type, array $payload): int {
