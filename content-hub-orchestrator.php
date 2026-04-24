@@ -1303,6 +1303,10 @@ final class SCH_Orchestrator {
             uplift_pct DECIMAL(10,4) NULL,
             uplift_label VARCHAR(30) NOT NULL DEFAULT 'neutral',
             confidence_score DECIMAL(6,2) NULL,
+            overlap_flag TINYINT(1) NOT NULL DEFAULT 0,
+            measurement_status VARCHAR(20) NOT NULL DEFAULT 'scheduled',
+            scheduled_for DATETIME NULL,
+            notes VARCHAR(255) NOT NULL DEFAULT '',
             measured_at DATETIME NOT NULL,
             created_at DATETIME NOT NULL,
             PRIMARY KEY (id),
@@ -1339,6 +1343,10 @@ final class SCH_Orchestrator {
         $this->maybe_add_column($seo_opportunity, 'risk_severity', "ALTER TABLE {$seo_opportunity} ADD COLUMN risk_severity VARCHAR(20) NOT NULL DEFAULT '' AFTER delta_clicks_28d");
         $this->maybe_add_column($seo_opportunity, 'cold_start', "ALTER TABLE {$seo_opportunity} ADD COLUMN cold_start TINYINT(1) NOT NULL DEFAULT 0 AFTER risk_severity");
         $this->maybe_add_column($seo_opportunity, 'data_quality_warning', "ALTER TABLE {$seo_opportunity} ADD COLUMN data_quality_warning VARCHAR(255) NOT NULL DEFAULT '' AFTER cold_start");
+        $this->maybe_add_column($seo_uplift_measurement, 'overlap_flag', "ALTER TABLE {$seo_uplift_measurement} ADD COLUMN overlap_flag TINYINT(1) NOT NULL DEFAULT 0 AFTER confidence_score");
+        $this->maybe_add_column($seo_uplift_measurement, 'measurement_status', "ALTER TABLE {$seo_uplift_measurement} ADD COLUMN measurement_status VARCHAR(20) NOT NULL DEFAULT 'scheduled' AFTER overlap_flag");
+        $this->maybe_add_column($seo_uplift_measurement, 'scheduled_for', "ALTER TABLE {$seo_uplift_measurement} ADD COLUMN scheduled_for DATETIME NULL AFTER measurement_status");
+        $this->maybe_add_column($seo_uplift_measurement, 'notes', "ALTER TABLE {$seo_uplift_measurement} ADD COLUMN notes VARCHAR(255) NOT NULL DEFAULT '' AFTER scheduled_for");
 
         $this->maybe_add_column($clients, 'research_urls', "ALTER TABLE {$clients} ADD COLUMN research_urls LONGTEXT NULL AFTER link_targets");
         $this->maybe_add_column($clients, 'max_posts_per_month', "ALTER TABLE {$clients} ADD COLUMN max_posts_per_month INT UNSIGNED NOT NULL DEFAULT 0 AFTER research_urls");
@@ -10057,12 +10065,15 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         try {
             $url_count = $this->seo_cockpit_refresh_url_cluster_mapping();
             $result = $this->seo_cockpit_generate_opportunities();
+            $measurements = $this->seo_cockpit_process_pending_uplift_measurements();
             $payload = [
                 'started_at' => $started_at,
                 'completed_at' => $this->now(),
                 'processed_urls' => $url_count,
                 'generated_opportunities' => (int) ($result['generated'] ?? 0),
                 'updated_opportunities' => (int) ($result['updated'] ?? 0),
+                'measured_uplift' => (int) ($measurements['measured'] ?? 0),
+                'pending_uplift' => (int) ($measurements['pending'] ?? 0),
             ];
             update_option(self::OPTION_SEO_COCKPIT_LAST_RUN, $payload['completed_at']);
             update_option(self::OPTION_SEO_COCKPIT_LAST_STATUS, 'completed');
@@ -10653,6 +10664,9 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             if ($this->seo_cockpit_task_is_active((string) $task->status) || !$this->seo_cockpit_task_is_active($status)) {
                 $this->db->update($table, $payload, ['id' => (int) $task->id]);
                 $this->seo_cockpit_update_opportunity_status($opportunity_id, $status);
+                if ($status === 'done') {
+                    $this->seo_cockpit_lock_baseline_and_schedule_measurements((int) $task->id, $opportunity_id, (array) $timestamps);
+                }
                 $task = $this->db->get_row($this->db->prepare("SELECT * FROM {$table} WHERE id=%d LIMIT 1", (int) $task->id), ARRAY_A);
                 return ['created' => false, 'task' => $task];
             }
@@ -10663,6 +10677,9 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $this->db->insert($table, $payload);
         $this->seo_cockpit_update_opportunity_status($opportunity_id, $status);
         $insert_id = (int) $this->db->insert_id;
+        if ($insert_id > 0 && $status === 'done') {
+            $this->seo_cockpit_lock_baseline_and_schedule_measurements($insert_id, $opportunity_id, (array) $timestamps);
+        }
         $created_task = $insert_id > 0 ? $this->db->get_row($this->db->prepare("SELECT * FROM {$table} WHERE id=%d LIMIT 1", $insert_id), ARRAY_A) : null;
         return ['created' => true, 'task' => $created_task];
     }
@@ -10734,6 +10751,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $risk_rows = $this->get_seo_cockpit_risk_monitor_rows();
         $data_quality = $this->get_seo_cockpit_data_quality_stats();
         $execution = $this->get_seo_cockpit_execution_funnel_data();
+        $business_lens = $this->get_seo_cockpit_business_lens_data();
         $last_run = (string) get_option(self::OPTION_SEO_COCKPIT_LAST_RUN, '');
         $warning = '';
         if ($last_run === '' || strtotime($last_run) < strtotime('-36 hours')) {
@@ -10971,6 +10989,72 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <?php endif; ?>
                     </tbody>
                 </table>
+            <?php elseif ($tab === 'business-lens') : ?>
+                <h2>Business Lens</h2>
+                <p class="description">Netto groei per cluster op basis van gemeten uplift (7d/28d), taakvolume en playbook hitrate.</p>
+                <form method="get" style="margin:8px 0 12px;">
+                    <input type="hidden" name="page" value="sch-seo-cockpit">
+                    <input type="hidden" name="tab" value="business-lens">
+                    <select name="lens_site">
+                        <option value="0">Alle sites</option>
+                        <?php foreach ($business_lens['filter_options']['sites'] as $site) : ?>
+                            <option value="<?php echo (int) $site['id']; ?>" <?php selected((int) $business_lens['filters']['site_id'], (int) $site['id']); ?>><?php echo esc_html((string) $site['label']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <select name="lens_cluster">
+                        <option value="0">Alle clusters</option>
+                        <?php foreach ($business_lens['filter_options']['clusters'] as $cluster) : ?>
+                            <option value="<?php echo (int) $cluster['id']; ?>" <?php selected((int) $business_lens['filters']['cluster_id'], (int) $cluster['id']); ?>><?php echo esc_html((string) $cluster['label']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <select name="lens_playbook">
+                        <option value="">Alle playbooks</option>
+                        <?php foreach ($business_lens['filter_options']['playbooks'] as $playbook) : ?>
+                            <option value="<?php echo esc_attr((string) $playbook); ?>" <?php selected((string) $business_lens['filters']['playbook_type'], (string) $playbook); ?>><?php echo esc_html((string) $playbook); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <select name="lens_period">
+                        <?php foreach (['28' => 'Laatste 28 dagen', '90' => 'Laatste 90 dagen', '365' => 'Laatste 12 maanden', 'all' => 'Alles'] as $period_key => $period_label) : ?>
+                            <option value="<?php echo esc_attr($period_key); ?>" <?php selected((string) $business_lens['filters']['period'], $period_key); ?>><?php echo esc_html($period_label); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                    <button class="button">Filter</button>
+                </form>
+
+                <?php if ($business_lens['has_data']) : ?>
+                    <table class="widefat striped">
+                        <thead><tr><th>Cluster</th><th>Site</th><th>Netto organische groei</th><th>Taken</th><th>Waarde-indicatie</th><th>Overlap</th></tr></thead>
+                        <tbody>
+                        <?php foreach ($business_lens['cluster_rows'] as $row) : ?>
+                            <tr>
+                                <td><?php echo esc_html((string) $row['cluster_key']); ?></td>
+                                <td><?php echo esc_html((string) $row['site_label']); ?></td>
+                                <td><?php echo esc_html((string) $row['net_growth']); ?></td>
+                                <td><?php echo (int) $row['task_count']; ?></td>
+                                <td><?php echo esc_html((string) $row['value_indicator']); ?></td>
+                                <td><?php echo esc_html((string) $row['overlap_warning']); ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+
+                    <h3 style="margin-top:14px;">Uplift hitrate per playbook</h3>
+                    <table class="widefat striped">
+                        <thead><tr><th>Playbook</th><th>Hitrate</th><th>Gemeten outcomes</th><th>Insufficient data</th></tr></thead>
+                        <tbody>
+                        <?php foreach ($business_lens['playbook_rows'] as $row) : ?>
+                            <tr>
+                                <td><?php echo esc_html((string) $row['playbook_type']); ?></td>
+                                <td><?php echo esc_html((string) $row['hitrate']); ?></td>
+                                <td><?php echo (int) $row['measured_count']; ?></td>
+                                <td><?php echo (int) $row['insufficient_count']; ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                <?php else : ?>
+                    <div class="notice notice-info"><p>Nog geen betrouwbare upliftdata beschikbaar voor de gekozen filters. Rond taken af en wacht op dag 7/28 metingen, of controleer GSC/GA koppelingen.</p></div>
+                <?php endif; ?>
             <?php elseif ($tab === 'settings-data-quality') : ?>
                 <h2>Data Quality</h2>
                 <table class="widefat striped"><tbody>
@@ -11309,6 +11393,345 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             $result[$label] = $value['count'] > 0 ? (string) round($value['sum'] / $value['count'], 2) : '—';
         }
         return $result;
+    }
+
+    private function seo_cockpit_lock_baseline_and_schedule_measurements(int $task_id, string $opportunity_id, array $timestamps = []): void {
+        if ($task_id <= 0 || $opportunity_id === '') {
+            return;
+        }
+        $done_at = (string) ($timestamps['done'] ?? $this->now());
+        $baseline = $this->seo_cockpit_capture_metric_snapshot($opportunity_id, $done_at);
+        $this->db->update($this->table('seo_task'), [
+            'baseline_json' => wp_json_encode($baseline),
+            'updated_at' => $this->now(),
+        ], ['id' => $task_id]);
+        foreach ([7, 28] as $window) {
+            $scheduled_for = gmdate('Y-m-d H:i:s', strtotime($done_at . ' +' . $window . ' days'));
+            $existing_id = (int) $this->db->get_var($this->db->prepare(
+                "SELECT id FROM {$this->table('seo_uplift_measurement')} WHERE task_id=%d AND day_window=%d LIMIT 1",
+                $task_id,
+                $window
+            ));
+            $payload = [
+                'task_id' => $task_id,
+                'day_window' => $window,
+                'baseline_json' => wp_json_encode($baseline),
+                'current_json' => wp_json_encode(['status' => 'scheduled']),
+                'uplift_label' => 'insufficient_data',
+                'measurement_status' => 'scheduled',
+                'scheduled_for' => $scheduled_for,
+                'measured_at' => $scheduled_for,
+                'created_at' => $this->now(),
+            ];
+            if ($existing_id > 0) {
+                unset($payload['task_id'], $payload['day_window'], $payload['created_at']);
+                $payload['notes'] = '';
+                $this->db->update($this->table('seo_uplift_measurement'), $payload, ['id' => $existing_id]);
+            } else {
+                $this->db->insert($this->table('seo_uplift_measurement'), $payload);
+            }
+        }
+    }
+
+    private function seo_cockpit_capture_metric_snapshot(string $opportunity_id, string $captured_at = ''): array {
+        $captured = $captured_at !== '' ? $captured_at : $this->now();
+        $row = $this->db->get_row($this->db->prepare(
+            "SELECT o.opportunity_id, o.cluster_id, u.site_id, u.canonical_url_id, u.canonical_url, c.cluster_key,
+                    u.clicks_7d, u.clicks_28d, u.impressions_7d, u.impressions_28d, u.ctr_7d, u.ctr_28d, u.avg_position_7d, u.avg_position_28d,
+                    u.data_quality_warning, u.history_days
+             FROM {$this->table('seo_opportunity')} o
+             LEFT JOIN {$this->table('seo_url')} u ON u.canonical_url_id=o.canonical_url_id
+             LEFT JOIN {$this->table('seo_cluster')} c ON c.id=o.cluster_id
+             WHERE o.opportunity_id=%s
+             LIMIT 1",
+            $opportunity_id
+        ), ARRAY_A);
+        if (!$row) {
+            return [
+                'captured_at' => $captured,
+                'source' => 'missing',
+                'has_gsc_data' => false,
+                'has_ga_data' => false,
+                'clicks_28d' => 0.0,
+                'ctr_28d' => 0.0,
+                'business_proxy' => 0.0,
+            ];
+        }
+        $clicks28 = (float) ($row['clicks_28d'] ?? 0);
+        $impr28 = (float) ($row['impressions_28d'] ?? 0);
+        $ctr28 = (float) ($row['ctr_28d'] ?? 0);
+        $has_gsc = $clicks28 > 0 || $impr28 > 0;
+        $has_ga = false;
+        return [
+            'captured_at' => $captured,
+            'source' => $has_gsc ? 'seo_url_snapshot' : 'fallback_empty',
+            'site_id' => (int) ($row['site_id'] ?? 0),
+            'cluster_id' => (int) ($row['cluster_id'] ?? 0),
+            'cluster_key' => (string) ($row['cluster_key'] ?? ''),
+            'canonical_url_id' => (string) ($row['canonical_url_id'] ?? ''),
+            'canonical_url' => (string) ($row['canonical_url'] ?? ''),
+            'has_gsc_data' => $has_gsc,
+            'has_ga_data' => $has_ga,
+            'clicks_7d' => (float) ($row['clicks_7d'] ?? 0),
+            'clicks_28d' => $clicks28,
+            'impressions_7d' => (float) ($row['impressions_7d'] ?? 0),
+            'impressions_28d' => $impr28,
+            'ctr_7d' => (float) ($row['ctr_7d'] ?? 0),
+            'ctr_28d' => $ctr28,
+            'avg_position_7d' => (float) ($row['avg_position_7d'] ?? 0),
+            'avg_position_28d' => (float) ($row['avg_position_28d'] ?? 0),
+            'business_proxy' => round($clicks28 * max(0.01, $ctr28), 4),
+            'history_days' => (int) ($row['history_days'] ?? 0),
+            'data_quality_warning' => (string) ($row['data_quality_warning'] ?? ''),
+        ];
+    }
+
+    private function seo_cockpit_process_pending_uplift_measurements(): array {
+        $this->seo_cockpit_schedule_missing_uplift_measurements();
+        $pending_rows = (array) $this->db->get_results(
+            "SELECT m.*, t.opportunity_id, t.playbook_type, t.expected_uplift
+             FROM {$this->table('seo_uplift_measurement')} m
+             INNER JOIN {$this->table('seo_task')} t ON t.id=m.task_id
+             WHERE m.measurement_status='scheduled'
+             ORDER BY m.scheduled_for ASC, m.id ASC
+             LIMIT 500",
+            ARRAY_A
+        );
+        $measured = 0;
+        foreach ($pending_rows as $row) {
+            $scheduled_for = (string) ($row['scheduled_for'] ?? '');
+            if ($scheduled_for === '' || strtotime($scheduled_for) > time()) {
+                continue;
+            }
+            $opportunity_id = (string) ($row['opportunity_id'] ?? '');
+            if ($opportunity_id === '') {
+                continue;
+            }
+            $baseline = $row['baseline_json'] ? (array) json_decode((string) $row['baseline_json'], true) : [];
+            $current = $this->seo_cockpit_capture_metric_snapshot($opportunity_id, $this->now());
+            $overlap = $this->seo_cockpit_detect_overlap_for_task((int) $row['task_id'], $current);
+            $calculated = $this->seo_cockpit_calculate_uplift_outcome($baseline, $current, $overlap, (int) ($row['day_window'] ?? 7));
+            $this->db->update($this->table('seo_uplift_measurement'), [
+                'current_json' => wp_json_encode($current),
+                'uplift_abs' => $calculated['uplift_abs'],
+                'uplift_pct' => $calculated['uplift_pct'],
+                'uplift_label' => $calculated['uplift_label'],
+                'confidence_score' => $calculated['confidence_score'],
+                'overlap_flag' => $overlap ? 1 : 0,
+                'measurement_status' => 'measured',
+                'notes' => (string) $calculated['note'],
+                'measured_at' => $this->now(),
+            ], ['id' => (int) $row['id']]);
+            $measured++;
+        }
+        return [
+            'measured' => $measured,
+            'pending' => max(0, count($pending_rows) - $measured),
+        ];
+    }
+
+    private function seo_cockpit_schedule_missing_uplift_measurements(): void {
+        $rows = (array) $this->db->get_results(
+            "SELECT t.id, t.opportunity_id, t.stage_timestamps_json
+             FROM {$this->table('seo_task')} t
+             WHERE t.status='done'
+             LIMIT 500",
+            ARRAY_A
+        );
+        foreach ($rows as $row) {
+            $task_id = (int) ($row['id'] ?? 0);
+            if ($task_id <= 0) {
+                continue;
+            }
+            $existing = (int) $this->db->get_var($this->db->prepare(
+                "SELECT COUNT(*) FROM {$this->table('seo_uplift_measurement')} WHERE task_id=%d",
+                $task_id
+            ));
+            if ($existing > 0) {
+                continue;
+            }
+            $timestamps = !empty($row['stage_timestamps_json']) ? (array) json_decode((string) $row['stage_timestamps_json'], true) : [];
+            $this->seo_cockpit_lock_baseline_and_schedule_measurements($task_id, (string) ($row['opportunity_id'] ?? ''), $timestamps);
+        }
+    }
+
+    private function seo_cockpit_calculate_uplift_outcome(array $baseline, array $current, bool $overlap, int $day_window): array {
+        $baseline_metric = (float) ($baseline['clicks_28d'] ?? 0);
+        $current_metric = (float) ($current['clicks_28d'] ?? 0);
+        $confidence = 0.75;
+        if (empty($baseline['has_gsc_data']) || empty($current['has_gsc_data'])) {
+            $confidence -= 0.4;
+        }
+        if ((int) ($current['history_days'] ?? 0) < 56) {
+            $confidence -= 0.15;
+        }
+        if ($overlap) {
+            $confidence -= 0.2;
+        }
+        if ($day_window === 7) {
+            $confidence -= 0.1;
+        }
+        $confidence = round(max(0.05, min(0.99, $confidence)), 2);
+        if ($baseline_metric <= 0 || $current_metric <= 0) {
+            return [
+                'uplift_abs' => null,
+                'uplift_pct' => null,
+                'uplift_label' => 'insufficient_data',
+                'confidence_score' => $confidence,
+                'note' => 'Onvoldoende GSC/GA baseline of current data.',
+            ];
+        }
+        $uplift_abs = round($current_metric - $baseline_metric, 4);
+        $uplift_pct = $baseline_metric > 0 ? round($uplift_abs / $baseline_metric, 4) : null;
+        $label = 'neutral';
+        if ($uplift_pct !== null) {
+            if ($uplift_pct >= 0.05) {
+                $label = 'positive';
+            } elseif ($uplift_pct <= -0.05) {
+                $label = 'negative';
+            }
+        }
+        return [
+            'uplift_abs' => $uplift_abs,
+            'uplift_pct' => $uplift_pct,
+            'uplift_label' => $label,
+            'confidence_score' => $confidence,
+            'note' => $overlap ? 'Overlap met parallelle taken; confidence verlaagd.' : '',
+        ];
+    }
+
+    private function seo_cockpit_detect_overlap_for_task(int $task_id, array $snapshot): bool {
+        if ($task_id <= 0) {
+            return false;
+        }
+        $cluster_id = (int) ($snapshot['cluster_id'] ?? 0);
+        $canonical_url_id = (string) ($snapshot['canonical_url_id'] ?? '');
+        if ($cluster_id <= 0 && $canonical_url_id === '') {
+            return false;
+        }
+        $where = ['t.id<>%d', "t.status IN ('in_progress','done')"];
+        $params = [$task_id];
+        if ($canonical_url_id !== '') {
+            $where[] = 'o.canonical_url_id=%s';
+            $params[] = $canonical_url_id;
+        } elseif ($cluster_id > 0) {
+            $where[] = 'o.cluster_id=%d';
+            $params[] = $cluster_id;
+        }
+        $sql = "SELECT COUNT(*) FROM {$this->table('seo_task')} t
+                INNER JOIN {$this->table('seo_opportunity')} o ON o.opportunity_id=t.opportunity_id
+                WHERE " . implode(' AND ', $where);
+        $count = (int) $this->db->get_var($this->db->prepare($sql, ...$params));
+        return $count > 0;
+    }
+
+    private function get_seo_cockpit_business_lens_data(): array {
+        $filters = [
+            'site_id' => max(0, (int) ($_GET['lens_site'] ?? 0)),
+            'cluster_id' => max(0, (int) ($_GET['lens_cluster'] ?? 0)),
+            'playbook_type' => sanitize_key((string) ($_GET['lens_playbook'] ?? '')),
+            'period' => sanitize_key((string) ($_GET['lens_period'] ?? '90')),
+        ];
+        if (!in_array($filters['period'], ['28', '90', '365', 'all'], true)) {
+            $filters['period'] = '90';
+        }
+        $where = ["m.measurement_status='measured'"];
+        $params = [];
+        if ($filters['site_id'] > 0) {
+            $where[] = 'u.site_id=%d';
+            $params[] = $filters['site_id'];
+        }
+        if ($filters['cluster_id'] > 0) {
+            $where[] = 'o.cluster_id=%d';
+            $params[] = $filters['cluster_id'];
+        }
+        if ($filters['playbook_type'] !== '') {
+            $where[] = 't.playbook_type=%s';
+            $params[] = $filters['playbook_type'];
+        }
+        if ($filters['period'] !== 'all') {
+            $where[] = 'm.measured_at>=DATE_SUB(UTC_TIMESTAMP(), INTERVAL %d DAY)';
+            $params[] = (int) $filters['period'];
+        }
+        $sql = "SELECT m.*, t.playbook_type, t.expected_uplift, o.cluster_id, c.cluster_key, u.site_id, s.label AS site_label
+                FROM {$this->table('seo_uplift_measurement')} m
+                INNER JOIN {$this->table('seo_task')} t ON t.id=m.task_id
+                INNER JOIN {$this->table('seo_opportunity')} o ON o.opportunity_id=t.opportunity_id
+                LEFT JOIN {$this->table('seo_cluster')} c ON c.id=o.cluster_id
+                LEFT JOIN {$this->table('seo_url')} u ON u.canonical_url_id=o.canonical_url_id
+                LEFT JOIN {$this->table('sites')} s ON s.id=u.site_id
+                WHERE " . implode(' AND ', $where) . "
+                ORDER BY m.measured_at DESC
+                LIMIT 1000";
+        $rows = $params ? (array) $this->db->get_results($this->db->prepare($sql, ...$params), ARRAY_A) : (array) $this->db->get_results($sql, ARRAY_A);
+
+        $cluster_rows = [];
+        $playbook_rows = [];
+        foreach ($rows as $row) {
+            $cluster_key = (string) ($row['cluster_key'] ?: 'onbekend');
+            if (!isset($cluster_rows[$cluster_key])) {
+                $cluster_rows[$cluster_key] = [
+                    'cluster_key' => $cluster_key,
+                    'site_label' => (string) ($row['site_label'] ?: '—'),
+                    'net_growth_raw' => 0.0,
+                    'task_ids' => [],
+                    'value_raw' => 0.0,
+                    'overlap_count' => 0,
+                ];
+            }
+            $cluster_rows[$cluster_key]['net_growth_raw'] += (float) ($row['uplift_abs'] ?? 0);
+            $cluster_rows[$cluster_key]['task_ids'][(int) $row['task_id']] = true;
+            $cluster_rows[$cluster_key]['value_raw'] += (float) ($row['uplift_abs'] ?? 0) * max(0.01, (float) ($row['expected_uplift'] ?? 1.0));
+            $cluster_rows[$cluster_key]['overlap_count'] += (int) ($row['overlap_flag'] ?? 0);
+
+            $playbook = (string) ($row['playbook_type'] ?: 'unknown');
+            if (!isset($playbook_rows[$playbook])) {
+                $playbook_rows[$playbook] = ['playbook_type' => $playbook, 'positive' => 0, 'measured' => 0, 'insufficient_count' => 0];
+            }
+            if ((string) ($row['uplift_label'] ?? '') === 'insufficient_data') {
+                $playbook_rows[$playbook]['insufficient_count']++;
+            } else {
+                $playbook_rows[$playbook]['measured']++;
+                if ((string) ($row['uplift_label'] ?? '') === 'positive') {
+                    $playbook_rows[$playbook]['positive']++;
+                }
+            }
+        }
+        foreach ($cluster_rows as &$cluster_row) {
+            $cluster_row['task_count'] = count($cluster_row['task_ids']);
+            $cluster_row['net_growth'] = round((float) $cluster_row['net_growth_raw'], 2);
+            $cluster_row['value_indicator'] = round((float) $cluster_row['value_raw'], 2);
+            $cluster_row['overlap_warning'] = $cluster_row['overlap_count'] > 0 ? '⚠ overlap in ' . $cluster_row['overlap_count'] . ' metingen' : 'Geen overlap';
+            unset($cluster_row['task_ids'], $cluster_row['net_growth_raw'], $cluster_row['value_raw'], $cluster_row['overlap_count']);
+        }
+        unset($cluster_row);
+        foreach ($playbook_rows as &$playbook_row) {
+            $measured = max(0, (int) $playbook_row['measured']);
+            $playbook_row['measured_count'] = $measured;
+            $playbook_row['hitrate'] = $measured > 0 ? round(((int) $playbook_row['positive'] / $measured) * 100, 1) . '%' : '—';
+            unset($playbook_row['positive'], $playbook_row['measured']);
+        }
+        unset($playbook_row);
+
+        $site_options = (array) $this->db->get_results("SELECT id, label FROM {$this->table('sites')} ORDER BY label ASC", ARRAY_A);
+        $cluster_options = (array) $this->db->get_results("SELECT id, cluster_key FROM {$this->table('seo_cluster')} ORDER BY cluster_key ASC LIMIT 500", ARRAY_A);
+        $playbook_options = (array) $this->db->get_col("SELECT DISTINCT playbook_type FROM {$this->table('seo_task')} WHERE playbook_type IS NOT NULL AND playbook_type<>'' ORDER BY playbook_type ASC");
+
+        return [
+            'filters' => $filters,
+            'has_data' => !empty($rows),
+            'cluster_rows' => array_values($cluster_rows),
+            'playbook_rows' => array_values($playbook_rows),
+            'filter_options' => [
+                'sites' => array_map(static function (array $site): array {
+                    return ['id' => (int) $site['id'], 'label' => (string) $site['label']];
+                }, $site_options),
+                'clusters' => array_map(static function (array $cluster): array {
+                    return ['id' => (int) $cluster['id'], 'label' => (string) ($cluster['cluster_key'] ?? '')];
+                }, $cluster_options),
+                'playbooks' => array_values(array_filter(array_map('sanitize_key', $playbook_options))),
+            ],
+        ];
     }
 
     private function get_seo_cockpit_data_quality_stats(): array {
