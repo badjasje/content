@@ -234,6 +234,7 @@ final class SCH_Orchestrator {
     const OPTION_SEO_COCKPIT_LAST_RUN = 'sch_seo_cockpit_last_run';
     const OPTION_SEO_COCKPIT_LAST_STATUS = 'sch_seo_cockpit_last_status';
     const OPTION_SEO_COCKPIT_LAST_RESULT = 'sch_seo_cockpit_last_result';
+    const OPTION_SEO_COCKPIT_CACHE_VERSION = 'sch_seo_cockpit_cache_version';
     const EXACT_MATCH_THRESHOLD_PERCENT = 30;
 
     const OPTION_OPENAI_API_KEY = 'sch_openai_api_key';
@@ -10214,6 +10215,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             $url_count = $this->seo_cockpit_refresh_url_cluster_mapping();
             $result = $this->seo_cockpit_generate_opportunities();
             $measurements = $this->seo_cockpit_process_pending_uplift_measurements();
+            $this->seo_cockpit_bump_cache_version();
             $payload = [
                 'started_at' => $started_at,
                 'completed_at' => $this->now(),
@@ -10765,6 +10767,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $this->verify_admin_nonce('sch_seo_cockpit_dismiss');
         $opportunity_id = sanitize_text_field((string) ($_POST['opportunity_id'] ?? ''));
         $this->seo_cockpit_ensure_task($opportunity_id, 'dismissed');
+        $this->seo_cockpit_bump_cache_version();
         $this->redirect_with_message('sch-seo-cockpit', 'Opportunity dismissed.');
     }
 
@@ -10815,6 +10818,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 if ($status === 'done') {
                     $this->seo_cockpit_lock_baseline_and_schedule_measurements((int) $task->id, $opportunity_id, (array) $timestamps);
                 }
+                $this->seo_cockpit_bump_cache_version();
                 $task = $this->db->get_row($this->db->prepare("SELECT * FROM {$table} WHERE id=%d LIMIT 1", (int) $task->id), ARRAY_A);
                 return ['created' => false, 'task' => $task];
             }
@@ -10828,6 +10832,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         if ($insert_id > 0 && $status === 'done') {
             $this->seo_cockpit_lock_baseline_and_schedule_measurements($insert_id, $opportunity_id, (array) $timestamps);
         }
+        $this->seo_cockpit_bump_cache_version();
         $created_task = $insert_id > 0 ? $this->db->get_row($this->db->prepare("SELECT * FROM {$table} WHERE id=%d LIMIT 1", $insert_id), ARRAY_A) : null;
         return ['created' => true, 'task' => $created_task];
     }
@@ -10837,7 +10842,67 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     }
 
     private function seo_cockpit_lifecycle_statuses(): array {
-        return ['suggested', 'approved', 'in_progress', 'done', 'dismissed'];
+        return ['suggested', 'approved', 'in_progress', 'done', 'measured_7d', 'dismissed'];
+    }
+
+    private function seo_cockpit_get_cache_version(): int {
+        $version = (int) get_option(self::OPTION_SEO_COCKPIT_CACHE_VERSION, 1);
+        return $version > 0 ? $version : 1;
+    }
+
+    private function seo_cockpit_bump_cache_version(): void {
+        update_option(self::OPTION_SEO_COCKPIT_CACHE_VERSION, $this->seo_cockpit_get_cache_version() + 1, false);
+    }
+
+    private function seo_cockpit_get_cached_payload(string $key, callable $callback, int $ttl = 300): array {
+        $cache_key = 'sch_seo_' . $key . '_v' . $this->seo_cockpit_get_cache_version();
+        $cached = get_transient($cache_key);
+        if (is_array($cached)) {
+            return $cached;
+        }
+        $result = $callback();
+        if (!is_array($result)) {
+            $result = [];
+        }
+        set_transient($cache_key, $result, max(60, $ttl));
+        return $result;
+    }
+
+    private function seo_cockpit_calculate_business_days_between(string $start, string $end): ?float {
+        $start_ts = strtotime($start);
+        $end_ts = strtotime($end);
+        if (!$start_ts || !$end_ts || $end_ts < $start_ts) {
+            return null;
+        }
+        $hours = ($end_ts - $start_ts) / HOUR_IN_SECONDS;
+        $business_days = $hours / 24;
+        $start_day = (int) gmdate('N', $start_ts);
+        $full_days = (int) floor($business_days);
+        $weekend_days = 0;
+        for ($i = 0; $i < $full_days; $i++) {
+            $day_of_week = (($start_day + $i - 1) % 7) + 1;
+            if ($day_of_week >= 6) {
+                $weekend_days++;
+            }
+        }
+        $value = max(0, $business_days - $weekend_days);
+        return round($value, 2);
+    }
+
+    private function seo_cockpit_median(array $values): ?float {
+        $numbers = array_values(array_filter(array_map('floatval', $values), static function ($value): bool {
+            return $value >= 0;
+        }));
+        $count = count($numbers);
+        if ($count === 0) {
+            return null;
+        }
+        sort($numbers, SORT_NUMERIC);
+        $middle = (int) floor($count / 2);
+        if ($count % 2 === 0) {
+            return round(($numbers[$middle - 1] + $numbers[$middle]) / 2, 2);
+        }
+        return round($numbers[$middle], 2);
     }
 
     private function sanitize_seo_task_effort(string $effort): string {
@@ -10880,6 +10945,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             }
         }
         $this->db->update($this->table('seo_task'), $payload, ['id' => (int) $task['id']]);
+        $this->seo_cockpit_bump_cache_version();
     }
 
     public function render_seo_cockpit(): void {
@@ -10891,7 +10957,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
 
         $tab = sanitize_key((string) ($_GET['tab'] ?? 'today-board'));
-        if (!in_array($tab, ['today-board', 'winners-losers', 'risks-monitor', 'execution-funnel', 'business-lens', 'settings-data-quality'], true)) {
+        if (!in_array($tab, ['today-board', 'winners-losers', 'risks-monitor', 'execution-funnel', 'adoption-sla', 'workload-overview', 'overdue-tasks', 'playbook-performance', 'business-lens', 'settings-data-quality'], true)) {
             $tab = 'today-board';
         }
         $today_rows = $this->get_seo_cockpit_today_board_rows();
@@ -10899,6 +10965,10 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $risk_rows = $this->get_seo_cockpit_risk_monitor_rows();
         $data_quality = $this->get_seo_cockpit_data_quality_stats();
         $execution = $this->get_seo_cockpit_execution_funnel_data();
+        $adoption_sla = $this->get_seo_cockpit_adoption_sla_dashboard_data();
+        $workload = $this->get_seo_cockpit_workload_overview_data();
+        $overdue = $this->get_seo_cockpit_overdue_tasks_data();
+        $playbook_performance = $this->get_seo_cockpit_playbook_performance_overview_data();
         $business_lens = $this->get_seo_cockpit_business_lens_data();
         $last_run = (string) get_option(self::OPTION_SEO_COCKPIT_LAST_RUN, '');
         $warning = '';
@@ -10915,6 +10985,10 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     'winners-losers' => 'Winners & Losers',
                     'risks-monitor' => 'Risks Monitor',
                     'execution-funnel' => 'Execution Funnel',
+                    'adoption-sla' => 'Adoption & SLA',
+                    'workload-overview' => 'Team/Owner Workload',
+                    'overdue-tasks' => 'Overdue Tasks',
+                    'playbook-performance' => 'Playbook Performance',
                     'business-lens' => 'Business Lens',
                     'settings-data-quality' => 'Settings / Data Quality',
                 ] as $key => $label) : ?>
@@ -11135,6 +11209,88 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <?php endforeach; else : ?>
                         <tr><td colspan="9">Geen taken gevonden voor de geselecteerde filters.</td></tr>
                     <?php endif; ?>
+                    </tbody>
+                </table>
+            <?php elseif ($tab === 'adoption-sla') : ?>
+                <h2>Adoption & SLA dashboard</h2>
+                <table class="widefat striped">
+                    <tbody>
+                        <tr><th>Cockpit-start-rate (30d)</th><td><?php echo esc_html((string) $adoption_sla['cockpit_start_rate']); ?>%</td></tr>
+                        <tr><th>Median time-to-action</th><td><?php echo $adoption_sla['median_time_to_action_business_days'] !== null ? esc_html((string) $adoption_sla['median_time_to_action_business_days']) . ' werkdagen' : '—'; ?></td></tr>
+                        <tr><th>Grootste bottleneck</th><td><?php echo esc_html((string) $adoption_sla['top_bottleneck']); ?></td></tr>
+                    </tbody>
+                </table>
+                <h3 style="margin-top:14px;">SLA-status</h3>
+                <table class="widefat striped">
+                    <thead><tr><th>SLA</th><th>OK</th><th>Overtreding</th><th>Open</th></tr></thead>
+                    <tbody>
+                        <tr><td>suggested → approved (48u)</td><td><?php echo (int) $adoption_sla['sla']['suggested_to_approved']['ok']; ?></td><td><?php echo (int) $adoption_sla['sla']['suggested_to_approved']['breach']; ?></td><td><?php echo (int) $adoption_sla['sla']['suggested_to_approved']['open']; ?></td></tr>
+                        <tr><td>approved → in_progress (3 werkdagen)</td><td><?php echo (int) $adoption_sla['sla']['approved_to_in_progress']['ok']; ?></td><td><?php echo (int) $adoption_sla['sla']['approved_to_in_progress']['breach']; ?></td><td><?php echo (int) $adoption_sla['sla']['approved_to_in_progress']['open']; ?></td></tr>
+                        <tr><td>done → measured_7d (dag 7)</td><td><?php echo (int) $adoption_sla['sla']['done_to_measured_7d']['ok']; ?></td><td><?php echo (int) $adoption_sla['sla']['done_to_measured_7d']['breach']; ?></td><td><?php echo (int) $adoption_sla['sla']['done_to_measured_7d']['open']; ?></td></tr>
+                    </tbody>
+                </table>
+                <h3 style="margin-top:14px;">Site roll-out voortgang</h3>
+                <table class="widefat striped">
+                    <thead><tr><th>Site</th><th>Totaal cockpit-taken</th><th>Actieve WIP</th><th>Measured_7d</th></tr></thead>
+                    <tbody>
+                    <?php if (!empty($adoption_sla['site_rollout'])) : foreach ($adoption_sla['site_rollout'] as $site => $rollout) : ?>
+                        <tr><td><?php echo esc_html((string) $site); ?></td><td><?php echo (int) $rollout['tasks']; ?></td><td><?php echo (int) $rollout['active']; ?></td><td><?php echo (int) $rollout['measured_7d']; ?></td></tr>
+                    <?php endforeach; else : ?><tr><td colspan="4">Nog geen site-data beschikbaar.</td></tr><?php endif; ?>
+                    </tbody>
+                </table>
+            <?php elseif ($tab === 'workload-overview') : ?>
+                <h2>Team/owner workload overzicht</h2>
+                <h3>WIP per owner</h3>
+                <table class="widefat striped">
+                    <thead><tr><th>Owner</th><th>WIP</th><th>Suggested</th><th>Approved</th><th>In progress</th></tr></thead>
+                    <tbody>
+                    <?php if (!empty($workload['owners'])) : foreach ($workload['owners'] as $owner => $counts) : ?>
+                        <tr><td><?php echo esc_html((string) $owner); ?></td><td><?php echo (int) $counts['wip']; ?></td><td><?php echo (int) $counts['suggested']; ?></td><td><?php echo (int) $counts['approved']; ?></td><td><?php echo (int) $counts['in_progress']; ?></td></tr>
+                    <?php endforeach; else : ?><tr><td colspan="5">Geen actieve WIP taken.</td></tr><?php endif; ?>
+                    </tbody>
+                </table>
+                <h3 style="margin-top:14px;">WIP per team</h3>
+                <table class="widefat striped">
+                    <thead><tr><th>Team</th><th>WIP</th><th>Suggested</th><th>Approved</th><th>In progress</th></tr></thead>
+                    <tbody>
+                    <?php if (!empty($workload['teams'])) : foreach ($workload['teams'] as $team => $counts) : ?>
+                        <tr><td><?php echo esc_html((string) $team); ?></td><td><?php echo (int) $counts['wip']; ?></td><td><?php echo (int) $counts['suggested']; ?></td><td><?php echo (int) $counts['approved']; ?></td><td><?php echo (int) $counts['in_progress']; ?></td></tr>
+                    <?php endforeach; else : ?><tr><td colspan="5">Geen teamdata beschikbaar.</td></tr><?php endif; ?>
+                    </tbody>
+                </table>
+            <?php elseif ($tab === 'overdue-tasks') : ?>
+                <h2>Overdue tasks overzicht</h2>
+                <table class="widefat striped">
+                    <thead><tr><th>Opportunity</th><th>Site</th><th>Owner</th><th>Status</th><th>Due date</th><th>Dagen overdue</th></tr></thead>
+                    <tbody>
+                    <?php if (!empty($overdue['rows'])) : foreach ($overdue['rows'] as $row) : ?>
+                        <tr>
+                            <td><code><?php echo esc_html((string) $row['opportunity_id']); ?></code><br><span class="sch-muted"><?php echo esc_html((string) ($row['canonical_url'] ?: '')); ?></span></td>
+                            <td><?php echo esc_html((string) ($row['site_name'] ?: '—')); ?></td>
+                            <td><?php echo esc_html((string) $row['owner_display']); ?></td>
+                            <td><?php echo esc_html((string) $row['status']); ?></td>
+                            <td><?php echo esc_html((string) $row['due_date']); ?></td>
+                            <td><?php echo (int) $row['days_overdue']; ?></td>
+                        </tr>
+                    <?php endforeach; else : ?><tr><td colspan="6">Geen overdue taken gevonden.</td></tr><?php endif; ?>
+                    </tbody>
+                </table>
+            <?php elseif ($tab === 'playbook-performance') : ?>
+                <h2>Playbook performance overzicht</h2>
+                <table class="widefat striped">
+                    <thead><tr><th>Playbook</th><th>Total tasks</th><th>Measured 7d</th><th>Positive</th><th>Negative</th><th>Hitrate</th><th>Gem. uplift %</th></tr></thead>
+                    <tbody>
+                    <?php if (!empty($playbook_performance['rows'])) : foreach ($playbook_performance['rows'] as $row) : ?>
+                        <tr>
+                            <td><?php echo esc_html((string) $row['playbook_type']); ?></td>
+                            <td><?php echo (int) $row['total_tasks']; ?></td>
+                            <td><?php echo (int) $row['measured_count']; ?></td>
+                            <td><?php echo (int) $row['positive_count']; ?></td>
+                            <td><?php echo (int) $row['negative_count']; ?></td>
+                            <td><?php echo $row['hitrate'] !== null ? esc_html((string) $row['hitrate']) . '%' : '—'; ?></td>
+                            <td><?php echo $row['avg_uplift_pct'] !== null ? esc_html((string) $row['avg_uplift_pct']) . '%' : '—'; ?></td>
+                        </tr>
+                    <?php endforeach; else : ?><tr><td colspan="7">Nog geen playbookdata beschikbaar.</td></tr><?php endif; ?>
                     </tbody>
                 </table>
             <?php elseif ($tab === 'business-lens') : ?>
@@ -11496,6 +11652,252 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         ];
     }
 
+    private function seo_cockpit_owner_team_label(int $owner_user_id): string {
+        if ($owner_user_id <= 0) {
+            return 'Unassigned';
+        }
+        $team = sanitize_text_field((string) get_user_meta($owner_user_id, 'sch_seo_team', true));
+        if ($team !== '') {
+            return $team;
+        }
+        $user = get_userdata($owner_user_id);
+        if (!$user || empty($user->roles)) {
+            return 'Unknown';
+        }
+        return ucfirst(str_replace('_', ' ', (string) $user->roles[0]));
+    }
+
+    private function get_seo_cockpit_adoption_sla_dashboard_data(): array {
+        return $this->seo_cockpit_get_cached_payload('adoption_sla', function (): array {
+            $rows = (array) $this->db->get_results(
+                "SELECT t.id, t.status, t.stage_timestamps_json, t.created_at, t.owner_user_id, t.playbook_type, t.due_date,
+                        o.opportunity_id, u.site_id, s.label AS site_name
+                 FROM {$this->table('seo_task')} t
+                 INNER JOIN {$this->table('seo_opportunity')} o ON o.opportunity_id=t.opportunity_id
+                 LEFT JOIN {$this->table('seo_url')} u ON u.canonical_url_id=o.canonical_url_id
+                 LEFT JOIN {$this->table('sites')} s ON s.id=u.site_id
+                 ORDER BY t.updated_at DESC
+                 LIMIT 1000",
+                ARRAY_A
+            );
+            $sla = [
+                'suggested_to_approved' => ['ok' => 0, 'breach' => 0, 'open' => 0],
+                'approved_to_in_progress' => ['ok' => 0, 'breach' => 0, 'open' => 0],
+                'done_to_measured_7d' => ['ok' => 0, 'breach' => 0, 'open' => 0],
+            ];
+            $time_to_action_values = [];
+            $stage_elapsed = [
+                'suggested_to_approved_hours' => [],
+                'approved_to_in_progress_business_days' => [],
+                'done_to_measured_7d_days' => [],
+            ];
+            $bottlenecks = [];
+            $site_rollout = [];
+            foreach ($rows as $row) {
+                $timestamps = !empty($row['stage_timestamps_json']) ? json_decode((string) $row['stage_timestamps_json'], true) : [];
+                if (!is_array($timestamps)) {
+                    $timestamps = [];
+                }
+                $suggested = (string) ($timestamps['suggested'] ?? '');
+                $approved = (string) ($timestamps['approved'] ?? '');
+                $in_progress = (string) ($timestamps['in_progress'] ?? '');
+                $done = (string) ($timestamps['done'] ?? '');
+                $measured_7d = (string) ($timestamps['measured_7d'] ?? '');
+                $now_ts = time();
+
+                if ($suggested !== '') {
+                    if ($approved !== '') {
+                        $hours = (strtotime($approved) - strtotime($suggested)) / HOUR_IN_SECONDS;
+                        if ($hours >= 0) {
+                            $stage_elapsed['suggested_to_approved_hours'][] = $hours;
+                            $hours <= 48 ? $sla['suggested_to_approved']['ok']++ : $sla['suggested_to_approved']['breach']++;
+                        }
+                    } else {
+                        $open_hours = ($now_ts - strtotime($suggested)) / HOUR_IN_SECONDS;
+                        $open_hours > 48 ? $sla['suggested_to_approved']['breach']++ : $sla['suggested_to_approved']['open']++;
+                    }
+                }
+
+                if ($approved !== '') {
+                    if ($in_progress !== '') {
+                        $business_days = $this->seo_cockpit_calculate_business_days_between($approved, $in_progress);
+                        if ($business_days !== null) {
+                            $stage_elapsed['approved_to_in_progress_business_days'][] = $business_days;
+                            $business_days <= 3 ? $sla['approved_to_in_progress']['ok']++ : $sla['approved_to_in_progress']['breach']++;
+                        }
+                    } else {
+                        $open_business_days = $this->seo_cockpit_calculate_business_days_between($approved, gmdate('Y-m-d H:i:s', $now_ts));
+                        if ($open_business_days !== null && $open_business_days > 3) {
+                            $sla['approved_to_in_progress']['breach']++;
+                        } else {
+                            $sla['approved_to_in_progress']['open']++;
+                        }
+                    }
+                }
+
+                if ($done !== '') {
+                    if ($measured_7d !== '') {
+                        $days = (strtotime($measured_7d) - strtotime($done)) / DAY_IN_SECONDS;
+                        if ($days >= 0) {
+                            $stage_elapsed['done_to_measured_7d_days'][] = $days;
+                            $days <= 8 ? $sla['done_to_measured_7d']['ok']++ : $sla['done_to_measured_7d']['breach']++;
+                        }
+                    } else {
+                        $open_days = ($now_ts - strtotime($done)) / DAY_IN_SECONDS;
+                        $open_days > 8 ? $sla['done_to_measured_7d']['breach']++ : $sla['done_to_measured_7d']['open']++;
+                    }
+                }
+
+                if ($suggested !== '' && $in_progress !== '') {
+                    $action_days = $this->seo_cockpit_calculate_business_days_between($suggested, $in_progress);
+                    if ($action_days !== null) {
+                        $time_to_action_values[] = $action_days;
+                    }
+                }
+                $site_label = (string) ($row['site_name'] ?: ('Site #' . (int) ($row['site_id'] ?? 0)));
+                if (!isset($site_rollout[$site_label])) {
+                    $site_rollout[$site_label] = ['tasks' => 0, 'active' => 0, 'measured_7d' => 0];
+                }
+                $site_rollout[$site_label]['tasks']++;
+                if (in_array((string) ($row['status'] ?? ''), ['suggested', 'approved', 'in_progress'], true)) {
+                    $site_rollout[$site_label]['active']++;
+                }
+                if ((string) ($row['status'] ?? '') === 'measured_7d') {
+                    $site_rollout[$site_label]['measured_7d']++;
+                }
+            }
+
+            foreach ($stage_elapsed as $stage_key => $values) {
+                $median = $this->seo_cockpit_median($values);
+                if ($median !== null) {
+                    $bottlenecks[$stage_key] = $median;
+                }
+            }
+            arsort($bottlenecks, SORT_NUMERIC);
+            $top_bottleneck = key($bottlenecks);
+
+            $cockpit_tasks_last_30 = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('seo_task')} WHERE created_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 DAY)");
+            $legacy_tasks_last_30 = 0;
+            if ($this->table_exists($this->table('seo_page_tasks'))) {
+                $legacy_tasks_last_30 = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('seo_page_tasks')} WHERE created_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 DAY)");
+            }
+            $total_started = $cockpit_tasks_last_30 + $legacy_tasks_last_30;
+            $start_rate = $total_started > 0 ? round(($cockpit_tasks_last_30 / $total_started) * 100, 2) : 0.0;
+
+            return [
+                'rows_count' => count($rows),
+                'cockpit_start_rate' => $start_rate,
+                'median_time_to_action_business_days' => $this->seo_cockpit_median($time_to_action_values),
+                'sla' => $sla,
+                'top_bottleneck' => $top_bottleneck ?: 'n/a',
+                'median_stage_times' => [
+                    'suggested_to_approved_hours' => $this->seo_cockpit_median($stage_elapsed['suggested_to_approved_hours']),
+                    'approved_to_in_progress_business_days' => $this->seo_cockpit_median($stage_elapsed['approved_to_in_progress_business_days']),
+                    'done_to_measured_7d_days' => $this->seo_cockpit_median($stage_elapsed['done_to_measured_7d_days']),
+                ],
+                'site_rollout' => $site_rollout,
+            ];
+        }, 300);
+    }
+
+    private function get_seo_cockpit_workload_overview_data(): array {
+        return $this->seo_cockpit_get_cached_payload('workload', function (): array {
+            $rows = (array) $this->db->get_results(
+                "SELECT t.owner_user_id, t.status, o.opportunity_id, u.site_id, s.label AS site_name
+                 FROM {$this->table('seo_task')} t
+                 INNER JOIN {$this->table('seo_opportunity')} o ON o.opportunity_id=t.opportunity_id
+                 LEFT JOIN {$this->table('seo_url')} u ON u.canonical_url_id=o.canonical_url_id
+                 LEFT JOIN {$this->table('sites')} s ON s.id=u.site_id
+                 WHERE t.status IN ('suggested','approved','in_progress')
+                 ORDER BY t.updated_at DESC
+                 LIMIT 1000",
+                ARRAY_A
+            );
+            $owner_map = [];
+            $team_map = [];
+            foreach ($rows as $row) {
+                $owner_id = (int) ($row['owner_user_id'] ?? 0);
+                $owner_user = $owner_id > 0 ? get_userdata($owner_id) : null;
+                $owner_label = $owner_user ? (string) $owner_user->display_name : ($owner_id > 0 ? ('User #' . $owner_id) : 'Unassigned');
+                if (!isset($owner_map[$owner_label])) {
+                    $owner_map[$owner_label] = ['wip' => 0, 'suggested' => 0, 'approved' => 0, 'in_progress' => 0];
+                }
+                $status = (string) ($row['status'] ?? 'suggested');
+                $owner_map[$owner_label]['wip']++;
+                if (isset($owner_map[$owner_label][$status])) {
+                    $owner_map[$owner_label][$status]++;
+                }
+                $team = $this->seo_cockpit_owner_team_label($owner_id);
+                if (!isset($team_map[$team])) {
+                    $team_map[$team] = ['wip' => 0, 'suggested' => 0, 'approved' => 0, 'in_progress' => 0];
+                }
+                $team_map[$team]['wip']++;
+                if (isset($team_map[$team][$status])) {
+                    $team_map[$team][$status]++;
+                }
+            }
+            uasort($owner_map, static function (array $a, array $b): int {
+                return $b['wip'] <=> $a['wip'];
+            });
+            uasort($team_map, static function (array $a, array $b): int {
+                return $b['wip'] <=> $a['wip'];
+            });
+            return ['owners' => $owner_map, 'teams' => $team_map];
+        }, 300);
+    }
+
+    private function get_seo_cockpit_overdue_tasks_data(): array {
+        return $this->seo_cockpit_get_cached_payload('overdue', function (): array {
+            $rows = (array) $this->db->get_results(
+                "SELECT t.*, u.site_id, s.label AS site_name, u.canonical_url
+                 FROM {$this->table('seo_task')} t
+                 INNER JOIN {$this->table('seo_opportunity')} o ON o.opportunity_id=t.opportunity_id
+                 LEFT JOIN {$this->table('seo_url')} u ON u.canonical_url_id=o.canonical_url_id
+                 LEFT JOIN {$this->table('sites')} s ON s.id=u.site_id
+                 WHERE t.status IN ('suggested','approved','in_progress')
+                   AND t.due_date IS NOT NULL
+                   AND t.due_date < UTC_DATE()
+                 ORDER BY t.due_date ASC
+                 LIMIT 300",
+                ARRAY_A
+            );
+            foreach ($rows as &$row) {
+                $owner_id = (int) ($row['owner_user_id'] ?? 0);
+                $owner_user = $owner_id > 0 ? get_userdata($owner_id) : null;
+                $row['owner_display'] = $owner_user ? (string) $owner_user->display_name : ($owner_id > 0 ? ('User #' . $owner_id) : 'Unassigned');
+                $row['days_overdue'] = (int) floor((time() - strtotime((string) $row['due_date'] . ' 00:00:00')) / DAY_IN_SECONDS);
+            }
+            unset($row);
+            return ['rows' => $rows];
+        }, 180);
+    }
+
+    private function get_seo_cockpit_playbook_performance_overview_data(): array {
+        return $this->seo_cockpit_get_cached_payload('playbook_performance', function (): array {
+            $rows = (array) $this->db->get_results(
+                "SELECT COALESCE(NULLIF(t.playbook_type,''), 'unclassified') AS playbook_type,
+                        COUNT(*) AS total_tasks,
+                        SUM(CASE WHEN m.measurement_status='measured' THEN 1 ELSE 0 END) AS measured_count,
+                        SUM(CASE WHEN m.measurement_status='measured' AND m.uplift_label='positive' THEN 1 ELSE 0 END) AS positive_count,
+                        SUM(CASE WHEN m.measurement_status='measured' AND m.uplift_label='negative' THEN 1 ELSE 0 END) AS negative_count,
+                        AVG(CASE WHEN m.measurement_status='measured' THEN m.uplift_pct END) AS avg_uplift_pct
+                 FROM {$this->table('seo_task')} t
+                 LEFT JOIN {$this->table('seo_uplift_measurement')} m ON m.task_id=t.id AND m.day_window=7
+                 GROUP BY COALESCE(NULLIF(t.playbook_type,''), 'unclassified')
+                 ORDER BY measured_count DESC, total_tasks DESC",
+                ARRAY_A
+            );
+            foreach ($rows as &$row) {
+                $measured = (int) ($row['measured_count'] ?? 0);
+                $positive = (int) ($row['positive_count'] ?? 0);
+                $row['hitrate'] = $measured > 0 ? round(($positive / $measured) * 100, 2) : null;
+                $row['avg_uplift_pct'] = $row['avg_uplift_pct'] !== null ? round((float) $row['avg_uplift_pct'] * 100, 2) : null;
+            }
+            unset($row);
+            return ['rows' => $rows];
+        }, 300);
+    }
+
     private function seo_cockpit_calculate_conversions(array $status_counts): array {
         $ordered = $this->seo_cockpit_lifecycle_statuses();
         $conversion = [];
@@ -11670,6 +12072,18 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'notes' => (string) $calculated['note'],
                 'measured_at' => $this->now(),
             ], ['id' => (int) $row['id']]);
+            if ((int) ($row['day_window'] ?? 0) === 7) {
+                $task_id = (int) ($row['task_id'] ?? 0);
+                if ($task_id > 0) {
+                    $task_status = (string) $this->db->get_var($this->db->prepare("SELECT status FROM {$this->table('seo_task')} WHERE id=%d LIMIT 1", $task_id));
+                    if ($task_status === 'done') {
+                        $task_row = $this->db->get_row($this->db->prepare("SELECT opportunity_id FROM {$this->table('seo_task')} WHERE id=%d LIMIT 1", $task_id), ARRAY_A);
+                        if (!empty($task_row['opportunity_id'])) {
+                            $this->seo_cockpit_upsert_task_for_status((string) $task_row['opportunity_id'], 'measured_7d');
+                        }
+                    }
+                }
+            }
             $measured++;
         }
         return [
