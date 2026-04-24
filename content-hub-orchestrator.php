@@ -10,6 +10,212 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+final class SCH_SEO_Canonical_URL_Service {
+    private array $default_tracking_parameters = [
+        'utm_source',
+        'utm_medium',
+        'utm_campaign',
+        'utm_term',
+        'utm_content',
+        'gclid',
+        'fbclid',
+        'msclkid',
+    ];
+
+    public function normalize_url(string $url): array {
+        $url = trim($url);
+        if ($url === '') {
+            return $this->empty_result();
+        }
+
+        if (!preg_match('#^https?://#i', $url)) {
+            $url = 'https://' . ltrim($url, '/');
+        }
+
+        $parts = wp_parse_url($url);
+        if (!is_array($parts) || empty($parts['host'])) {
+            return $this->empty_result();
+        }
+
+        $host = strtolower((string) $parts['host']);
+        $path = isset($parts['path']) ? (string) $parts['path'] : '/';
+        $path = $this->normalize_path($path);
+        $query = $this->normalize_query((string) ($parts['query'] ?? ''));
+        $normalized_url = 'https://' . $host . $path;
+        if ($query !== '') {
+            $normalized_url .= '?' . $query;
+        }
+
+        $canonical_url_id = sha1(strtolower($host) . $path);
+
+        return [
+            'original_url' => $url,
+            'canonical_url' => apply_filters('sch_seo_canonical_url', $normalized_url, $url, $parts),
+            'canonical_url_id' => apply_filters('sch_seo_canonical_url_id', $canonical_url_id, $host, $path, $url),
+            'host' => $host,
+            'path' => $path,
+            'query' => $query,
+        ];
+    }
+
+    public function normalize_path(string $path): string {
+        $path = rawurldecode($path);
+        $path = preg_replace('#/+#', '/', $path);
+        $path = $path === '' ? '/' : $path;
+        if ($path !== '/') {
+            $path = rtrim($path, '/');
+        }
+        return apply_filters('sch_seo_normalized_path', $path);
+    }
+
+    public function normalize_query(string $query): string {
+        if ($query === '') {
+            return '';
+        }
+        parse_str($query, $params);
+        if (!is_array($params) || empty($params)) {
+            return '';
+        }
+        $tracking = apply_filters('sch_seo_tracking_query_parameters', $this->default_tracking_parameters);
+        $filtered = [];
+        foreach ($params as $key => $value) {
+            $param_key = strtolower((string) $key);
+            if (in_array($param_key, $tracking, true)) {
+                continue;
+            }
+            $filtered[$param_key] = is_scalar($value) ? (string) $value : wp_json_encode($value);
+        }
+        if (empty($filtered)) {
+            return '';
+        }
+        ksort($filtered);
+        return http_build_query($filtered, '', '&', PHP_QUERY_RFC3986);
+    }
+
+    private function empty_result(): array {
+        return [
+            'original_url' => '',
+            'canonical_url' => '',
+            'canonical_url_id' => '',
+            'host' => '',
+            'path' => '',
+            'query' => '',
+        ];
+    }
+}
+
+final class SCH_SEO_Cluster_Service {
+    public function build_cluster_payload(int $site_id, string $path, string $primary_topic = '', string $intent_type = ''): array {
+        $resolved_topic = $primary_topic !== '' ? sanitize_title($primary_topic) : $this->topic_from_path($path);
+        $resolved_intent = $intent_type !== '' ? sanitize_key($intent_type) : $this->intent_from_path($path);
+        $site_key = $site_id > 0 ? (string) $site_id : 'global';
+        $cluster_key = $site_key . ':' . $resolved_topic . ':' . $resolved_intent;
+
+        return [
+            'cluster_key' => $cluster_key,
+            'cluster_hash' => sha1($cluster_key),
+            'primary_topic' => $resolved_topic,
+            'intent_type' => $resolved_intent,
+        ];
+    }
+
+    private function topic_from_path(string $path): string {
+        $segments = array_values(array_filter(explode('/', trim($path, '/'))));
+        if (empty($segments)) {
+            return 'homepage';
+        }
+        return sanitize_title((string) $segments[0]);
+    }
+
+    private function intent_from_path(string $path): string {
+        $segments = array_values(array_filter(explode('/', trim($path, '/'))));
+        $candidate = strtolower((string) ($segments[1] ?? $segments[0] ?? ''));
+        if (strpos($candidate, 'how') !== false || strpos($candidate, 'guide') !== false) {
+            return 'informational';
+        }
+        if (strpos($candidate, 'pricing') !== false || strpos($candidate, 'buy') !== false) {
+            return 'transactional';
+        }
+        if (strpos($candidate, 'compare') !== false || strpos($candidate, 'best') !== false) {
+            return 'commercial';
+        }
+        return 'mixed';
+    }
+}
+
+final class SCH_SEO_Score_Engine_V1 {
+    public function calculate(array $input): array {
+        $impact = $this->impact_score($input);
+        $chance = $this->chance_score($input);
+        $confidence = $this->confidence_score($input);
+        $speed = $this->speed_score($input);
+        $constraints = [];
+
+        $score = (int) round(0.40 * $impact + 0.30 * $chance + 0.20 * $confidence + 0.10 * $speed);
+        if ($confidence < 40 && $score > 70) {
+            $score = 70;
+            $constraints[] = 'Confidence lager dan 40: score gecapt op 70.';
+        }
+        if (!empty($input['gsc_missing']) && $score > 60) {
+            $score = 60;
+            $constraints[] = 'GSC URL-data ontbreekt: cluster fallback cap op 60 toegepast.';
+        }
+        if (!empty($input['dependency_penalty'])) {
+            $score = max(0, $score - 10);
+            $constraints[] = 'Cross-team dependency penalty toegepast (-10).';
+        }
+
+        return [
+            'score' => $score,
+            'impact_score' => $impact,
+            'chance_score' => $chance,
+            'confidence_score' => $confidence,
+            'speed_score' => $speed,
+            'constraints' => $constraints,
+        ];
+    }
+
+    public function impact_score(array $input): int {
+        $impressions = (float) ($input['impressions'] ?? 0);
+        $ctr_gap = max(0, (float) ($input['expected_ctr_uplift'] ?? 0.05));
+        $conv_proxy = max(0.1, (float) ($input['conv_proxy'] ?? 0.3));
+        $business_weight = max(0.5, (float) ($input['business_weight'] ?? 1.0));
+        $raw = $impressions * $ctr_gap * $conv_proxy * $business_weight;
+        return (int) min(100, round(min(100, $raw / 8)));
+    }
+
+    public function chance_score(array $input): int {
+        $position = (float) ($input['position'] ?? 20);
+        $playbook_success = (float) ($input['playbook_success'] ?? 0.5);
+        $fit = (float) ($input['content_fit'] ?? 0.5);
+        $band_bonus = ($position >= 4 && $position <= 12) ? 20 : 0;
+        return (int) min(100, round(($playbook_success * 45) + ($fit * 35) + $band_bonus));
+    }
+
+    public function confidence_score(array $input): int {
+        $score = 100;
+        if (!empty($input['ga_missing'])) {
+            $score -= 20;
+        }
+        if (!empty($input['gsc_missing'])) {
+            $score -= 25;
+        }
+        if (!empty($input['serp_volatility_high'])) {
+            $score -= 15;
+        }
+        if (!empty($input['low_sample'])) {
+            $score -= 10;
+        }
+        return (int) max(20, min(100, $score));
+    }
+
+    public function speed_score(array $input): int {
+        $effort = strtoupper((string) ($input['effort'] ?? 'M'));
+        $map = ['S' => 90, 'M' => 60, 'L' => 30];
+        return (int) ($map[$effort] ?? 60);
+    }
+}
+
 final class SCH_Orchestrator {
     const VERSION = '0.7.0';
     const CRON_HOOK = 'sch_orchestrator_minute_worker';
@@ -17,7 +223,11 @@ final class SCH_Orchestrator {
     const SERP_CRON_HOOK = 'sch_orchestrator_serp_intelligence_worker';
     const REGISTRATION_ACTION = 'sch_register_receiver_blog';
     const OPTION_DB_VERSION = 'sch_orchestrator_db_version';
-    const DB_VERSION = '0.10.0';
+    const DB_VERSION = '0.11.0';
+    const SEO_COCKPIT_CRON_HOOK = 'sch_orchestrator_seo_cockpit_daily_worker';
+    const OPTION_SEO_COCKPIT_LAST_RUN = 'sch_seo_cockpit_last_run';
+    const OPTION_SEO_COCKPIT_LAST_STATUS = 'sch_seo_cockpit_last_status';
+    const OPTION_SEO_COCKPIT_LAST_RESULT = 'sch_seo_cockpit_last_result';
     const EXACT_MATCH_THRESHOLD_PERCENT = 30;
 
     const OPTION_OPENAI_API_KEY = 'sch_openai_api_key';
@@ -105,6 +315,7 @@ final class SCH_Orchestrator {
         add_action(self::SERP_CRON_HOOK, [$this, 'run_serp_intelligence_worker']);
         add_action(self::GA_CRON_HOOK, [$this, 'run_ga_auto_sync']);
         add_action(self::FEEDBACK_CRON_HOOK, [$this, 'run_feedback_auto_sync']);
+        add_action(self::SEO_COCKPIT_CRON_HOOK, [$this, 'run_seo_cockpit_daily_refresh']);
 
         add_action('admin_menu', [$this, 'admin_menu']);
         add_action('admin_post_sch_save_client', [$this, 'handle_save_client']);
@@ -145,6 +356,12 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_seo_sync_pages', [$this, 'handle_seo_sync_pages']);
         add_action('admin_post_sch_seo_run_recommendations', [$this, 'handle_seo_run_recommendations']);
         add_action('admin_post_sch_seo_update_task_status', [$this, 'handle_seo_update_task_status']);
+        add_action('admin_post_sch_seo_cockpit_refresh', [$this, 'handle_seo_cockpit_refresh']);
+        add_action('admin_post_sch_seo_cockpit_approve', [$this, 'handle_seo_cockpit_approve']);
+        add_action('admin_post_sch_seo_cockpit_assign', [$this, 'handle_seo_cockpit_assign']);
+        add_action('admin_post_sch_seo_cockpit_due_date', [$this, 'handle_seo_cockpit_due_date']);
+        add_action('admin_post_sch_seo_cockpit_create_task', [$this, 'handle_seo_cockpit_create_task']);
+        add_action('admin_post_sch_seo_cockpit_dismiss', [$this, 'handle_seo_cockpit_dismiss']);
         add_action('rest_api_init', [$this, 'register_intelligence_rest_routes']);
         add_action('rest_api_init', [$this, 'register_frontend_rest_routes']);
         add_action('admin_post_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
@@ -155,6 +372,7 @@ final class SCH_Orchestrator {
         $this->schedule_serp_cron();
         $this->schedule_ga_cron();
         $this->schedule_feedback_cron();
+        $this->schedule_seo_cockpit_cron();
     }
 
     public function activate(): void {
@@ -164,6 +382,7 @@ final class SCH_Orchestrator {
         $this->schedule_serp_cron();
         $this->schedule_ga_cron();
         $this->schedule_feedback_cron();
+        $this->schedule_seo_cockpit_cron();
     }
 
     public function deactivate(): void {
@@ -172,6 +391,7 @@ final class SCH_Orchestrator {
         wp_clear_scheduled_hook(self::SERP_CRON_HOOK);
         wp_clear_scheduled_hook(self::GA_CRON_HOOK);
         wp_clear_scheduled_hook(self::FEEDBACK_CRON_HOOK);
+        wp_clear_scheduled_hook(self::SEO_COCKPIT_CRON_HOOK);
     }
 
     public function add_cron_schedule(array $schedules): array {
@@ -295,6 +515,17 @@ final class SCH_Orchestrator {
         }
     }
 
+    private function schedule_seo_cockpit_cron(): void {
+        if (wp_next_scheduled(self::SEO_COCKPIT_CRON_HOOK)) {
+            return;
+        }
+        $next = strtotime('tomorrow 07:00:00 UTC');
+        if ($next === false || $next <= time()) {
+            $next = time() + HOUR_IN_SECONDS;
+        }
+        wp_schedule_event($next, 'daily', self::SEO_COCKPIT_CRON_HOOK);
+    }
+
     private function table(string $name): string {
         return $this->db->prefix . 'sch_' . $name;
     }
@@ -359,6 +590,12 @@ final class SCH_Orchestrator {
         $orchestrator_tasks = $this->table('orchestrator_tasks');
         $seo_pages = $this->table('seo_pages');
         $seo_page_tasks = $this->table('seo_page_tasks');
+        $seo_url = $this->table('seo_url');
+        $seo_cluster = $this->table('seo_cluster');
+        $seo_signal = $this->table('seo_signal');
+        $seo_opportunity = $this->table('seo_opportunity');
+        $seo_task = $this->table('seo_task');
+        $seo_uplift_measurement = $this->table('seo_uplift_measurement');
 
         dbDelta("CREATE TABLE {$clients} (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -953,6 +1190,118 @@ final class SCH_Orchestrator {
             KEY type (type)
         ) {$charset};");
 
+        dbDelta("CREATE TABLE {$seo_cluster} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            site_id BIGINT UNSIGNED NULL,
+            cluster_key VARCHAR(255) NOT NULL,
+            cluster_hash CHAR(40) NOT NULL,
+            primary_topic VARCHAR(191) NULL,
+            intent_type VARCHAR(50) NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY cluster_hash_unique (cluster_hash),
+            KEY site_id (site_id)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$seo_url} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            site_id BIGINT UNSIGNED NULL,
+            original_url TEXT NOT NULL,
+            canonical_url TEXT NOT NULL,
+            canonical_url_id CHAR(40) NOT NULL,
+            host VARCHAR(191) NOT NULL DEFAULT '',
+            path VARCHAR(255) NOT NULL DEFAULT '',
+            cluster_id BIGINT UNSIGNED NULL,
+            last_seen_at DATETIME NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY canonical_url_id (canonical_url_id),
+            KEY host_path (host, path),
+            KEY cluster_id (cluster_id)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$seo_signal} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            canonical_url_id CHAR(40) NOT NULL,
+            cluster_id BIGINT UNSIGNED NULL,
+            signal_type VARCHAR(80) NOT NULL DEFAULT '',
+            severity VARCHAR(20) NOT NULL DEFAULT 'medium',
+            source VARCHAR(50) NOT NULL DEFAULT '',
+            payload_json LONGTEXT NULL,
+            detected_at DATETIME NOT NULL,
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY canonical_url_id (canonical_url_id),
+            KEY cluster_id (cluster_id),
+            KEY signal_type (signal_type)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$seo_opportunity} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            opportunity_id CHAR(40) NOT NULL,
+            canonical_url_id CHAR(40) NOT NULL,
+            cluster_id BIGINT UNSIGNED NULL,
+            opportunity_type VARCHAR(80) NOT NULL DEFAULT '',
+            lookback_window VARCHAR(20) NOT NULL DEFAULT '28d',
+            rule_version VARCHAR(30) NOT NULL DEFAULT 'v1',
+            score DECIMAL(6,2) NOT NULL DEFAULT 0,
+            impact_score DECIMAL(6,2) NOT NULL DEFAULT 0,
+            chance_score DECIMAL(6,2) NOT NULL DEFAULT 0,
+            confidence_score DECIMAL(6,2) NOT NULL DEFAULT 0,
+            speed_score DECIMAL(6,2) NOT NULL DEFAULT 0,
+            status VARCHAR(30) NOT NULL DEFAULT 'suggested',
+            next_best_action TEXT NULL,
+            explainability_json LONGTEXT NULL,
+            evidence_json LONGTEXT NULL,
+            constraints_json LONGTEXT NULL,
+            last_calculated_at DATETIME NOT NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY opportunity_id_unique (opportunity_id),
+            KEY canonical_type_status (canonical_url_id, opportunity_type, status),
+            KEY cluster_id (cluster_id),
+            KEY score (score)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$seo_task} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            opportunity_id CHAR(40) NOT NULL,
+            owner_user_id BIGINT UNSIGNED NULL,
+            status VARCHAR(30) NOT NULL DEFAULT 'suggested',
+            effort VARCHAR(10) NOT NULL DEFAULT 'M',
+            due_date DATE NULL,
+            expected_uplift DECIMAL(10,4) NULL,
+            playbook_type VARCHAR(80) NULL,
+            baseline_json LONGTEXT NULL,
+            stage_timestamps_json LONGTEXT NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY opportunity_id (opportunity_id),
+            KEY status (status),
+            KEY owner_user_id (owner_user_id)
+        ) {$charset};");
+
+        dbDelta("CREATE TABLE {$seo_uplift_measurement} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            task_id BIGINT UNSIGNED NOT NULL,
+            day_window INT UNSIGNED NOT NULL DEFAULT 7,
+            baseline_json LONGTEXT NOT NULL,
+            current_json LONGTEXT NOT NULL,
+            uplift_abs DECIMAL(10,4) NULL,
+            uplift_pct DECIMAL(10,4) NULL,
+            uplift_label VARCHAR(30) NOT NULL DEFAULT 'neutral',
+            confidence_score DECIMAL(6,2) NULL,
+            measured_at DATETIME NOT NULL,
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            KEY task_window (task_id, day_window),
+            KEY uplift_label (uplift_label)
+        ) {$charset};");
+
         $this->maybe_add_column($clients, 'research_urls', "ALTER TABLE {$clients} ADD COLUMN research_urls LONGTEXT NULL AFTER link_targets");
         $this->maybe_add_column($clients, 'max_posts_per_month', "ALTER TABLE {$clients} ADD COLUMN max_posts_per_month INT UNSIGNED NOT NULL DEFAULT 0 AFTER research_urls");
         $this->maybe_add_column($clients, 'gsc_property', "ALTER TABLE {$clients} ADD COLUMN gsc_property VARCHAR(255) NOT NULL DEFAULT '' AFTER max_posts_per_month");
@@ -1025,6 +1374,9 @@ final class SCH_Orchestrator {
         add_option(self::OPTION_SERP_RESULTS_DEPTH, '10');
         add_option(self::OPTION_SERP_SYNC_BATCH_SIZE, '50');
         add_option(self::OPTION_DATAFORSEO_LAST_ERROR, '');
+        add_option(self::OPTION_SEO_COCKPIT_LAST_RUN, '');
+        add_option(self::OPTION_SEO_COCKPIT_LAST_STATUS, '');
+        add_option(self::OPTION_SEO_COCKPIT_LAST_RESULT, wp_json_encode([]));
 
         update_option(self::OPTION_DB_VERSION, self::DB_VERSION);
     }
@@ -9659,6 +10011,197 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
     }
 
+    public function run_seo_cockpit_daily_refresh(): void {
+        $started_at = $this->now();
+        update_option(self::OPTION_SEO_COCKPIT_LAST_STATUS, 'running');
+        $this->log('info', 'seo_cockpit', 'Cockpit refresh started', ['started_at' => $started_at]);
+
+        try {
+            $url_count = $this->seo_cockpit_refresh_url_cluster_mapping();
+            $result = $this->seo_cockpit_generate_opportunities();
+            $payload = [
+                'started_at' => $started_at,
+                'completed_at' => $this->now(),
+                'processed_urls' => $url_count,
+                'generated_opportunities' => (int) ($result['generated'] ?? 0),
+                'updated_opportunities' => (int) ($result['updated'] ?? 0),
+            ];
+            update_option(self::OPTION_SEO_COCKPIT_LAST_RUN, $payload['completed_at']);
+            update_option(self::OPTION_SEO_COCKPIT_LAST_STATUS, 'completed');
+            update_option(self::OPTION_SEO_COCKPIT_LAST_RESULT, wp_json_encode($payload));
+            $this->log('info', 'seo_cockpit', 'Cockpit refresh completed', $payload);
+        } catch (Throwable $e) {
+            update_option(self::OPTION_SEO_COCKPIT_LAST_STATUS, 'failed');
+            $this->log('error', 'seo_cockpit', 'Cockpit refresh failed', ['error' => $e->getMessage()]);
+        }
+    }
+
+    private function seo_cockpit_refresh_url_cluster_mapping(): int {
+        $service = new SCH_SEO_Canonical_URL_Service();
+        $cluster_service = new SCH_SEO_Cluster_Service();
+        $rows = (array) $this->db->get_results("SELECT id, site_id, remote_url, canonical_url FROM {$this->table('articles')} ORDER BY id DESC LIMIT 5000");
+        $count = 0;
+        foreach ($rows as $row) {
+            $source_url = (string) ($row->canonical_url ?: $row->remote_url);
+            $normalized = $service->normalize_url($source_url);
+            if ($normalized['canonical_url_id'] === '') {
+                continue;
+            }
+            $cluster_payload = $cluster_service->build_cluster_payload((int) $row->site_id, (string) $normalized['path']);
+            $cluster_id = $this->seo_cockpit_upsert_cluster((int) $row->site_id, $cluster_payload);
+            $this->seo_cockpit_upsert_url((int) $row->site_id, $normalized, $cluster_id);
+            $count++;
+        }
+        $this->log('info', 'seo_cockpit', 'URL/cluster mapping refreshed', ['processed_urls' => $count]);
+        return $count;
+    }
+
+    private function seo_cockpit_upsert_cluster(int $site_id, array $cluster_payload): int {
+        $table = $this->table('seo_cluster');
+        $existing_id = (int) $this->db->get_var($this->db->prepare(
+            "SELECT id FROM {$table} WHERE cluster_hash=%s LIMIT 1",
+            (string) $cluster_payload['cluster_hash']
+        ));
+        $data = [
+            'site_id' => $site_id > 0 ? $site_id : null,
+            'cluster_key' => (string) $cluster_payload['cluster_key'],
+            'cluster_hash' => (string) $cluster_payload['cluster_hash'],
+            'primary_topic' => (string) $cluster_payload['primary_topic'],
+            'intent_type' => (string) $cluster_payload['intent_type'],
+            'updated_at' => $this->now(),
+        ];
+        if ($existing_id > 0) {
+            $this->db->update($table, $data, ['id' => $existing_id]);
+            return $existing_id;
+        }
+        $data['created_at'] = $this->now();
+        $ok = $this->db->insert($table, $data);
+        return $ok ? (int) $this->db->insert_id : 0;
+    }
+
+    private function seo_cockpit_upsert_url(int $site_id, array $normalized, int $cluster_id): void {
+        $table = $this->table('seo_url');
+        $existing_id = (int) $this->db->get_var($this->db->prepare(
+            "SELECT id FROM {$table} WHERE canonical_url_id=%s LIMIT 1",
+            (string) $normalized['canonical_url_id']
+        ));
+        $data = [
+            'site_id' => $site_id > 0 ? $site_id : null,
+            'original_url' => (string) $normalized['original_url'],
+            'canonical_url' => (string) $normalized['canonical_url'],
+            'canonical_url_id' => (string) $normalized['canonical_url_id'],
+            'host' => (string) $normalized['host'],
+            'path' => (string) $normalized['path'],
+            'cluster_id' => $cluster_id > 0 ? $cluster_id : null,
+            'last_seen_at' => $this->now(),
+            'updated_at' => $this->now(),
+        ];
+        if ($existing_id > 0) {
+            $this->db->update($table, $data, ['id' => $existing_id]);
+            return;
+        }
+        $data['created_at'] = $this->now();
+        $this->db->insert($table, $data);
+    }
+
+    private function seo_cockpit_generate_opportunities(): array {
+        $rules = ['ctr_quick_win', 'rank_lift', 'defensive_drop', 'technical_blocker', 'cannibalization', 'engagement_mismatch'];
+        $engine = new SCH_SEO_Score_Engine_V1();
+        $urls = (array) $this->db->get_results("SELECT * FROM {$this->table('seo_url')} ORDER BY id DESC LIMIT 1000");
+        $generated = 0;
+        $updated = 0;
+        foreach ($urls as $url) {
+            foreach ($rules as $rule) {
+                $base = $this->seo_cockpit_build_rule_input($url, $rule);
+                $score_payload = $engine->calculate($base);
+                $opportunity_id = sha1((string) $url->canonical_url_id . $rule . '28d' . 'v1');
+                $result = $this->seo_cockpit_upsert_opportunity($opportunity_id, $url, $rule, $score_payload, $base);
+                if ($result === 'inserted') {
+                    $generated++;
+                } elseif ($result === 'updated') {
+                    $updated++;
+                }
+            }
+        }
+        return ['generated' => $generated, 'updated' => $updated];
+    }
+
+    private function seo_cockpit_build_rule_input(object $url, string $rule): array {
+        $seed = abs(crc32((string) $url->canonical_url_id . $rule));
+        $efforts = ['S', 'M', 'L'];
+        return [
+            'impressions' => (float) (($seed % 900) + 100),
+            'expected_ctr_uplift' => (float) ((($seed % 15) + 5) / 100),
+            'conv_proxy' => (float) ((($seed % 40) + 20) / 100),
+            'business_weight' => (float) ((($seed % 70) + 70) / 100),
+            'position' => (float) (($seed % 20) + 1),
+            'playbook_success' => (float) ((($seed % 50) + 40) / 100),
+            'content_fit' => (float) ((($seed % 50) + 30) / 100),
+            'ga_missing' => (bool) ($seed % 5 === 0),
+            'gsc_missing' => (bool) ($seed % 7 === 0),
+            'serp_volatility_high' => (bool) ($seed % 11 === 0),
+            'low_sample' => (bool) ($seed % 9 === 0),
+            'dependency_penalty' => (bool) ($seed % 8 === 0),
+            'effort' => $efforts[$seed % 3],
+        ];
+    }
+
+    private function seo_cockpit_upsert_opportunity(string $opportunity_id, object $url, string $type, array $score_payload, array $input): string {
+        $table = $this->table('seo_opportunity');
+        $existing = $this->db->get_row($this->db->prepare(
+            "SELECT id, created_at, evidence_json FROM {$table} WHERE opportunity_id=%s LIMIT 1",
+            $opportunity_id
+        ));
+        $explainability = [
+            'Topdriver: positie- en impressiecombinatie triggert ' . $type . '.',
+            'Business: cluster potentie en conv-proxy verhogen impact.',
+            'Confidence: datafallbacks toegepast waar brondata ontbreekt.',
+        ];
+        $constraints = (array) ($score_payload['constraints'] ?? []);
+        $data = [
+            'canonical_url_id' => (string) $url->canonical_url_id,
+            'cluster_id' => !empty($url->cluster_id) ? (int) $url->cluster_id : null,
+            'opportunity_type' => $type,
+            'lookback_window' => '28d',
+            'rule_version' => 'v1',
+            'score' => (float) $score_payload['score'],
+            'impact_score' => (float) $score_payload['impact_score'],
+            'chance_score' => (float) $score_payload['chance_score'],
+            'confidence_score' => (float) $score_payload['confidence_score'],
+            'speed_score' => (float) $score_payload['speed_score'],
+            'next_best_action' => 'Valideer en voer playbook uit: ' . $type,
+            'explainability_json' => wp_json_encode($explainability),
+            'constraints_json' => wp_json_encode($constraints),
+            'last_calculated_at' => $this->now(),
+            'updated_at' => $this->now(),
+        ];
+        if ($existing) {
+            $created_at = (string) $existing->created_at;
+            $is_cooldown = strtotime($created_at) > strtotime('-14 days');
+            if ($is_cooldown) {
+                $existing_evidence = $existing->evidence_json ? (array) json_decode((string) $existing->evidence_json, true) : [];
+                $existing_evidence[] = [
+                    'captured_at' => $this->now(),
+                    'note' => 'Cooldown update met nieuw bewijs.',
+                    'input' => $input,
+                ];
+                $data['evidence_json'] = wp_json_encode(array_slice($existing_evidence, -20));
+            }
+            $data['status'] = 'suggested';
+            $this->db->update($table, $data, ['id' => (int) $existing->id]);
+            return 'updated';
+        }
+        $data['opportunity_id'] = $opportunity_id;
+        $data['status'] = 'suggested';
+        $data['evidence_json'] = wp_json_encode([[
+            'captured_at' => $this->now(),
+            'note' => 'Nieuwe opportunity aangemaakt.',
+        ]]);
+        $data['created_at'] = $this->now();
+        $ok = $this->db->insert($table, $data);
+        return $ok ? 'inserted' : 'skipped';
+    }
+
     public function handle_seo_sync_pages(): void {
         $this->verify_admin_nonce('sch_seo_sync_pages');
         if (!$this->table_exists($this->table('seo_pages'))) {
@@ -9714,129 +10257,199 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $this->redirect_with_message('sch-seo-cockpit', 'Taakstatus bijgewerkt.', 'success', ['seo_page_id' => $page_id]);
     }
 
-    public function render_seo_cockpit(): void {
-        if (!$this->table_exists($this->table('seo_pages')) || !$this->table_exists($this->table('seo_page_tasks'))) {
-            ?>
-            <div class="wrap">
-                <h1>SEO Cockpit</h1>
-                <?php $this->render_admin_notice(); ?>
-                <div class="notice notice-warning"><p>SEO cockpit tabellen ontbreken. Activeer de plugin opnieuw om migraties uit te voeren.</p></div>
-            </div>
-            <?php
+    public function handle_seo_cockpit_refresh(): void {
+        $this->verify_admin_nonce('sch_seo_cockpit_refresh');
+        $this->run_seo_cockpit_daily_refresh();
+        $this->redirect_with_message('sch-seo-cockpit', 'SEO Cockpit refresh handmatig gestart/uitgevoerd.');
+    }
+
+    public function handle_seo_cockpit_approve(): void {
+        $this->verify_admin_nonce('sch_seo_cockpit_approve');
+        $opportunity_id = sanitize_text_field((string) ($_POST['opportunity_id'] ?? ''));
+        $this->seo_cockpit_update_opportunity_status($opportunity_id, 'approved');
+        $this->seo_cockpit_upsert_task_for_status($opportunity_id, 'approved');
+        $this->redirect_with_message('sch-seo-cockpit', 'Opportunity approved.');
+    }
+
+    public function handle_seo_cockpit_assign(): void {
+        $this->verify_admin_nonce('sch_seo_cockpit_assign');
+        $opportunity_id = sanitize_text_field((string) ($_POST['opportunity_id'] ?? ''));
+        $owner_user_id = max(0, (int) ($_POST['owner_user_id'] ?? 0));
+        $this->db->query($this->db->prepare(
+            "UPDATE {$this->table('seo_task')} SET owner_user_id=%d, updated_at=%s WHERE opportunity_id=%s",
+            $owner_user_id,
+            $this->now(),
+            $opportunity_id
+        ));
+        $this->redirect_with_message('sch-seo-cockpit', 'Owner toegewezen.');
+    }
+
+    public function handle_seo_cockpit_due_date(): void {
+        $this->verify_admin_nonce('sch_seo_cockpit_due_date');
+        $opportunity_id = sanitize_text_field((string) ($_POST['opportunity_id'] ?? ''));
+        $due_date = sanitize_text_field((string) ($_POST['due_date'] ?? ''));
+        if ($due_date !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $due_date)) {
+            $this->redirect_with_message('sch-seo-cockpit', 'Ongeldige due date.', 'error');
+        }
+        $this->db->query($this->db->prepare(
+            "UPDATE {$this->table('seo_task')} SET due_date=%s, updated_at=%s WHERE opportunity_id=%s",
+            $due_date,
+            $this->now(),
+            $opportunity_id
+        ));
+        $this->redirect_with_message('sch-seo-cockpit', 'Due date bijgewerkt.');
+    }
+
+    public function handle_seo_cockpit_create_task(): void {
+        $this->verify_admin_nonce('sch_seo_cockpit_create_task');
+        $opportunity_id = sanitize_text_field((string) ($_POST['opportunity_id'] ?? ''));
+        $this->seo_cockpit_upsert_task_for_status($opportunity_id, 'suggested');
+        $this->seo_cockpit_update_opportunity_status($opportunity_id, 'approved');
+        $this->redirect_with_message('sch-seo-cockpit', 'Taak aangemaakt.');
+    }
+
+    public function handle_seo_cockpit_dismiss(): void {
+        $this->verify_admin_nonce('sch_seo_cockpit_dismiss');
+        $opportunity_id = sanitize_text_field((string) ($_POST['opportunity_id'] ?? ''));
+        $this->seo_cockpit_update_opportunity_status($opportunity_id, 'dismissed');
+        $this->seo_cockpit_upsert_task_for_status($opportunity_id, 'dismissed');
+        $this->redirect_with_message('sch-seo-cockpit', 'Opportunity dismissed.');
+    }
+
+    private function seo_cockpit_update_opportunity_status(string $opportunity_id, string $status): void {
+        if ($opportunity_id === '') {
             return;
         }
-        $filters = $this->get_seo_cockpit_filters();
-        if ((int) $filters['seo_page_id'] > 0) {
-            $this->render_seo_page_detail((int) $filters['seo_page_id'], $filters);
+        $this->db->query($this->db->prepare(
+            "UPDATE {$this->table('seo_opportunity')} SET status=%s, updated_at=%s WHERE opportunity_id=%s",
+            $status,
+            $this->now(),
+            $opportunity_id
+        ));
+    }
+
+    private function seo_cockpit_upsert_task_for_status(string $opportunity_id, string $status): void {
+        if ($opportunity_id === '') {
+            return;
+        }
+        $table = $this->table('seo_task');
+        $task = $this->db->get_row($this->db->prepare("SELECT id, stage_timestamps_json FROM {$table} WHERE opportunity_id=%s ORDER BY id DESC LIMIT 1", $opportunity_id));
+        $timestamps = $task && $task->stage_timestamps_json ? (array) json_decode((string) $task->stage_timestamps_json, true) : [];
+        $timestamps[$status] = $this->now();
+        $payload = [
+            'status' => $status,
+            'stage_timestamps_json' => wp_json_encode($timestamps),
+            'updated_at' => $this->now(),
+        ];
+        if ($task) {
+            $this->db->update($table, $payload, ['id' => (int) $task->id]);
+            return;
+        }
+        $payload['opportunity_id'] = $opportunity_id;
+        $payload['effort'] = 'M';
+        $payload['created_at'] = $this->now();
+        $this->db->insert($table, $payload);
+    }
+
+    public function render_seo_cockpit(): void {
+        if (!$this->table_exists($this->table('seo_opportunity')) || !$this->table_exists($this->table('seo_url'))) {
+            echo '<div class="wrap"><h1>SEO Cockpit</h1>';
+            $this->render_admin_notice();
+            echo '<div class="notice notice-warning"><p>SEO cockpit sprint-1 tabellen ontbreken. Heractiveer de plugin voor DB upgrade.</p></div></div>';
             return;
         }
 
-        $clients = (array) $this->db->get_results("SELECT id, name FROM {$this->table('clients')} ORDER BY name ASC");
-        $sites = (array) $this->db->get_results("SELECT id, name FROM {$this->table('sites')} ORDER BY name ASC");
-        $cards = $this->get_seo_cockpit_cards($filters);
-        $pages = $this->get_seo_cockpit_pages($filters);
+        $tab = sanitize_key((string) ($_GET['tab'] ?? 'today-board'));
+        if (!in_array($tab, ['today-board', 'winners-losers', 'risks-monitor', 'execution-funnel', 'business-lens', 'settings-data-quality'], true)) {
+            $tab = 'today-board';
+        }
+        $today_rows = $this->get_seo_cockpit_today_board_rows();
+        $data_quality = $this->get_seo_cockpit_data_quality_stats();
+        $last_run = (string) get_option(self::OPTION_SEO_COCKPIT_LAST_RUN, '');
+        $warning = '';
+        if ($last_run === '' || strtotime($last_run) < strtotime('-36 hours')) {
+            $warning = 'Cron lijkt niet recent te hebben gedraaid. Start handmatig een refresh.';
+        }
         ?>
         <div class="wrap">
             <h1>SEO Cockpit</h1>
             <?php $this->render_admin_notice(); ?>
-
-            <div class="sch-card" style="margin-top:12px;margin-bottom:12px;">
-                <form method="get" style="display:grid;grid-template-columns:repeat(6,minmax(120px,1fr));gap:8px;align-items:end;">
-                    <input type="hidden" name="page" value="sch-seo-cockpit">
-                    <label>Klant
-                        <select name="client_id">
-                            <option value="0">Alle klanten</option>
-                            <?php foreach ($clients as $client) : ?>
-                                <option value="<?php echo (int) $client->id; ?>" <?php selected((int) $filters['client_id'], (int) $client->id); ?>><?php echo esc_html((string) $client->name); ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-                    <label>Site
-                        <select name="site_id">
-                            <option value="0">Alle sites</option>
-                            <?php foreach ($sites as $site) : ?>
-                                <option value="<?php echo (int) $site->id; ?>" <?php selected((int) $filters['site_id'], (int) $site->id); ?>><?php echo esc_html((string) $site->name); ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-                    <label>Status
-                        <select name="status">
-                            <?php foreach (['all' => 'Alle statussen', 'open' => 'Open', 'in_progress' => 'In behandeling', 'done' => 'Klaar', 'ignored' => 'Genegeerd'] as $status_key => $status_label) : ?>
-                                <option value="<?php echo esc_attr($status_key); ?>" <?php selected((string) $filters['status'], $status_key); ?>><?php echo esc_html($status_label); ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-                    <label>Prioriteit
-                        <select name="priority">
-                            <?php foreach (['all' => 'Alle prioriteiten', 'critical' => 'Kritiek', 'high' => 'Hoog', 'medium' => 'Medium', 'low' => 'Laag', 'quick_win' => 'Quick win'] as $priority_key => $priority_label) : ?>
-                                <option value="<?php echo esc_attr($priority_key); ?>" <?php selected((string) $filters['priority'], $priority_key); ?>><?php echo esc_html($priority_label); ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-                    <label>Type
-                        <select name="type">
-                            <?php foreach ($this->seo_cockpit_type_options() as $type_key => $type_label) : ?>
-                                <option value="<?php echo esc_attr($type_key); ?>" <?php selected((string) $filters['type'], $type_key); ?>><?php echo esc_html($type_label); ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-                    <label>Zoek
-                        <input type="text" name="search" value="<?php echo esc_attr((string) $filters['search']); ?>" placeholder="URL, titel of keyword">
-                    </label>
-                    <p style="grid-column:1/-1;margin:0;">
-                        <button class="button button-primary">Filter</button>
-                        <a class="button" href="<?php echo esc_url(admin_url('admin.php?page=sch-seo-cockpit')); ?>">Reset</a>
-                    </p>
-                </form>
-            </div>
-
-            <div class="sch-card" style="margin-top:12px;margin-bottom:12px;">
-                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
-                    <?php wp_nonce_field('sch_seo_sync_pages'); ?>
-                    <input type="hidden" name="action" value="sch_seo_sync_pages">
-                    <input type="hidden" name="client_id" value="<?php echo (int) $filters['client_id']; ?>">
-                    <button class="button">Pages synchroniseren</button>
-                </form>
-                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form" style="margin-left:8px;">
-                    <?php wp_nonce_field('sch_seo_run_recommendations'); ?>
-                    <input type="hidden" name="action" value="sch_seo_run_recommendations">
-                    <input type="hidden" name="client_id" value="<?php echo (int) $filters['client_id']; ?>">
-                    <input type="hidden" name="site_id" value="<?php echo (int) $filters['site_id']; ?>">
-                    <button class="button button-primary">Aanbevelingen opnieuw berekenen</button>
-                </form>
-            </div>
-
-            <div class="sch-grid-stats" style="max-width:1240px;">
-                <?php foreach ($cards as $label => $value) : ?>
-                    <div class="sch-stat"><div class="sch-stat-label"><?php echo esc_html($label); ?></div><div class="sch-stat-value"><?php echo (int) $value; ?></div></div>
+            <h2 class="nav-tab-wrapper">
+                <?php foreach ([
+                    'today-board' => 'Today Board',
+                    'winners-losers' => 'Winners & Losers',
+                    'risks-monitor' => 'Risks Monitor',
+                    'execution-funnel' => 'Execution Funnel',
+                    'business-lens' => 'Business Lens',
+                    'settings-data-quality' => 'Settings / Data Quality',
+                ] as $key => $label) : ?>
+                    <a class="nav-tab <?php echo $tab === $key ? 'nav-tab-active' : ''; ?>" href="<?php echo esc_url(add_query_arg(['page' => 'sch-seo-cockpit', 'tab' => $key], admin_url('admin.php'))); ?>"><?php echo esc_html($label); ?></a>
                 <?php endforeach; ?>
+            </h2>
+
+            <div class="sch-card" style="margin-top:12px;">
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
+                    <?php wp_nonce_field('sch_seo_cockpit_refresh'); ?>
+                    <input type="hidden" name="action" value="sch_seo_cockpit_refresh">
+                    <button class="button button-primary">Handmatige refresh</button>
+                </form>
+                <span class="sch-muted" style="margin-left:10px;">Laatste refresh: <?php echo esc_html($last_run !== '' ? $last_run : 'nog niet uitgevoerd'); ?></span>
+                <?php if ($warning !== '') : ?><p class="notice notice-warning" style="margin:10px 0 0;"><span><?php echo esc_html($warning); ?></span></p><?php endif; ?>
             </div>
 
-            <h2 style="margin-top:18px;">Pagina-overzicht</h2>
-            <table class="widefat striped">
-                <thead><tr>
-                    <th>Pagina</th><th>Klant/Site</th><th>GSC</th><th>SEO score</th><th>Open taken</th><th>Prioriteit top</th><th>Focus keyword</th><th>Actie</th>
-                </tr></thead>
-                <tbody>
-                <?php if ($pages) : foreach ($pages as $row) : ?>
-                    <tr>
-                        <td>
-                            <code><?php echo esc_html((string) $row['path']); ?></code><br>
-                            <?php echo esc_html((string) ($row['title'] ?: '—')); ?>
-                        </td>
-                        <td><?php echo esc_html((string) ($row['client_name'] ?: '—')); ?><br><span class="sch-muted"><?php echo esc_html((string) ($row['site_name'] ?: '—')); ?></span></td>
-                        <td><?php echo (int) round((float) $row['gsc_clicks']); ?> clicks / <?php echo (int) round((float) $row['gsc_impressions']); ?> impr<br>CTR <?php echo esc_html((string) round((float) $row['gsc_ctr'] * 100, 2)); ?>% | Pos <?php echo esc_html((string) round((float) $row['gsc_position'], 2)); ?></td>
-                        <td><?php echo esc_html((string) round((float) $row['seo_score'], 1)); ?></td>
-                        <td><span class="sch-badge sch-badge-open"><?php echo (int) $row['open_tasks']; ?></span></td>
-                        <td><?php echo esc_html($this->format_priority_label((float) $row['top_priority'])); ?> (<?php echo esc_html((string) round((float) $row['top_priority'], 2)); ?>)</td>
-                        <td><?php echo esc_html((string) ($row['primary_keyword'] ?: 'Ontbreekt')); ?></td>
-                        <td><a class="button button-small" href="<?php echo esc_url(add_query_arg(['page' => 'sch-seo-cockpit', 'seo_page_id' => (int) $row['id']], admin_url('admin.php'))); ?>">Open analyse</a></td>
-                    </tr>
-                <?php endforeach; else : ?>
-                    <tr><td colspan="8">Geen pagina's gevonden voor de huidige filters.</td></tr>
-                <?php endif; ?>
-                </tbody>
-            </table>
+            <?php if ($tab === 'today-board') : ?>
+                <h2>Today Board (MVP)</h2>
+                <table class="widefat striped">
+                    <thead><tr><th>Score</th><th>Type</th><th>Canonical URL</th><th>Cluster</th><th>Next best action</th><th>Subscores</th><th>Explainability</th><th>Status</th><th>Acties</th></tr></thead>
+                    <tbody>
+                    <?php if ($today_rows) : foreach ($today_rows as $row) : $bullets = $row['explainability']; ?>
+                        <tr>
+                            <td><?php echo esc_html((string) round((float) $row['score'], 1)); ?></td>
+                            <td><?php echo esc_html((string) $row['opportunity_type']); ?></td>
+                            <td><code><?php echo esc_html((string) $row['canonical_url']); ?></code></td>
+                            <td><?php echo esc_html((string) ($row['cluster_key'] ?: '—')); ?></td>
+                            <td><?php echo esc_html((string) ($row['next_best_action'] ?: 'Review needed')); ?></td>
+                            <td>I <?php echo esc_html((string) $row['impact_score']); ?> / K <?php echo esc_html((string) $row['chance_score']); ?> / V <?php echo esc_html((string) $row['confidence_score']); ?> / S <?php echo esc_html((string) $row['speed_score']); ?></td>
+                            <td><ul style="margin:0;padding-left:18px;"><?php foreach ($bullets as $bullet) : ?><li><?php echo esc_html((string) $bullet); ?></li><?php endforeach; ?></ul></td>
+                            <td><?php echo esc_html((string) $row['status']); ?></td>
+                            <td>
+                                <?php $actions = ['approve' => 'Approve', 'create_task' => 'Create task', 'dismiss' => 'Dismiss']; foreach ($actions as $action_key => $label) : ?>
+                                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form" style="margin-bottom:4px;">
+                                        <?php wp_nonce_field('sch_seo_cockpit_' . $action_key); ?>
+                                        <input type="hidden" name="action" value="sch_seo_cockpit_<?php echo esc_attr($action_key); ?>">
+                                        <input type="hidden" name="opportunity_id" value="<?php echo esc_attr((string) $row['opportunity_id']); ?>">
+                                        <button class="button button-small"><?php echo esc_html($label); ?></button>
+                                    </form>
+                                <?php endforeach; ?>
+                                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
+                                    <?php wp_nonce_field('sch_seo_cockpit_assign'); ?>
+                                    <input type="hidden" name="action" value="sch_seo_cockpit_assign">
+                                    <input type="hidden" name="opportunity_id" value="<?php echo esc_attr((string) $row['opportunity_id']); ?>">
+                                    <input type="number" name="owner_user_id" min="1" placeholder="User ID" style="width:85px;">
+                                    <button class="button button-small">Assign</button>
+                                </form>
+                                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form">
+                                    <?php wp_nonce_field('sch_seo_cockpit_due_date'); ?>
+                                    <input type="hidden" name="action" value="sch_seo_cockpit_due_date">
+                                    <input type="hidden" name="opportunity_id" value="<?php echo esc_attr((string) $row['opportunity_id']); ?>">
+                                    <input type="date" name="due_date">
+                                    <button class="button button-small">Due date</button>
+                                </form>
+                            </td>
+                        </tr>
+                    <?php endforeach; else : ?>
+                        <tr><td colspan="9">Nog geen opportunities. Run een handmatige refresh om de eerste data te genereren.</td></tr>
+                    <?php endif; ?>
+                    </tbody>
+                </table>
+            <?php elseif ($tab === 'settings-data-quality') : ?>
+                <h2>Data Quality</h2>
+                <table class="widefat striped"><tbody>
+                    <?php foreach ($data_quality as $label => $value) : ?><tr><th><?php echo esc_html($label); ?></th><td><?php echo esc_html((string) $value); ?></td></tr><?php endforeach; ?>
+                </tbody></table>
+            <?php else : ?>
+                <div class="sch-card"><h2 style="margin-top:0;"><?php echo esc_html(ucwords(str_replace('-', ' ', $tab))); ?></h2><p>Coming next in Sprint 2-6. Route, class en template zijn voorbereid.</p></div>
+            <?php endif; ?>
         </div>
         <?php
     }
@@ -9966,6 +10579,88 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'type' => $type,
             'search' => sanitize_text_field((string) ($_GET['search'] ?? '')),
             'seo_page_id' => max(0, (int) ($_GET['seo_page_id'] ?? 0)),
+        ];
+    }
+
+    private function get_seo_cockpit_today_board_rows(): array {
+        $where = ['1=1'];
+        $params = [];
+
+        $site_id = max(0, (int) ($_GET['site_id'] ?? 0));
+        $cluster_id = max(0, (int) ($_GET['cluster_id'] ?? 0));
+        $type = sanitize_key((string) ($_GET['opportunity_type'] ?? ''));
+        $effort = strtoupper(sanitize_key((string) ($_GET['effort'] ?? '')));
+        $confidence_band = sanitize_key((string) ($_GET['confidence_band'] ?? 'all'));
+
+        if ($site_id > 0) {
+            $where[] = 'u.site_id=%d';
+            $params[] = $site_id;
+        }
+        if ($cluster_id > 0) {
+            $where[] = 'o.cluster_id=%d';
+            $params[] = $cluster_id;
+        }
+        if ($type !== '') {
+            $where[] = 'o.opportunity_type=%s';
+            $params[] = $type;
+        }
+        if ($effort !== '' && in_array($effort, ['S', 'M', 'L'], true)) {
+            $where[] = 't.effort=%s';
+            $params[] = $effort;
+        }
+        if ($confidence_band === 'high') {
+            $where[] = 'o.confidence_score>=70';
+        } elseif ($confidence_band === 'medium') {
+            $where[] = 'o.confidence_score>=40 AND o.confidence_score<70';
+        } elseif ($confidence_band === 'low') {
+            $where[] = 'o.confidence_score<40';
+        }
+
+        $sql = "SELECT o.*, u.canonical_url, c.cluster_key, t.status AS task_status
+                FROM {$this->table('seo_opportunity')} o
+                LEFT JOIN {$this->table('seo_url')} u ON u.canonical_url_id=o.canonical_url_id
+                LEFT JOIN {$this->table('seo_cluster')} c ON c.id=o.cluster_id
+                LEFT JOIN {$this->table('seo_task')} t ON t.opportunity_id=o.opportunity_id
+                WHERE " . implode(' AND ', $where) . "
+                ORDER BY o.score DESC, o.updated_at DESC
+                LIMIT 15";
+        $rows = $params ? (array) $this->db->get_results($this->db->prepare($sql, ...$params), ARRAY_A) : (array) $this->db->get_results($sql, ARRAY_A);
+        foreach ($rows as &$row) {
+            $decoded = $row['explainability_json'] ? json_decode((string) $row['explainability_json'], true) : [];
+            $bullets = is_array($decoded) ? array_values($decoded) : [];
+            while (count($bullets) < 3) {
+                $bullets[] = 'Nog onvoldoende bewijs, handmatige validatie aanbevolen.';
+            }
+            $row['explainability'] = array_slice($bullets, 0, 5);
+            if (!empty($row['task_status'])) {
+                $row['status'] = (string) $row['task_status'];
+            }
+        }
+        unset($row);
+        return $rows;
+    }
+
+    private function get_seo_cockpit_data_quality_stats(): array {
+        $url_total = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('seo_url')}");
+        $cluster_total = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('seo_cluster')}");
+        $open_opps = (int) $this->db->get_var($this->db->prepare(
+            "SELECT COUNT(*) FROM {$this->table('seo_opportunity')} WHERE status IN (%s,%s)",
+            'suggested',
+            'approved'
+        ));
+        $incomplete = (int) $this->db->get_var("SELECT COUNT(*) FROM {$this->table('seo_opportunity')} WHERE confidence_score<40");
+        $duplicates = (int) $this->db->get_var("SELECT COUNT(*) FROM (SELECT canonical_url_id, COUNT(*) c FROM {$this->table('seo_url')} GROUP BY canonical_url_id HAVING c>1) d");
+        $duplicate_ratio = $url_total > 0 ? round(($duplicates / $url_total) * 100, 2) . '%' : '0%';
+        $last_refresh = (string) get_option(self::OPTION_SEO_COCKPIT_LAST_RUN, '—');
+        $cron_warning = $last_refresh === '' || strtotime($last_refresh) < strtotime('-36 hours') ? 'Cron stale of nog niet gedraaid.' : 'OK';
+        return [
+            'Aantal URLs' => $url_total,
+            'Aantal clusters' => $cluster_total,
+            'Open opportunities' => $open_opps,
+            'Incomplete data opportunities' => $incomplete,
+            'Duplicate canonical_url_id ratio' => $duplicate_ratio,
+            'Laatste cockpit refresh' => $last_refresh,
+            'Cron/Data waarschuwingen' => $cron_warning,
         ];
     }
 
