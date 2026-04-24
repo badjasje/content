@@ -13446,63 +13446,280 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         <?php
     }
 
+    private function get_feedback_workspace_rows(int $client_id, string $search): array {
+        $page_rows = [];
+        $params = [];
+        $feedback_sql = "SELECT client_id, page_url, COUNT(*) AS total_feedback FROM {$this->table('feedback_signals')} WHERE status='open'";
+        if ($client_id > 0) {
+            $feedback_sql .= " AND client_id=%d";
+            $params[] = $client_id;
+        }
+        $feedback_sql .= " GROUP BY client_id, page_url";
+        $feedback_rows = $params
+            ? (array) $this->db->get_results($this->db->prepare($feedback_sql, ...$params), ARRAY_A)
+            : (array) $this->db->get_results($feedback_sql, ARRAY_A);
+        foreach ($feedback_rows as $row) {
+            $key = ((int) ($row['client_id'] ?? 0)) . '|' . strtolower((string) ($row['page_url'] ?? ''));
+            if (!isset($page_rows[$key])) {
+                $page_rows[$key] = [
+                    'client_id' => (int) ($row['client_id'] ?? 0),
+                    'page_url' => (string) ($row['page_url'] ?? ''),
+                    'feedback_open' => 0,
+                    'serp_open' => 0,
+                    'serp_recommendations_open' => 0,
+                    'gsc_position' => null,
+                    'gsc_clicks' => null,
+                    'overlay_date' => '',
+                ];
+            }
+            $page_rows[$key]['feedback_open'] = (int) ($row['total_feedback'] ?? 0);
+        }
+
+        $params = [];
+        $serp_sql = "SELECT client_id, page_url, COUNT(*) AS total_serp FROM {$this->table('serp_signals')} WHERE status='open' AND page_url IS NOT NULL AND page_url<>''";
+        if ($client_id > 0) {
+            $serp_sql .= " AND client_id=%d";
+            $params[] = $client_id;
+        }
+        $serp_sql .= " GROUP BY client_id, page_url";
+        $serp_rows = $params
+            ? (array) $this->db->get_results($this->db->prepare($serp_sql, ...$params), ARRAY_A)
+            : (array) $this->db->get_results($serp_sql, ARRAY_A);
+        foreach ($serp_rows as $row) {
+            $key = ((int) ($row['client_id'] ?? 0)) . '|' . strtolower((string) ($row['page_url'] ?? ''));
+            if (!isset($page_rows[$key])) {
+                $page_rows[$key] = [
+                    'client_id' => (int) ($row['client_id'] ?? 0),
+                    'page_url' => (string) ($row['page_url'] ?? ''),
+                    'feedback_open' => 0,
+                    'serp_open' => 0,
+                    'serp_recommendations_open' => 0,
+                    'gsc_position' => null,
+                    'gsc_clicks' => null,
+                    'overlay_date' => '',
+                ];
+            }
+            $page_rows[$key]['serp_open'] = (int) ($row['total_serp'] ?? 0);
+        }
+
+        $params = [];
+        $recommendation_sql = "SELECT client_id, page_url, COUNT(*) AS total_recommendations FROM {$this->table('serp_recommendations')} WHERE status='open' AND page_url IS NOT NULL AND page_url<>''";
+        if ($client_id > 0) {
+            $recommendation_sql .= " AND client_id=%d";
+            $params[] = $client_id;
+        }
+        $recommendation_sql .= " GROUP BY client_id, page_url";
+        $recommendation_rows = $params
+            ? (array) $this->db->get_results($this->db->prepare($recommendation_sql, ...$params), ARRAY_A)
+            : (array) $this->db->get_results($recommendation_sql, ARRAY_A);
+        foreach ($recommendation_rows as $row) {
+            $key = ((int) ($row['client_id'] ?? 0)) . '|' . strtolower((string) ($row['page_url'] ?? ''));
+            if (!isset($page_rows[$key])) {
+                $page_rows[$key] = [
+                    'client_id' => (int) ($row['client_id'] ?? 0),
+                    'page_url' => (string) ($row['page_url'] ?? ''),
+                    'feedback_open' => 0,
+                    'serp_open' => 0,
+                    'serp_recommendations_open' => 0,
+                    'gsc_position' => null,
+                    'gsc_clicks' => null,
+                    'overlay_date' => '',
+                ];
+            }
+            $page_rows[$key]['serp_recommendations_open'] = (int) ($row['total_recommendations'] ?? 0);
+        }
+
+        $params = [];
+        $overlay_sql = "SELECT p.client_id, p.page_url, p.metric_date, p.gsc_position, p.gsc_clicks
+            FROM {$this->table('page_overlay_daily')} p
+            INNER JOIN (
+                SELECT client_id, page_url, MAX(metric_date) AS max_metric_date
+                FROM {$this->table('page_overlay_daily')}";
+        if ($client_id > 0) {
+            $overlay_sql .= " WHERE client_id=%d";
+            $params[] = $client_id;
+        }
+        $overlay_sql .= " GROUP BY client_id, page_url
+            ) latest ON latest.client_id=p.client_id AND latest.page_url=p.page_url AND latest.max_metric_date=p.metric_date";
+        $overlay_rows = $params
+            ? (array) $this->db->get_results($this->db->prepare($overlay_sql, ...$params), ARRAY_A)
+            : (array) $this->db->get_results($overlay_sql, ARRAY_A);
+        foreach ($overlay_rows as $row) {
+            $key = ((int) ($row['client_id'] ?? 0)) . '|' . strtolower((string) ($row['page_url'] ?? ''));
+            if (!isset($page_rows[$key])) {
+                $page_rows[$key] = [
+                    'client_id' => (int) ($row['client_id'] ?? 0),
+                    'page_url' => (string) ($row['page_url'] ?? ''),
+                    'feedback_open' => 0,
+                    'serp_open' => 0,
+                    'serp_recommendations_open' => 0,
+                    'gsc_position' => null,
+                    'gsc_clicks' => null,
+                    'overlay_date' => '',
+                ];
+            }
+            $page_rows[$key]['gsc_position'] = isset($row['gsc_position']) ? (float) $row['gsc_position'] : null;
+            $page_rows[$key]['gsc_clicks'] = isset($row['gsc_clicks']) ? (float) $row['gsc_clicks'] : null;
+            $page_rows[$key]['overlay_date'] = (string) ($row['metric_date'] ?? '');
+        }
+
+        $page_rows = array_values($page_rows);
+        if ($search !== '') {
+            $search = strtolower($search);
+            $page_rows = array_values(array_filter($page_rows, static function (array $row) use ($search): bool {
+                return strpos(strtolower((string) ($row['page_url'] ?? '')), $search) !== false;
+            }));
+        }
+
+        usort($page_rows, static function (array $a, array $b): int {
+            $total_a = (int) ($a['feedback_open'] ?? 0) + (int) ($a['serp_open'] ?? 0) + (int) ($a['serp_recommendations_open'] ?? 0);
+            $total_b = (int) ($b['feedback_open'] ?? 0) + (int) ($b['serp_open'] ?? 0) + (int) ($b['serp_recommendations_open'] ?? 0);
+            if ($total_a === $total_b) {
+                return strcmp((string) ($a['page_url'] ?? ''), (string) ($b['page_url'] ?? ''));
+            }
+            return $total_b <=> $total_a;
+        });
+
+        return array_slice($page_rows, 0, 500);
+    }
+
     public function render_feedback(): void {
         $client_id = (int) ($_GET['client_id'] ?? 0);
         $status = sanitize_key((string) ($_GET['status'] ?? 'open'));
+        $view = sanitize_key((string) ($_GET['view'] ?? 'workspace'));
+        $search = sanitize_text_field((string) ($_GET['search'] ?? ''));
         if (!in_array($status, ['open', 'ignored', 'resolved'], true)) {
             $status = 'open';
         }
+        if (!in_array($view, ['workspace', 'signals'], true)) {
+            $view = 'workspace';
+        }
+
+        $clients = (array) $this->db->get_results("SELECT id, name FROM {$this->table('clients')} ORDER BY name ASC");
+        $clients_by_id = [];
+        foreach ($clients as $client) {
+            $clients_by_id[(int) $client->id] = (string) $client->name;
+        }
+
+        $workspace_rows = $this->get_feedback_workspace_rows($client_id, $search);
+
         $sql = "SELECT * FROM {$this->table('feedback_signals')} WHERE status=%s";
         $params = [$status];
         if ($client_id > 0) {
             $sql .= " AND client_id=%d";
             $params[] = $client_id;
         }
+        if ($search !== '') {
+            $like = '%' . $this->db->esc_like($search) . '%';
+            $sql .= " AND page_url LIKE %s";
+            $params[] = $like;
+        }
         $sql .= " ORDER BY priority_score DESC, id DESC LIMIT 500";
         $rows = $this->db->get_results($this->db->prepare($sql, ...$params));
         ?>
         <div class="wrap"><h1>Feedback</h1><?php $this->render_admin_notice(); ?>
-            <form method="get"><input type="hidden" name="page" value="sch-feedback"><label>Klant ID <input type="number" name="client_id" value="<?php echo (int) $client_id; ?>"></label> <label>Status <select name="status"><?php foreach (['open', 'ignored', 'resolved'] as $s) : ?><option value="<?php echo esc_attr($s); ?>" <?php selected($status, $s); ?>><?php echo esc_html($s); ?></option><?php endforeach; ?></select></label> <button class="button button-primary">Filter</button></form>
-            <table class="widefat striped"><thead><tr><th>Type</th><th>Severity</th><th>Status</th><th>Priority</th><th>Titel</th><th>Actie</th><th>Pagina</th><th>Actions</th></tr></thead><tbody>
-            <?php if ($rows) : foreach ($rows as $row) : ?>
-                <?php
-                $evidence = json_decode((string) ($row->evidence_json ?? ''), true);
-                $ai_suggestion = is_array($evidence) ? ($evidence['ai_title_meta_suggestion'] ?? null) : null;
-                ?>
-                <tr>
-                    <td><?php echo esc_html((string) $row->signal_type); ?></td>
-                    <td><?php echo esc_html((string) $row->severity); ?></td>
-                    <td><?php echo esc_html((string) $row->status); ?></td>
-                    <td><?php echo esc_html((string) $row->priority_score); ?></td>
-                    <td><?php echo esc_html((string) $row->title); ?></td>
-                    <td><?php echo esc_html((string) $row->recommended_action); ?></td>
-                    <td>
-                        <?php if (!empty($row->page_url)) : ?>
-                            <a href="<?php echo esc_url((string) $row->page_url); ?>" target="_blank" rel="noopener noreferrer">
+            <p>Centraal werkscherm voor pagina's, rankings, feedback-recommendations en SERP-recommendations.</p>
+            <p>
+                <a href="<?php echo esc_url(add_query_arg(['page' => 'sch-feedback', 'view' => 'workspace', 'client_id' => $client_id, 'status' => $status, 'search' => $search], admin_url('admin.php'))); ?>" <?php if ($view === 'workspace') { echo 'style="font-weight:700;"'; } ?>>Workspace</a> |
+                <a href="<?php echo esc_url(add_query_arg(['page' => 'sch-feedback', 'view' => 'signals', 'client_id' => $client_id, 'status' => $status, 'search' => $search], admin_url('admin.php'))); ?>" <?php if ($view === 'signals') { echo 'style="font-weight:700;"'; } ?>>Feedback signals</a>
+            </p>
+            <form method="get">
+                <input type="hidden" name="page" value="sch-feedback">
+                <input type="hidden" name="view" value="<?php echo esc_attr($view); ?>">
+                <label>Klant
+                    <select name="client_id">
+                        <option value="0">Alle klanten</option>
+                        <?php foreach ($clients as $client) : ?>
+                            <option value="<?php echo (int) $client->id; ?>" <?php selected($client_id, (int) $client->id); ?>><?php echo esc_html((string) $client->name); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <label>Zoek URL <input type="text" name="search" value="<?php echo esc_attr($search); ?>" placeholder="/blog/"></label>
+                <?php if ($view === 'signals') : ?>
+                    <label>Status <select name="status"><?php foreach (['open', 'ignored', 'resolved'] as $s) : ?><option value="<?php echo esc_attr($s); ?>" <?php selected($status, $s); ?>><?php echo esc_html($s); ?></option><?php endforeach; ?></select></label>
+                <?php endif; ?>
+                <button class="button button-primary">Filter</button>
+            </form>
+
+            <?php if ($view === 'workspace') : ?>
+                <table class="widefat striped" style="margin-top:12px;">
+                    <thead>
+                        <tr>
+                            <th>Klant</th>
+                            <th>Pagina</th>
+                            <th>Laatste GSC positie</th>
+                            <th>GSC clicks</th>
+                            <th>Datum ranking</th>
+                            <th>Feedback recs (open)</th>
+                            <th>SERP signals (open)</th>
+                            <th>SERP recs (open)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    <?php if ($workspace_rows) : foreach ($workspace_rows as $row) : ?>
+                        <tr>
+                            <td><?php echo esc_html($clients_by_id[(int) ($row['client_id'] ?? 0)] ?? ('#' . (int) ($row['client_id'] ?? 0))); ?></td>
+                            <td>
+                                <?php if (!empty($row['page_url'])) : ?>
+                                    <a href="<?php echo esc_url((string) $row['page_url']); ?>" target="_blank" rel="noopener noreferrer">
+                                        <code><?php echo esc_html($this->normalize_page_path((string) $row['page_url'])); ?></code>
+                                    </a>
+                                <?php else : ?>
+                                    <code>(geen URL)</code>
+                                <?php endif; ?>
+                            </td>
+                            <td><?php echo isset($row['gsc_position']) ? esc_html(number_format((float) $row['gsc_position'], 1, ',', '.')) : '–'; ?></td>
+                            <td><?php echo isset($row['gsc_clicks']) ? esc_html(number_format((float) $row['gsc_clicks'], 0, ',', '.')) : '–'; ?></td>
+                            <td><?php echo !empty($row['overlay_date']) ? esc_html((string) $row['overlay_date']) : '–'; ?></td>
+                            <td><?php echo (int) ($row['feedback_open'] ?? 0); ?></td>
+                            <td><?php echo (int) ($row['serp_open'] ?? 0); ?></td>
+                            <td><?php echo (int) ($row['serp_recommendations_open'] ?? 0); ?></td>
+                        </tr>
+                    <?php endforeach; else : ?><tr><td colspan="8">Geen pagina's gevonden voor deze filters.</td></tr><?php endif; ?>
+                    </tbody>
+                </table>
+            <?php else : ?>
+                <table class="widefat striped" style="margin-top:12px;"><thead><tr><th>Type</th><th>Severity</th><th>Status</th><th>Priority</th><th>Titel</th><th>Actie</th><th>Pagina</th><th>Actions</th></tr></thead><tbody>
+                <?php if ($rows) : foreach ($rows as $row) : ?>
+                    <?php
+                    $evidence = json_decode((string) ($row->evidence_json ?? ''), true);
+                    $ai_suggestion = is_array($evidence) ? ($evidence['ai_title_meta_suggestion'] ?? null) : null;
+                    ?>
+                    <tr>
+                        <td><?php echo esc_html((string) $row->signal_type); ?></td>
+                        <td><?php echo esc_html((string) $row->severity); ?></td>
+                        <td><?php echo esc_html((string) $row->status); ?></td>
+                        <td><?php echo esc_html((string) $row->priority_score); ?></td>
+                        <td><?php echo esc_html((string) $row->title); ?></td>
+                        <td><?php echo esc_html((string) $row->recommended_action); ?></td>
+                        <td>
+                            <?php if (!empty($row->page_url)) : ?>
+                                <a href="<?php echo esc_url((string) $row->page_url); ?>" target="_blank" rel="noopener noreferrer">
+                                    <code><?php echo esc_html($this->normalize_page_path((string) $row->page_url)); ?></code>
+                                </a>
+                            <?php else : ?>
                                 <code><?php echo esc_html($this->normalize_page_path((string) $row->page_url)); ?></code>
-                            </a>
-                        <?php else : ?>
-                            <code><?php echo esc_html($this->normalize_page_path((string) $row->page_url)); ?></code>
-                        <?php endif; ?>
-                    </td>
-                    <td>
-                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_signal'); ?><input type="hidden" name="action" value="sch_mark_signal_resolved"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button">Resolve</button></form>
-                        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_signal'); ?><input type="hidden" name="action" value="sch_mark_signal_ignored"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button">Ignore</button></form>
-                        <?php if ((string) $row->recommended_action === 'optimize_title_meta') : ?>
-                            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_signal'); ?><input type="hidden" name="action" value="sch_generate_feedback_ai_suggestion"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button button-primary">Genereer AI title/meta</button></form>
-                        <?php endif; ?>
-                        <?php if (is_array($ai_suggestion)) : ?>
-                            <div style="margin-top:8px; font-size:12px; line-height:1.45;">
-                                <strong>AI suggestie</strong><br>
-                                <strong>Originele titel:</strong> <?php echo esc_html((string) ($ai_suggestion['original_title'] ?? '')); ?><br>
-                                <strong>Meta title:</strong> <?php echo esc_html((string) ($ai_suggestion['meta_title'] ?? '')); ?><br>
-                                <strong>Meta description:</strong> <?php echo esc_html((string) ($ai_suggestion['meta_description'] ?? '')); ?><br>
-                                <strong>Waarom:</strong> <?php echo esc_html((string) ($ai_suggestion['reasoning'] ?? '')); ?>
-                            </div>
-                        <?php endif; ?>
-                    </td>
-                </tr>
-            <?php endforeach; else : ?><tr><td colspan="8">Geen signalen gevonden.</td></tr><?php endif; ?></tbody></table>
+                            <?php endif; ?>
+                        </td>
+                        <td>
+                            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_signal'); ?><input type="hidden" name="action" value="sch_mark_signal_resolved"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button">Resolve</button></form>
+                            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_signal'); ?><input type="hidden" name="action" value="sch_mark_signal_ignored"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button">Ignore</button></form>
+                            <?php if ((string) $row->recommended_action === 'optimize_title_meta') : ?>
+                                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-inline-form"><?php wp_nonce_field('sch_mark_signal'); ?><input type="hidden" name="action" value="sch_generate_feedback_ai_suggestion"><input type="hidden" name="signal_id" value="<?php echo (int) $row->id; ?>"><button class="button button-primary">Genereer AI title/meta</button></form>
+                            <?php endif; ?>
+                            <?php if (is_array($ai_suggestion)) : ?>
+                                <div style="margin-top:8px; font-size:12px; line-height:1.45;">
+                                    <strong>AI suggestie</strong><br>
+                                    <strong>Originele titel:</strong> <?php echo esc_html((string) ($ai_suggestion['original_title'] ?? '')); ?><br>
+                                    <strong>Meta title:</strong> <?php echo esc_html((string) ($ai_suggestion['meta_title'] ?? '')); ?><br>
+                                    <strong>Meta description:</strong> <?php echo esc_html((string) ($ai_suggestion['meta_description'] ?? '')); ?><br>
+                                    <strong>Waarom:</strong> <?php echo esc_html((string) ($ai_suggestion['reasoning'] ?? '')); ?>
+                                </div>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                <?php endforeach; else : ?><tr><td colspan="8">Geen signalen gevonden.</td></tr><?php endif; ?></tbody></table>
+            <?php endif; ?>
         </div>
         <?php
     }
