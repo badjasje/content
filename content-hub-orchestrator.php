@@ -10076,6 +10076,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
     private function sync_seo_pages(int $client_id = 0): int {
         $count = 0;
+        $scrape_cache = [];
+        $scrape_budget = 60;
         $where = $client_id > 0 ? $this->db->prepare('WHERE a.client_id=%d', $client_id) : '';
         $article_rows = (array) $this->db->get_results(
             "SELECT a.id, a.client_id, a.site_id, a.remote_url, a.canonical_url, a.title, a.meta_title, a.meta_description, a.content, a.updated_at
@@ -10086,18 +10088,32 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             if ($url === '') {
                 continue;
             }
+            $existing_title = (string) ($article->title ?? '');
+            $existing_meta_title = (string) ($article->meta_title ?? '');
+            $existing_meta_description = (string) ($article->meta_description ?? '');
+            $needs_scrape = ($existing_title === '' || $existing_meta_title === '' || $existing_meta_description === '');
+            $scraped = [];
+            if ($needs_scrape && $scrape_budget > 0) {
+                if (!array_key_exists($url, $scrape_cache)) {
+                    $scrape_cache[$url] = $this->scrape_seo_page_metadata($url);
+                    $scrape_budget--;
+                }
+                $scraped = (array) ($scrape_cache[$url] ?? []);
+            }
             $page_id = $this->upsert_seo_page([
                 'client_id' => (int) $article->client_id,
                 'site_id' => (int) $article->site_id,
                 'article_id' => (int) $article->id,
                 'url' => $url,
-                'title' => (string) $article->title,
-                'h1' => (string) $article->title,
-                'meta_title' => (string) $article->meta_title,
-                'meta_description' => (string) ($article->meta_description ?? ''),
-                'canonical_url' => (string) ($article->canonical_url ?? ''),
-                'status_code' => 200,
-                'word_count' => str_word_count(wp_strip_all_tags((string) $article->content)),
+                'title' => $existing_title !== '' ? $existing_title : (string) ($scraped['title'] ?? ''),
+                'h1' => $existing_title !== '' ? $existing_title : (string) ($scraped['h1'] ?? ''),
+                'meta_title' => $existing_meta_title !== '' ? $existing_meta_title : (string) ($scraped['meta_title'] ?? ''),
+                'meta_description' => $existing_meta_description !== '' ? $existing_meta_description : (string) ($scraped['meta_description'] ?? ''),
+                'canonical_url' => (string) ($article->canonical_url ?: ($scraped['canonical_url'] ?? '')),
+                'status_code' => !empty($scraped['status_code']) ? (int) $scraped['status_code'] : 200,
+                'word_count' => !empty($article->content)
+                    ? str_word_count(wp_strip_all_tags((string) $article->content))
+                    : (int) ($scraped['word_count'] ?? 0),
                 'page_type' => 'article',
                 'last_crawled_at' => (string) $article->updated_at,
             ]);
@@ -10114,11 +10130,27 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
              ORDER BY impressions DESC LIMIT 3000"
         );
         foreach ($gsc_rows as $row) {
+            $url = (string) $row->page_url;
+            $scraped = [];
+            if ($url !== '' && $scrape_budget > 0) {
+                if (!array_key_exists($url, $scrape_cache)) {
+                    $scrape_cache[$url] = $this->scrape_seo_page_metadata($url);
+                    $scrape_budget--;
+                }
+                $scraped = (array) ($scrape_cache[$url] ?? []);
+            }
             $page_id = $this->upsert_seo_page([
                 'client_id' => (int) $row->client_id,
                 'site_id' => (int) ($row->site_id ?? 0),
-                'url' => (string) $row->page_url,
+                'url' => $url,
                 'path' => (string) $row->page_path,
+                'title' => (string) ($scraped['title'] ?? ''),
+                'h1' => (string) ($scraped['h1'] ?? ''),
+                'meta_title' => (string) ($scraped['meta_title'] ?? ''),
+                'meta_description' => (string) ($scraped['meta_description'] ?? ''),
+                'canonical_url' => (string) ($scraped['canonical_url'] ?? ''),
+                'status_code' => (int) ($scraped['status_code'] ?? 0),
+                'word_count' => (int) ($scraped['word_count'] ?? 0),
                 'gsc_clicks' => (float) $row->clicks,
                 'gsc_impressions' => (float) $row->impressions,
                 'gsc_ctr' => (float) $row->ctr,
@@ -10130,6 +10162,69 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             }
         }
         return $count;
+    }
+
+    private function scrape_seo_page_metadata(string $url): array {
+        $url = $this->normalize_page_url($url);
+        if ($url === '') {
+            return [];
+        }
+
+        $response = wp_remote_get($url, [
+            'timeout' => 15,
+            'redirection' => 5,
+            'headers' => [
+                'User-Agent' => 'ShortcutContentHubBot/0.7.0 (+WordPress)',
+                'Accept' => 'text/html,application/xhtml+xml',
+            ],
+        ]);
+
+        if (is_wp_error($response)) {
+            return [];
+        }
+
+        $status_code = (int) wp_remote_retrieve_response_code($response);
+        $body = (string) wp_remote_retrieve_body($response);
+        if ($status_code < 200 || $status_code >= 400 || $body === '') {
+            return ['status_code' => $status_code];
+        }
+
+        $title = '';
+        if (preg_match('~<title[^>]*>(.*?)</title>~is', $body, $match)) {
+            $title = sanitize_text_field(trim(html_entity_decode(wp_strip_all_tags((string) $match[1]), ENT_QUOTES | ENT_HTML5)));
+        }
+
+        $h1 = '';
+        if (preg_match('~<h1[^>]*>(.*?)</h1>~is', $body, $match)) {
+            $h1 = sanitize_text_field(trim(html_entity_decode(wp_strip_all_tags((string) $match[1]), ENT_QUOTES | ENT_HTML5)));
+        }
+
+        $meta_description = '';
+        if (preg_match('~<meta[^>]+name=[\'"]description[\'"][^>]*content=[\'"]([^\'"]+)[\'"][^>]*>~is', $body, $match)
+            || preg_match('~<meta[^>]+content=[\'"]([^\'"]+)[\'"][^>]*name=[\'"]description[\'"][^>]*>~is', $body, $match)) {
+            $meta_description = sanitize_textarea_field(trim(html_entity_decode((string) $match[1], ENT_QUOTES | ENT_HTML5)));
+        }
+
+        $canonical_url = '';
+        if (preg_match('~<link[^>]+rel=[\'"]canonical[\'"][^>]*href=[\'"]([^\'"]+)[\'"][^>]*>~is', $body, $match)
+            || preg_match('~<link[^>]+href=[\'"]([^\'"]+)[\'"][^>]*rel=[\'"]canonical[\'"][^>]*>~is', $body, $match)) {
+            $canonical_url = $this->normalize_page_url((string) $match[1]);
+        }
+
+        $text = preg_replace('~<script\b[^>]*>.*?</script>~is', ' ', $body);
+        $text = preg_replace('~<style\b[^>]*>.*?</style>~is', ' ', (string) $text);
+        $text = preg_replace('~<noscript\b[^>]*>.*?</noscript>~is', ' ', (string) $text);
+        $word_count = str_word_count(wp_strip_all_tags((string) $text));
+
+        return [
+            'status_code' => $status_code,
+            'title' => $title,
+            'h1' => $h1,
+            'meta_title' => $title,
+            'meta_description' => $meta_description,
+            'canonical_url' => $canonical_url,
+            'word_count' => $word_count,
+        ];
     }
 
     private function run_seo_recommendation_engine(int $client_id = 0, int $site_id = 0): int {
