@@ -10282,6 +10282,15 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $service = new SCH_SEO_Canonical_URL_Service();
         $cluster_service = new SCH_SEO_Cluster_Service();
         $rows = (array) $this->db->get_results("SELECT id, site_id, remote_url, canonical_url FROM {$this->table('articles')} ORDER BY id DESC LIMIT 5000");
+        $gsc_rows = (array) $this->db->get_results(
+            "SELECT page_url, site_id
+             FROM {$this->table('gsc_page_metrics')}
+             WHERE page_url <> ''
+             GROUP BY page_url, site_id
+             ORDER BY MAX(metric_date) DESC
+             LIMIT 5000",
+            ARRAY_A
+        );
         $count = 0;
         foreach ($rows as $row) {
             $source_url = (string) ($row->canonical_url ?: $row->remote_url);
@@ -10292,6 +10301,18 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             $cluster_payload = $cluster_service->build_cluster_payload((int) $row->site_id, (string) $normalized['path']);
             $cluster_id = $this->seo_cockpit_upsert_cluster((int) $row->site_id, $cluster_payload);
             $this->seo_cockpit_upsert_url((int) $row->site_id, $normalized, $cluster_id);
+            $count++;
+        }
+        foreach ($gsc_rows as $gsc_row) {
+            $source_url = (string) ($gsc_row['page_url'] ?? '');
+            $site_id = (int) ($gsc_row['site_id'] ?? 0);
+            $normalized = $service->normalize_url($source_url);
+            if ($normalized['canonical_url_id'] === '') {
+                continue;
+            }
+            $cluster_payload = $cluster_service->build_cluster_payload($site_id, (string) $normalized['path']);
+            $cluster_id = $this->seo_cockpit_upsert_cluster($site_id, $cluster_payload);
+            $this->seo_cockpit_upsert_url($site_id, $normalized, $cluster_id);
             $count++;
         }
         $this->log('info', 'seo_cockpit', 'URL/cluster mapping refreshed', ['processed_urls' => $count]);
@@ -10372,6 +10393,11 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     }
 
     private function seo_cockpit_build_trend_snapshot(object $url): array {
+        $gsc_snapshot = $this->seo_cockpit_build_gsc_trend_snapshot($url);
+        if (!empty($gsc_snapshot)) {
+            return $gsc_snapshot;
+        }
+
         $seed = abs(crc32((string) $url->canonical_url_id . 'trend-v2'));
         $history_days = max(5, ($seed % 120) + 5);
         $cold_start = $history_days < 28;
@@ -10424,6 +10450,104 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'history_days' => $history_days,
             'cold_start' => $cold_start ? 1 : 0,
             'insufficient_history' => $insufficient_history ? 1 : 0,
+            'data_quality_warning' => $warning,
+        ];
+    }
+
+    private function seo_cockpit_build_gsc_trend_snapshot(object $url): array {
+        $canonical_url = (string) ($url->canonical_url ?? '');
+        if ($canonical_url === '') {
+            return [];
+        }
+
+        $site_id = !empty($url->site_id) ? (int) $url->site_id : 0;
+        $site_sql = $site_id > 0 ? ' AND site_id=%d' : '';
+        $site_params = $site_id > 0 ? [$site_id] : [];
+        $table = $this->table('gsc_page_metrics');
+
+        $recent_7_sql = "SELECT SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(position) AS position
+            FROM {$table}
+            WHERE page_url=%s{$site_sql} AND metric_date >= DATE_SUB(UTC_DATE(), INTERVAL 7 DAY)";
+        $prev_7_sql = "SELECT SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(position) AS position
+            FROM {$table}
+            WHERE page_url=%s{$site_sql} AND metric_date < DATE_SUB(UTC_DATE(), INTERVAL 7 DAY) AND metric_date >= DATE_SUB(UTC_DATE(), INTERVAL 14 DAY)";
+        $recent_28_sql = "SELECT SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(position) AS position
+            FROM {$table}
+            WHERE page_url=%s{$site_sql} AND metric_date >= DATE_SUB(UTC_DATE(), INTERVAL 28 DAY)";
+        $prev_28_sql = "SELECT SUM(clicks) AS clicks, SUM(impressions) AS impressions, AVG(position) AS position
+            FROM {$table}
+            WHERE page_url=%s{$site_sql} AND metric_date < DATE_SUB(UTC_DATE(), INTERVAL 28 DAY) AND metric_date >= DATE_SUB(UTC_DATE(), INTERVAL 56 DAY)";
+        $history_sql = "SELECT MIN(metric_date) AS first_seen, MAX(metric_date) AS last_seen, COUNT(*) AS sample_count
+            FROM {$table}
+            WHERE page_url=%s{$site_sql}";
+
+        $recent_7 = (array) $this->db->get_row($this->db->prepare($recent_7_sql, ...array_merge([$canonical_url], $site_params)), ARRAY_A);
+        $prev_7 = (array) $this->db->get_row($this->db->prepare($prev_7_sql, ...array_merge([$canonical_url], $site_params)), ARRAY_A);
+        $recent_28 = (array) $this->db->get_row($this->db->prepare($recent_28_sql, ...array_merge([$canonical_url], $site_params)), ARRAY_A);
+        $prev_28 = (array) $this->db->get_row($this->db->prepare($prev_28_sql, ...array_merge([$canonical_url], $site_params)), ARRAY_A);
+        $history = (array) $this->db->get_row($this->db->prepare($history_sql, ...array_merge([$canonical_url], $site_params)), ARRAY_A);
+
+        $sample_count = (int) ($history['sample_count'] ?? 0);
+        if ($sample_count <= 0) {
+            return [];
+        }
+
+        $recent_clicks_7d = (float) ($recent_7['clicks'] ?? 0);
+        $recent_clicks_28d = (float) ($recent_28['clicks'] ?? 0);
+        $recent_impressions_7d = (float) ($recent_7['impressions'] ?? 0);
+        $recent_impressions_28d = (float) ($recent_28['impressions'] ?? 0);
+        $prev_clicks_7d = (float) ($prev_7['clicks'] ?? 0);
+        $prev_clicks_28d = (float) ($prev_28['clicks'] ?? 0);
+        $prev_impressions_7d = (float) ($prev_7['impressions'] ?? 0);
+        $prev_impressions_28d = (float) ($prev_28['impressions'] ?? 0);
+
+        $ctr_7d = $recent_impressions_7d > 0 ? $recent_clicks_7d / $recent_impressions_7d : 0;
+        $ctr_28d = $recent_impressions_28d > 0 ? $recent_clicks_28d / $recent_impressions_28d : 0;
+        $prev_ctr_7d = $prev_impressions_7d > 0 ? $prev_clicks_7d / $prev_impressions_7d : 0;
+        $prev_ctr_28d = $prev_impressions_28d > 0 ? $prev_clicks_28d / $prev_impressions_28d : 0;
+
+        $avg_pos_7d = (float) ($recent_7['position'] ?? 0);
+        $avg_pos_28d = (float) ($recent_28['position'] ?? 0);
+        $prev_pos_7d = (float) ($prev_7['position'] ?? 0);
+        $prev_pos_28d = (float) ($prev_28['position'] ?? 0);
+
+        $history_days = 0;
+        $first_seen = (string) ($history['first_seen'] ?? '');
+        $last_seen = (string) ($history['last_seen'] ?? '');
+        if ($first_seen !== '' && $last_seen !== '') {
+            $history_days = (int) floor((strtotime($last_seen . ' 00:00:00 UTC') - strtotime($first_seen . ' 00:00:00 UTC')) / DAY_IN_SECONDS) + 1;
+        }
+        $history_days = max($history_days, $sample_count);
+
+        $cold_start = $history_days < 28 ? 1 : 0;
+        $insufficient_history = $history_days < 56 ? 1 : 0;
+        $warning = '';
+        if ($cold_start) {
+            $warning = 'Cold-start: minder dan 28 dagen GSC-historie.';
+        } elseif ($insufficient_history) {
+            $warning = 'Beperkte GSC-historie: minder dan 56 dagen beschikbaar.';
+        }
+
+        return [
+            'clicks_7d' => round($recent_clicks_7d, 2),
+            'clicks_28d' => round($recent_clicks_28d, 2),
+            'impressions_7d' => round($recent_impressions_7d, 2),
+            'impressions_28d' => round($recent_impressions_28d, 2),
+            'ctr_7d' => round($ctr_7d, 4),
+            'ctr_28d' => round($ctr_28d, 4),
+            'avg_position_7d' => round($avg_pos_7d, 2),
+            'avg_position_28d' => round($avg_pos_28d, 2),
+            'delta_clicks_7d' => $this->calculate_delta($recent_clicks_7d, $prev_clicks_7d),
+            'delta_clicks_28d' => $this->calculate_delta($recent_clicks_28d, $prev_clicks_28d),
+            'delta_impressions_7d' => $this->calculate_delta($recent_impressions_7d, $prev_impressions_7d),
+            'delta_impressions_28d' => $this->calculate_delta($recent_impressions_28d, $prev_impressions_28d),
+            'delta_ctr_7d' => $this->calculate_delta($ctr_7d, $prev_ctr_7d, 0.0001),
+            'delta_ctr_28d' => $this->calculate_delta($ctr_28d, $prev_ctr_28d, 0.0001),
+            'delta_position_7d' => round($avg_pos_7d - $prev_pos_7d, 4),
+            'delta_position_28d' => round($avg_pos_28d - $prev_pos_28d, 4),
+            'history_days' => $history_days,
+            'cold_start' => $cold_start,
+            'insufficient_history' => $insufficient_history,
             'data_quality_warning' => $warning,
         ];
     }
