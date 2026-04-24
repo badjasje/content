@@ -13611,11 +13611,71 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         return array_slice($page_rows, 0, 500);
     }
 
+    private function get_feedback_page_detail(int $client_id, string $page_url): array {
+        $safe_page_url = esc_url_raw($page_url);
+        if ($safe_page_url === '') {
+            return [
+                'feedback_signals' => [],
+                'serp_signals' => [],
+                'serp_recommendations' => [],
+                'ranking_history' => [],
+            ];
+        }
+
+        $feedback_signals = (array) $this->db->get_results($this->db->prepare(
+            "SELECT id, signal_type, severity, status, title, recommended_action, priority_score, updated_at
+             FROM {$this->table('feedback_signals')}
+             WHERE client_id=%d AND page_url=%s
+             ORDER BY status='open' DESC, priority_score DESC, id DESC
+             LIMIT 50",
+            $client_id,
+            $safe_page_url
+        ));
+
+        $serp_signals = (array) $this->db->get_results($this->db->prepare(
+            "SELECT id, signal_type, severity, status, title, recommended_action, priority_score, updated_at
+             FROM {$this->table('serp_signals')}
+             WHERE client_id=%d AND page_url=%s
+             ORDER BY status='open' DESC, priority_score DESC, id DESC
+             LIMIT 50",
+            $client_id,
+            $safe_page_url
+        ));
+
+        $serp_recommendations = (array) $this->db->get_results($this->db->prepare(
+            "SELECT id, recommendation_type, format_type, status, query, reasoning, priority_score, confidence_score, updated_at
+             FROM {$this->table('serp_recommendations')}
+             WHERE client_id=%d AND page_url=%s
+             ORDER BY status='open' DESC, priority_score DESC, id DESC
+             LIMIT 50",
+            $client_id,
+            $safe_page_url
+        ));
+
+        $ranking_history = (array) $this->db->get_results($this->db->prepare(
+            "SELECT metric_date, gsc_position, gsc_clicks, gsc_impressions, ga_sessions, ga_bounce_rate
+             FROM {$this->table('page_overlay_daily')}
+             WHERE client_id=%d AND page_url=%s
+             ORDER BY metric_date DESC
+             LIMIT 14",
+            $client_id,
+            $safe_page_url
+        ));
+
+        return [
+            'feedback_signals' => $feedback_signals,
+            'serp_signals' => $serp_signals,
+            'serp_recommendations' => $serp_recommendations,
+            'ranking_history' => $ranking_history,
+        ];
+    }
+
     public function render_feedback(): void {
         $client_id = (int) ($_GET['client_id'] ?? 0);
         $status = sanitize_key((string) ($_GET['status'] ?? 'open'));
         $view = sanitize_key((string) ($_GET['view'] ?? 'workspace'));
         $search = sanitize_text_field((string) ($_GET['search'] ?? ''));
+        $selected_page = esc_url_raw((string) ($_GET['page_url'] ?? ''));
         if (!in_array($status, ['open', 'ignored', 'resolved'], true)) {
             $status = 'open';
         }
@@ -13630,6 +13690,10 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
 
         $workspace_rows = $this->get_feedback_workspace_rows($client_id, $search);
+        $selected_detail = null;
+        if ($view === 'workspace' && $client_id > 0 && $selected_page !== '') {
+            $selected_detail = $this->get_feedback_page_detail($client_id, $selected_page);
+        }
 
         $sql = "SELECT * FROM {$this->table('feedback_signals')} WHERE status=%s";
         $params = [$status];
@@ -13648,12 +13712,15 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         <div class="wrap"><h1>Feedback</h1><?php $this->render_admin_notice(); ?>
             <p>Centraal werkscherm voor pagina's, rankings, feedback-recommendations en SERP-recommendations.</p>
             <p>
-                <a href="<?php echo esc_url(add_query_arg(['page' => 'sch-feedback', 'view' => 'workspace', 'client_id' => $client_id, 'status' => $status, 'search' => $search], admin_url('admin.php'))); ?>" <?php if ($view === 'workspace') { echo 'style="font-weight:700;"'; } ?>>Workspace</a> |
+                <a href="<?php echo esc_url(add_query_arg(['page' => 'sch-feedback', 'view' => 'workspace', 'client_id' => $client_id, 'status' => $status, 'search' => $search, 'page_url' => $selected_page], admin_url('admin.php'))); ?>" <?php if ($view === 'workspace') { echo 'style="font-weight:700;"'; } ?>>Workspace</a> |
                 <a href="<?php echo esc_url(add_query_arg(['page' => 'sch-feedback', 'view' => 'signals', 'client_id' => $client_id, 'status' => $status, 'search' => $search], admin_url('admin.php'))); ?>" <?php if ($view === 'signals') { echo 'style="font-weight:700;"'; } ?>>Feedback signals</a>
             </p>
             <form method="get">
                 <input type="hidden" name="page" value="sch-feedback">
                 <input type="hidden" name="view" value="<?php echo esc_attr($view); ?>">
+                <?php if ($view === 'workspace' && $selected_page !== '') : ?>
+                    <input type="hidden" name="page_url" value="<?php echo esc_attr($selected_page); ?>">
+                <?php endif; ?>
                 <label>Klant
                     <select name="client_id">
                         <option value="0">Alle klanten</option>
@@ -13681,6 +13748,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                             <th>Feedback recs (open)</th>
                             <th>SERP signals (open)</th>
                             <th>SERP recs (open)</th>
+                            <th>Drilldown</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -13702,10 +13770,100 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                             <td><?php echo (int) ($row['feedback_open'] ?? 0); ?></td>
                             <td><?php echo (int) ($row['serp_open'] ?? 0); ?></td>
                             <td><?php echo (int) ($row['serp_recommendations_open'] ?? 0); ?></td>
+                            <td>
+                                <?php if ($client_id > 0 && !empty($row['page_url'])) : ?>
+                                    <a class="button button-small" href="<?php echo esc_url(add_query_arg([
+                                        'page' => 'sch-feedback',
+                                        'view' => 'workspace',
+                                        'client_id' => $client_id,
+                                        'status' => $status,
+                                        'search' => $search,
+                                        'page_url' => (string) $row['page_url'],
+                                    ], admin_url('admin.php'))); ?>">
+                                        Open drilldown
+                                    </a>
+                                <?php else : ?>
+                                    <span style="color:#666;">Selecteer klant</span>
+                                <?php endif; ?>
+                            </td>
                         </tr>
-                    <?php endforeach; else : ?><tr><td colspan="8">Geen pagina's gevonden voor deze filters.</td></tr><?php endif; ?>
+                    <?php endforeach; else : ?><tr><td colspan="9">Geen pagina's gevonden voor deze filters.</td></tr><?php endif; ?>
                     </tbody>
                 </table>
+                <?php if ($selected_detail !== null) : ?>
+                    <div class="postbox" style="margin-top:16px; padding:16px;">
+                        <h2 style="margin-top:0;">Pagina drilldown: <code><?php echo esc_html($this->normalize_page_path($selected_page)); ?></code></h2>
+                        <p>In dit detail zie je per pagina waar de grootste kansen liggen: open signalen, aanbevelingen en recente prestatie-trend.</p>
+
+                        <h3>Feedback signals</h3>
+                        <table class="widefat striped">
+                            <thead><tr><th>Status</th><th>Type</th><th>Severity</th><th>Priority</th><th>Titel</th><th>Aanbevolen actie</th></tr></thead>
+                            <tbody>
+                            <?php if ($selected_detail['feedback_signals']) : foreach ($selected_detail['feedback_signals'] as $signal) : ?>
+                                <tr>
+                                    <td><?php echo esc_html((string) $signal->status); ?></td>
+                                    <td><?php echo esc_html((string) $signal->signal_type); ?></td>
+                                    <td><?php echo esc_html((string) $signal->severity); ?></td>
+                                    <td><?php echo esc_html((string) $signal->priority_score); ?></td>
+                                    <td><?php echo esc_html((string) $signal->title); ?></td>
+                                    <td><?php echo esc_html((string) $signal->recommended_action); ?></td>
+                                </tr>
+                            <?php endforeach; else : ?><tr><td colspan="6">Geen feedback signals voor deze pagina.</td></tr><?php endif; ?>
+                            </tbody>
+                        </table>
+
+                        <h3>SERP signals</h3>
+                        <table class="widefat striped">
+                            <thead><tr><th>Status</th><th>Type</th><th>Severity</th><th>Priority</th><th>Titel</th><th>Aanbevolen actie</th></tr></thead>
+                            <tbody>
+                            <?php if ($selected_detail['serp_signals']) : foreach ($selected_detail['serp_signals'] as $signal) : ?>
+                                <tr>
+                                    <td><?php echo esc_html((string) $signal->status); ?></td>
+                                    <td><?php echo esc_html((string) $signal->signal_type); ?></td>
+                                    <td><?php echo esc_html((string) $signal->severity); ?></td>
+                                    <td><?php echo esc_html((string) $signal->priority_score); ?></td>
+                                    <td><?php echo esc_html((string) $signal->title); ?></td>
+                                    <td><?php echo esc_html((string) $signal->recommended_action); ?></td>
+                                </tr>
+                            <?php endforeach; else : ?><tr><td colspan="6">Geen SERP signals voor deze pagina.</td></tr><?php endif; ?>
+                            </tbody>
+                        </table>
+
+                        <h3>SERP recommendations</h3>
+                        <table class="widefat striped">
+                            <thead><tr><th>Status</th><th>Type</th><th>Format</th><th>Priority</th><th>Confidence</th><th>Reden</th></tr></thead>
+                            <tbody>
+                            <?php if ($selected_detail['serp_recommendations']) : foreach ($selected_detail['serp_recommendations'] as $recommendation) : ?>
+                                <tr>
+                                    <td><?php echo esc_html((string) $recommendation->status); ?></td>
+                                    <td><?php echo esc_html((string) $recommendation->recommendation_type); ?></td>
+                                    <td><?php echo esc_html((string) $recommendation->format_type); ?></td>
+                                    <td><?php echo esc_html((string) $recommendation->priority_score); ?></td>
+                                    <td><?php echo esc_html((string) round((float) $recommendation->confidence_score, 3)); ?></td>
+                                    <td><?php echo esc_html((string) $recommendation->reasoning); ?></td>
+                                </tr>
+                            <?php endforeach; else : ?><tr><td colspan="6">Geen SERP recommendations voor deze pagina.</td></tr><?php endif; ?>
+                            </tbody>
+                        </table>
+
+                        <h3>Recente prestatie (laatste 14 snapshots)</h3>
+                        <table class="widefat striped">
+                            <thead><tr><th>Datum</th><th>GSC positie</th><th>GSC clicks</th><th>GSC impressies</th><th>GA sessies</th><th>GA bounce rate</th></tr></thead>
+                            <tbody>
+                            <?php if ($selected_detail['ranking_history']) : foreach ($selected_detail['ranking_history'] as $history_row) : ?>
+                                <tr>
+                                    <td><?php echo esc_html((string) $history_row->metric_date); ?></td>
+                                    <td><?php echo esc_html((string) round((float) $history_row->gsc_position, 2)); ?></td>
+                                    <td><?php echo esc_html((string) round((float) $history_row->gsc_clicks, 0)); ?></td>
+                                    <td><?php echo esc_html((string) round((float) $history_row->gsc_impressions, 0)); ?></td>
+                                    <td><?php echo esc_html((string) round((float) $history_row->ga_sessions, 0)); ?></td>
+                                    <td><?php echo esc_html((string) round((float) $history_row->ga_bounce_rate, 4)); ?></td>
+                                </tr>
+                            <?php endforeach; else : ?><tr><td colspan="6">Geen ranking geschiedenis beschikbaar voor deze pagina.</td></tr><?php endif; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                <?php endif; ?>
             <?php else : ?>
                 <table class="widefat striped" style="margin-top:12px;"><thead><tr><th>Type</th><th>Severity</th><th>Status</th><th>Priority</th><th>Titel</th><th>Actie</th><th>Pagina</th><th>Actions</th></tr></thead><tbody>
                 <?php if ($rows) : foreach ($rows as $row) : ?>
