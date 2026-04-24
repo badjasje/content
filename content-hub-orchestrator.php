@@ -1872,11 +1872,11 @@ final class SCH_Orchestrator {
                     <tr>
                         <td><?php echo (int) $row->id; ?></td>
                         <td><?php echo esc_html($row->name); ?></td>
-                        <td><?php echo esc_html($row->website_url); ?></td>
+                        <td><?php echo wp_kses_post($this->render_clickable_url((string) $row->website_url)); ?></td>
                         <td><?php echo (int) ($row->max_posts_per_month ?? 0); ?></td>
-                        <td><?php echo esc_html(implode(' | ', array_map(static function ($v) { return (string) ($v['url'] ?? ''); }, $client_research))); ?></td>
+                        <td><?php echo wp_kses_post($this->render_clickable_url_list(array_map(static function ($v) { return (string) ($v['url'] ?? ''); }, $client_research))); ?></td>
                         <td><code><?php echo esc_html((string) ($row->gsc_property ?: '-')); ?></code></td>
-                        <td><?php echo esc_html($this->implode_target_strings($this->get_client_link_targets($row))); ?></td>
+                        <td><?php echo wp_kses_post($this->render_clickable_url_list(array_map(static function ($target) { return (string) ($target['url'] ?? ''); }, $this->get_client_link_targets($row)))); ?></td>
                         <td class="sch-actions">
                             <a href="<?php echo esc_url(admin_url('admin.php?page=sch-clients&edit=' . (int) $row->id)); ?>">Bewerken</a>
                             <a href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=sch_delete_client&id=' . (int) $row->id), 'sch_delete_client')); ?>" onclick="return confirm('Zeker weten?');">Verwijderen</a>
@@ -2035,7 +2035,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <tr>
                         <td><?php echo (int) $row->id; ?></td>
                         <td><?php echo esc_html($row->name); ?></td>
-                        <td><?php echo esc_html($row->base_url); ?></td>
+                        <td><?php echo wp_kses_post($this->render_clickable_url((string) $row->base_url)); ?></td>
                         <td><?php echo esc_html($row->default_status); ?></td>
                         <td><?php echo esc_html($row->default_category); ?></td>
                         <td><?php echo (int) $row->max_posts_per_day; ?></td>
@@ -2377,7 +2377,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                             <td>
                                 <strong><?php echo esc_html((string) ($row->site_name ?: 'Onbekend')); ?></strong>
                                 <?php if (!empty($row->site_base_url)) : ?>
-                                    <br><span class="sch-muted sch-code"><?php echo esc_html((string) $row->site_base_url); ?></span>
+                                    <br><span class="sch-muted sch-code"><?php echo wp_kses_post($this->render_clickable_url((string) $row->site_base_url)); ?></span>
                                 <?php endif; ?>
                                 <br>
                                 <label class="screen-reader-text" for="sch-site-<?php echo (int) $row->id; ?>">Publiceer op blog</label>
@@ -3134,6 +3134,34 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             }
         }
         return implode(' | ', $out);
+    }
+
+    private function render_clickable_url(string $url, string $label = ''): string {
+        $normalized_url = esc_url_raw($url);
+        if ($normalized_url === '') {
+            return esc_html($label !== '' ? $label : $url);
+        }
+
+        $display_label = $label !== '' ? $label : $normalized_url;
+
+        return sprintf(
+            '<a href="%1$s" target="_blank" rel="noopener noreferrer">%2$s</a>',
+            esc_url($normalized_url),
+            esc_html($display_label)
+        );
+    }
+
+    private function render_clickable_url_list(array $urls): string {
+        $items = [];
+        foreach ($urls as $url) {
+            $value = trim((string) $url);
+            if ($value === '') {
+                continue;
+            }
+            $items[] = $this->render_clickable_url($value, $value);
+        }
+
+        return $items ? implode(' | ', $items) : '—';
     }
 
     private function extract_backlinks_from_content(string $content, array $allowed_targets): array {
