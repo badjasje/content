@@ -6499,6 +6499,10 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         array $anchor_plan
     ): array {
         $previous_variants = $this->get_recent_article_variants((int) $client->id, (string) $keyword->main_keyword);
+        $contextual_enrichment = $this->build_contextual_enrichment_guidance(
+            (string) $keyword->main_keyword,
+            $secondary_keywords
+        );
 
         return [
             'main_keyword'       => (string) $keyword->main_keyword,
@@ -6524,8 +6528,57 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     'Hergebruik geen identieke CTA-formulering uit eerdere varianten.',
                 ],
             ],
+            'contextual_enrichment' => $contextual_enrichment,
             'previous_variants'  => $previous_variants,
         ];
+    }
+
+    private function build_contextual_enrichment_guidance(string $main_keyword, array $secondary_keywords): array {
+        $tokens = mb_strtolower(trim($main_keyword . ' ' . implode(' ', $secondary_keywords)));
+        $guidance = [
+            'detected_theme' => 'generic',
+            'broader_angles' => [
+                'Koppel het hoofdonderwerp aan de volledige gebruikscyclus: kiezen, gebruiken, onderhouden en vervangen.',
+                'Voeg minstens één praktische sectie toe met veelgemaakte fouten en hoe je ze voorkomt.',
+                'Gebruik concrete mini-adviezen of checklist-punten die direct toepasbaar zijn.',
+            ],
+            'style_rule' => 'Maak de verbreding natuurlijk: geen los blok, maar logisch verweven met het hoofdonderwerp en de zoekintentie.',
+        ];
+
+        if ($this->contains_any($tokens, ['ring', 'sieraad', 'sieraden', 'juweel', 'juwelen', 'ketting', 'armband', 'oorbel', 'edelsteen'])) {
+            return [
+                'detected_theme' => 'jewelry',
+                'broader_angles' => [
+                    'Neem een korte sectie op over onderhoud: schoonmaken per materiaal, veilig bewaren en slijtage herkennen.',
+                    'Leg uit hoe dagelijks gebruik (water, parfum, sporten, schoonmaakmiddelen) de levensduur beïnvloedt.',
+                    'Geef tips over maat, pasvorm en periodieke controle (bijvoorbeeld sluiting of zetting).',
+                ],
+                'style_rule' => 'Verwerk onderhoudstips alsof ze vanzelfsprekend onderdeel zijn van goed aankoop- en gebruiksadvies.',
+            ];
+        }
+
+        if ($this->contains_any($tokens, ['kleding', 'trui', 'broek', 'jurk', 'jas', 'shirt', 'blouse', 'mode', 'textiel', 'outfit'])) {
+            return [
+                'detected_theme' => 'fashion',
+                'broader_angles' => [
+                    'Voeg een praktische onderhoudssectie toe: wassen, drogen, strijken en bewaren per materiaalsoort.',
+                    'Benoem hoe pasvorm, draagfrequentie en seizoensgebruik invloed hebben op comfort en levensduur.',
+                    'Geef eenvoudige refresh- of reparatietips zodat de lezer langer met het kledingstuk doet.',
+                ],
+                'style_rule' => 'Maak onderhoud en verzorging onderdeel van het koop- en draagadvies, niet als los SEO-stuk.',
+            ];
+        }
+
+        return $guidance;
+    }
+
+    private function contains_any(string $haystack, array $needles): bool {
+        foreach ($needles as $needle) {
+            if ($needle !== '' && mb_strpos($haystack, (string) $needle) !== false) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private function get_recent_article_variants(int $client_id, string $main_keyword, int $limit = 8): array {
@@ -6638,6 +6691,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                         'use_a_distinct_opening_hook_vs_previous_variants' => true,
                         'use_a_distinct_h2_structure_vs_previous_variants' => true,
                         'use_a_distinct_cta_wording_vs_previous_variants' => true,
+                        'include_at_least_one_broader_but_matching_angle' => true,
+                        'broader_angle_must_feel_natural_not_forced' => true,
                     ],
                 ]
             ),
