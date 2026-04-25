@@ -681,6 +681,7 @@ final class SCH_Orchestrator {
             content_type VARCHAR(50) NOT NULL DEFAULT 'pillar',
             tone_of_voice VARCHAR(100) NOT NULL DEFAULT 'deskundig maar menselijk',
             target_word_count INT UNSIGNED NOT NULL DEFAULT 1200,
+            max_articles INT UNSIGNED NOT NULL DEFAULT 0,
             priority INT NOT NULL DEFAULT 10,
             status VARCHAR(50) NOT NULL DEFAULT 'queued',
             source VARCHAR(50) NOT NULL DEFAULT 'manual',
@@ -1442,6 +1443,7 @@ final class SCH_Orchestrator {
         $this->maybe_add_column($keywords, 'lifecycle_note', "ALTER TABLE {$keywords} ADD COLUMN lifecycle_note TEXT NULL AFTER lifecycle_status");
         $this->maybe_add_column($keywords, 'reviewed_at', "ALTER TABLE {$keywords} ADD COLUMN reviewed_at DATETIME NULL AFTER lifecycle_note");
         $this->maybe_add_column($keywords, 'target_site_categories', "ALTER TABLE {$keywords} ADD COLUMN target_site_categories LONGTEXT NULL AFTER target_site_ids");
+        $this->maybe_add_column($keywords, 'max_articles', "ALTER TABLE {$keywords} ADD COLUMN max_articles INT UNSIGNED NOT NULL DEFAULT 0 AFTER target_word_count");
         $this->maybe_add_column($jobs, 'attempts', "ALTER TABLE {$jobs} ADD COLUMN attempts INT UNSIGNED NOT NULL DEFAULT 0 AFTER status");
         $this->maybe_add_column($articles, 'backlinks_data', "ALTER TABLE {$articles} ADD COLUMN backlinks_data LONGTEXT NULL AFTER publish_status");
         $this->maybe_add_column($articles, 'featured_image_data', "ALTER TABLE {$articles} ADD COLUMN featured_image_data LONGTEXT NULL AFTER publish_status");
@@ -2134,6 +2136,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <tr><th>Type</th><td><select name="content_type"><option value="pillar" <?php selected(($edit->content_type ?? ''), 'pillar'); ?>>pillar</option><option value="supporting" <?php selected(($edit->content_type ?? ''), 'supporting'); ?>>supporting</option></select></td></tr>
                     <tr><th>Tone of voice</th><td><input type="text" name="tone_of_voice" value="<?php echo esc_attr($edit->tone_of_voice ?? 'deskundig maar menselijk'); ?>" class="regular-text"></td></tr>
                     <tr><th>Woordaantal</th><td><input type="number" name="target_word_count" value="<?php echo esc_attr($edit->target_word_count ?? 1200); ?>" min="300"></td></tr>
+                    <tr><th>Max artikelen</th><td><input type="number" name="max_articles" value="<?php echo esc_attr((string) ($edit->max_articles ?? 0)); ?>" min="0"><p class="description">0 = onbeperkt. Stel per keyword een bovengrens in voor het totale aantal artikelen.</p></td></tr>
                     <tr><th>Prioriteit</th><td><input type="number" name="priority" value="<?php echo esc_attr($edit->priority ?? 10); ?>"></td></tr>
                     <tr>
                         <th>Filter op blog-categorie</th>
@@ -2162,7 +2165,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 <a href="<?php echo esc_url(admin_url('admin.php?page=sch-keywords&view=all')); ?>" <?php if ($view === 'all') { echo 'style="font-weight:700;"'; } ?>>Alles (<?php echo (int) $all_count; ?>)</a>
             </p>
             <table class="widefat striped">
-                <thead><tr><th>ID</th><th>Klant</th><th>Keyword</th><th>Type</th><th>Bron</th><th>Impressions</th><th>Clicks</th><th>CTR</th><th>Positie</th><th>Status</th><th>Review</th><th>Acties</th></tr></thead>
+                <thead><tr><th>ID</th><th>Klant</th><th>Keyword</th><th>Type</th><th>Max artikelen</th><th>Bron</th><th>Impressions</th><th>Clicks</th><th>CTR</th><th>Positie</th><th>Status</th><th>Review</th><th>Acties</th></tr></thead>
                 <tbody>
                 <?php if ($rows) : foreach ($rows as $row) : ?>
                     <?php
@@ -2180,6 +2183,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                         <td><?php echo esc_html($row->client_name ?: ''); ?></td>
                         <td><?php echo esc_html($row->main_keyword); ?></td>
                         <td><?php echo esc_html($row->content_type); ?></td>
+                        <td><?php echo (int) ($row->max_articles ?? 0); ?></td>
                         <td><?php echo esc_html($row->source ?: 'manual'); ?></td>
                         <td><?php echo $metrics['impressions'] === null ? '&mdash;' : esc_html(number_format_i18n($metrics['impressions'], 0)); ?></td>
                         <td><?php echo $metrics['clicks'] === null ? '&mdash;' : esc_html(number_format_i18n($metrics['clicks'], 0)); ?></td>
@@ -2203,7 +2207,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                         </td>
                     </tr>
                 <?php endforeach; else : ?>
-                    <tr><td colspan="12">Nog geen keywords.</td></tr>
+                    <tr><td colspan="13">Nog geen keywords.</td></tr>
                 <?php endif; ?>
                 </tbody>
             </table>
@@ -4040,6 +4044,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'content_type'       => sanitize_text_field($_POST['content_type'] ?? 'pillar'),
             'tone_of_voice'      => sanitize_text_field($_POST['tone_of_voice'] ?? 'deskundig maar menselijk'),
             'target_word_count'  => max(300, (int) ($_POST['target_word_count'] ?? 1200)),
+            'max_articles'       => max(0, (int) ($_POST['max_articles'] ?? 0)),
             'priority'           => (int) ($_POST['priority'] ?? 10),
             'status'             => 'queued',
             'source'             => 'manual',
@@ -5017,6 +5022,28 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'budget' => $monthly_budget,
             ]);
             return 0;
+        }
+        $max_articles = max(0, (int) ($keyword->max_articles ?? 0));
+        if ($max_articles > 0) {
+            $existing_articles = (int) $this->db->get_var($this->db->prepare(
+                "SELECT COUNT(*) FROM {$this->table('articles')} WHERE keyword_id=%d",
+                $keyword_id
+            ));
+            $pending_jobs = (int) $this->db->get_var($this->db->prepare(
+                "SELECT COUNT(*) FROM {$this->table('jobs')} WHERE keyword_id=%d AND status IN ('queued','processing','awaiting_approval')",
+                $keyword_id
+            ));
+            $remaining_for_keyword = $max_articles - ($existing_articles + $pending_jobs);
+            if ($remaining_for_keyword <= 0) {
+                $this->log('info', 'jobs', 'Geen jobs aangemaakt: max artikelen voor keyword bereikt', [
+                    'keyword_id' => $keyword_id,
+                    'max_articles' => $max_articles,
+                    'existing_articles' => $existing_articles,
+                    'pending_jobs' => $pending_jobs,
+                ]);
+                return 0;
+            }
+            $monthly_budget['remaining'] = min((int) $monthly_budget['remaining'], $remaining_for_keyword);
         }
 
         $conflicts = $this->find_cannibalization_conflicts($keyword);
@@ -14458,7 +14485,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             $params[] = $lifecycle === 'trashed' ? 'trash' : $lifecycle;
         }
 
-        $sql = "SELECT k.id, k.client_id, c.name AS client_name, k.main_keyword, k.content_type, k.priority, k.status, k.lifecycle_status, k.updated_at
+        $sql = "SELECT k.id, k.client_id, c.name AS client_name, k.main_keyword, k.content_type, k.priority, k.max_articles, k.status, k.lifecycle_status, k.updated_at
                 FROM {$this->table('keywords')} k
                 LEFT JOIN {$this->table('clients')} c ON c.id=k.client_id
                 WHERE " . implode(' AND ', $where) . "
@@ -14489,6 +14516,9 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $update = ['updated_at' => $this->now()];
         if (isset($payload['priority'])) {
             $update['priority'] = max(0, min(999, (int) $payload['priority']));
+        }
+        if (isset($payload['max_articles'])) {
+            $update['max_articles'] = max(0, (int) $payload['max_articles']);
         }
         if (isset($payload['status'])) {
             $status = sanitize_key((string) $payload['status']);

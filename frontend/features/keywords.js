@@ -113,6 +113,7 @@ export async function renderKeywords(container, toast) {
                           <th>Type</th>
                           <th>Status</th>
                           <th>Lifecycle</th>
+                          <th>Max artikelen</th>
                           <th>Priority</th>
                           <th>Acties</th>
                         </tr>
@@ -127,6 +128,12 @@ export async function renderKeywords(container, toast) {
                               <td>${escapeHtml(row.content_type || '-')}</td>
                               <td><span class="${statusBadgeClass(row.status)}">${escapeHtml(row.status || '-')}</span></td>
                               <td><span class="sch-app-chip">${escapeHtml(normalizeLifecycle(row.lifecycle_status || '-'))}</span></td>
+                              <td>
+                                <div class="sch-inline-edit">
+                                  <input type="number" min="0" value="${Number.isFinite(Number(row.max_articles)) ? Number(row.max_articles) : 0}" data-max-articles-input="${row.id}" style="width:90px;">
+                                  <button type="button" data-max-articles-save="${row.id}">Opslaan</button>
+                                </div>
+                              </td>
                               <td>${Number.isFinite(Number(row.priority)) ? Number(row.priority) : '-'}</td>
                               <td class="sch-actions-inline">
                                 <button type="button" data-kw-queue="${row.id}">Queue</button>
@@ -186,6 +193,14 @@ export async function renderKeywords(container, toast) {
       });
       container.querySelectorAll('[data-kw-restore]').forEach((btn) => {
         btn.addEventListener('click', () => updateKeyword(btn.dataset.kwRestore, { lifecycle_status: 'active' }, 'Keyword hersteld'));
+      });
+      container.querySelectorAll('[data-max-articles-save]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const id = btn.dataset.maxArticlesSave;
+          const input = container.querySelector(`[data-max-articles-input="${id}"]`);
+          const maxArticles = Math.max(0, Number.parseInt(input?.value ?? '0', 10) || 0);
+          await updateKeyword(id, { max_articles: maxArticles }, 'Max artikelen bijgewerkt');
+        });
       });
 
       container.querySelectorAll('[data-bulk-action]').forEach((btn) => {
