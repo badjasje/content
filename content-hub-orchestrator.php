@@ -2372,7 +2372,27 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <?php if ($rows) : foreach ($rows as $row) : ?>
                         <tr>
                             <td><input class="sch-article-check" type="checkbox" name="article_ids[]" value="<?php echo (int) $row->id; ?>"></td>
-                            <td><strong><?php echo esc_html((string) $row->title); ?></strong><br><span class="sch-muted sch-code"><?php echo esc_html((string) $row->slug); ?></span></td>
+                            <td>
+                                <strong><?php echo esc_html((string) $row->title); ?></strong><br><span class="sch-muted sch-code"><?php echo esc_html((string) $row->slug); ?></span>
+                                <div style="margin-top:8px;">
+                                    <label class="screen-reader-text" for="sch-title-<?php echo (int) $row->id; ?>">Titel</label>
+                                    <input
+                                        id="sch-title-<?php echo (int) $row->id; ?>"
+                                        type="text"
+                                        name="article_updates[<?php echo (int) $row->id; ?>][title]"
+                                        value="<?php echo esc_attr((string) $row->title); ?>"
+                                        style="width:100%;margin-bottom:6px;"
+                                    >
+                                    <label class="screen-reader-text" for="sch-slug-<?php echo (int) $row->id; ?>">Slug</label>
+                                    <input
+                                        id="sch-slug-<?php echo (int) $row->id; ?>"
+                                        type="text"
+                                        name="article_updates[<?php echo (int) $row->id; ?>][slug]"
+                                        value="<?php echo esc_attr((string) $row->slug); ?>"
+                                        style="width:100%;"
+                                    >
+                                </div>
+                            </td>
                             <td><?php echo esc_html((string) ($row->client_name ?: '')); ?></td>
                             <td>
                                 <strong><?php echo esc_html((string) ($row->site_name ?: 'Onbekend')); ?></strong>
@@ -2400,11 +2420,21 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                                 <?php else : ?>
                                     <span class="sch-muted">Geen content gevonden.</span>
                                 <?php endif; ?>
+                                <div style="margin-top:8px;">
+                                    <label class="screen-reader-text" for="sch-content-<?php echo (int) $row->id; ?>">Content</label>
+                                    <textarea
+                                        id="sch-content-<?php echo (int) $row->id; ?>"
+                                        name="article_updates[<?php echo (int) $row->id; ?>][content]"
+                                        rows="10"
+                                        style="width:100%;"
+                                    ><?php echo esc_textarea((string) $row->content); ?></textarea>
+                                </div>
                             </td>
                             <td><?php echo esc_html((string) $row->created_at); ?></td>
                             <td>
                                 <button class="button button-secondary" type="submit" name="rewrite_content_article_id" value="<?php echo (int) $row->id; ?>">Herschrijf content</button>
                                 <button class="button button-secondary" type="submit" name="rewrite_full_article_id" value="<?php echo (int) $row->id; ?>">Herschrijf compleet</button>
+                                <button class="button button-secondary" type="submit" name="save_article_id" value="<?php echo (int) $row->id; ?>">Wijzigingen opslaan</button>
                                 <button class="button button-primary" type="submit" name="publish_now_article_id" value="<?php echo (int) $row->id; ?>">Publiceren</button>
                                 <button class="button button-link-delete" type="submit" name="delete_article_id" value="<?php echo (int) $row->id; ?>" onclick="return confirm('Weet je zeker dat je dit artikel wilt verwijderen?');">Verwijderen</button>
                             </td>
@@ -4563,6 +4593,20 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             $this->redirect_with_message('sch-editorial', 'Artikel verwijderd.');
         }
 
+        $single_save_article_id = (int) ($_POST['save_article_id'] ?? 0);
+        if ($single_save_article_id > 0) {
+            try {
+                $this->save_editorial_article_changes($single_save_article_id, (array) ($_POST['article_updates'] ?? []));
+                $this->redirect_with_message('sch-editorial', 'Artikel opgeslagen.');
+            } catch (Throwable $e) {
+                $this->log('error', 'editorial', 'Handmatig opslaan van artikel mislukt', [
+                    'article_id' => $single_save_article_id,
+                    'error' => $e->getMessage(),
+                ]);
+                $this->redirect_with_message('sch-editorial', 'Opslaan mislukt. Check logs.', 'error');
+            }
+        }
+
         $bulk_delete_articles = isset($_POST['bulk_delete_articles']);
         $article_ids = array_map('intval', (array) ($_POST['article_ids'] ?? []));
         $article_ids = array_values(array_filter($article_ids, static function (int $id): bool {
@@ -4750,6 +4794,41 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
         if ($updated === false) {
             throw new RuntimeException('Opslaan van herschreven content mislukt.');
+        }
+    }
+
+    private function save_editorial_article_changes(int $article_id, array $all_updates): void {
+        if ($article_id <= 0) {
+            throw new RuntimeException('Artikel niet gevonden.');
+        }
+
+        $raw_update = $all_updates[$article_id] ?? null;
+        if (!is_array($raw_update)) {
+            throw new RuntimeException('Geen wijzigingen ontvangen.');
+        }
+        $raw_update = wp_unslash($raw_update);
+
+        $title = sanitize_text_field((string) ($raw_update['title'] ?? ''));
+        $slug_input = sanitize_text_field((string) ($raw_update['slug'] ?? ''));
+        $content = wp_kses_post((string) ($raw_update['content'] ?? ''));
+
+        if ($title === '') {
+            throw new RuntimeException('Titel mag niet leeg zijn.');
+        }
+        $slug = sanitize_title($slug_input !== '' ? $slug_input : $title);
+        if ($slug === '') {
+            throw new RuntimeException('Slug mag niet leeg zijn.');
+        }
+
+        $updated = $this->db->update($this->table('articles'), [
+            'title' => $title,
+            'slug' => $slug,
+            'content' => $content,
+            'updated_at' => $this->now(),
+        ], ['id' => $article_id], ['%s', '%s', '%s', '%s'], ['%d']);
+
+        if ($updated === false) {
+            throw new RuntimeException('Opslaan van artikelwijzigingen mislukt.');
         }
     }
 
