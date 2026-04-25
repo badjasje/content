@@ -1682,26 +1682,26 @@ final class SCH_Orchestrator {
 
     private function get_shortcode_backend_navigation_items(): array {
         return [
-            ['slug' => 'sch-content-hub', 'label' => 'Dashboard'],
-            ['slug' => 'sch-app', 'label' => 'App'],
-            ['slug' => 'sch-clients', 'label' => 'Klanten'],
-            ['slug' => 'sch-sites', 'label' => 'Blogs'],
-            ['slug' => 'sch-keywords', 'label' => 'Keywords'],
-            ['slug' => 'sch-jobs', 'label' => 'Jobs'],
-            ['slug' => 'sch-conflicts', 'label' => 'Conflicten'],
-            ['slug' => 'sch-editorial', 'label' => 'Redactie'],
-            ['slug' => 'sch-reporting', 'label' => 'Rapportage'],
-            ['slug' => 'sch-performance', 'label' => 'Performance'],
-            ['slug' => 'sch-intelligence', 'label' => 'Intelligence'],
-            ['slug' => 'sch-page-intelligence', 'label' => 'Page Intelligence'],
-            ['slug' => 'sch-serp-intelligence', 'label' => 'SERP Intelligence'],
-            ['slug' => 'sch-serp-signals', 'label' => 'SERP Signals'],
-            ['slug' => 'sch-entity-coverage', 'label' => 'Entity Coverage'],
-            ['slug' => 'sch-serp-recommendations', 'label' => 'SERP Recommendations'],
-            ['slug' => 'sch-feedback', 'label' => 'Feedback'],
-            ['slug' => 'sch-refresh-queue', 'label' => 'Refresh Queue'],
-            ['slug' => 'sch-logs', 'label' => 'Logs'],
-            ['slug' => 'sch-settings', 'label' => 'Instellingen'],
+            ['slug' => 'sch-content-hub', 'label' => 'Dashboard', 'category' => 'Control center', 'description' => 'Realtime cockpit met KPI’s, jobstatus en integraties.', 'highlight' => 'Overzicht'],
+            ['slug' => 'sch-app', 'label' => 'App', 'category' => 'Control center', 'description' => 'Single-page workflow voor operators en dagelijkse acties.', 'highlight' => 'Workflow'],
+            ['slug' => 'sch-clients', 'label' => 'Klanten', 'category' => 'Content operations', 'description' => 'Beheer klanten, limieten, defaults en linktargets.', 'highlight' => 'CRM'],
+            ['slug' => 'sch-sites', 'label' => 'Blogs', 'category' => 'Content operations', 'description' => 'Gekoppelde WordPress ontvangers en publicatiekanalen.', 'highlight' => 'Distributie'],
+            ['slug' => 'sch-keywords', 'label' => 'Keywords', 'category' => 'Content operations', 'description' => 'Keyword inventory, status en lifecycle per klant.', 'highlight' => 'Discovery'],
+            ['slug' => 'sch-jobs', 'label' => 'Jobs', 'category' => 'Content operations', 'description' => 'Inzicht in gegenereerde taken, staten en uitvoer.', 'highlight' => 'Pipeline'],
+            ['slug' => 'sch-conflicts', 'label' => 'Conflicten', 'category' => 'Content operations', 'description' => 'Detectie en afhandeling van keyword/content-conflicten.', 'highlight' => 'Resolutie'],
+            ['slug' => 'sch-editorial', 'label' => 'Redactie', 'category' => 'Content operations', 'description' => 'Wachtrij voor beoordeling en goedkeuring.', 'highlight' => 'Approval'],
+            ['slug' => 'sch-reporting', 'label' => 'Rapportage', 'category' => 'Insights', 'description' => 'Samengevoegde rapportages voor klanten en prestaties.', 'highlight' => 'Export'],
+            ['slug' => 'sch-performance', 'label' => 'Performance', 'category' => 'Insights', 'description' => 'Content output, throughput en effect op KPI’s.', 'highlight' => 'KPI'],
+            ['slug' => 'sch-intelligence', 'label' => 'Intelligence', 'category' => 'Insights', 'description' => 'Strategische signalen en prioritering voor groei.', 'highlight' => 'Prioriteit'],
+            ['slug' => 'sch-page-intelligence', 'label' => 'Page Intelligence', 'category' => 'Insights', 'description' => 'Pagina-specifieke kansen en optimalisaties.', 'highlight' => 'Pagina'],
+            ['slug' => 'sch-serp-intelligence', 'label' => 'SERP Intelligence', 'category' => 'Insights', 'description' => 'SERP trends, concurrentiesignalen en verschuivingen.', 'highlight' => 'SERP'],
+            ['slug' => 'sch-serp-signals', 'label' => 'SERP Signals', 'category' => 'Insights', 'description' => 'Gedetailleerde feature-signalen zoals AI overviews.', 'highlight' => 'Signalen'],
+            ['slug' => 'sch-entity-coverage', 'label' => 'Entity Coverage', 'category' => 'Insights', 'description' => 'Dekken van entiteiten en topical authority monitor.', 'highlight' => 'Topic map'],
+            ['slug' => 'sch-serp-recommendations', 'label' => 'SERP Recommendations', 'category' => 'Insights', 'description' => 'Actiegerichte aanbevelingen vanuit SERP-data.', 'highlight' => 'Aanbeveling'],
+            ['slug' => 'sch-feedback', 'label' => 'Feedback', 'category' => 'Quality', 'description' => 'Interne feedbackloop op output en kwaliteit.', 'highlight' => 'QA'],
+            ['slug' => 'sch-refresh-queue', 'label' => 'Refresh Queue', 'category' => 'Quality', 'description' => 'Queue voor refresh en herpublicatie van content.', 'highlight' => 'Refresh'],
+            ['slug' => 'sch-logs', 'label' => 'Logs', 'category' => 'Quality', 'description' => 'Technische logging voor debugging en auditing.', 'highlight' => 'Monitoring'],
+            ['slug' => 'sch-settings', 'label' => 'Instellingen', 'category' => 'Quality', 'description' => 'Platformconfiguratie, modellen en gedrag.', 'highlight' => 'Config'],
         ];
     }
 
@@ -1795,16 +1795,53 @@ final class SCH_Orchestrator {
                 </div>
 
                 <div class="sch-shortcode-app__panel" data-panel="backend">
-                    <p>Alle onderdelen uit de wp-admin backend van de SEO orchestrator zijn hieronder direct beschikbaar:</p>
-                    <ul class="sch-shortcode-app__backend-links">
+                    <div class="sch-shortcode-app__backend-header">
+                        <div>
+                            <h3>Backend command center</h3>
+                            <p>Gebruik hieronder alle onderdelen van de WP-admin backend in een app-achtige launcher met zoeken, filteren en directe acties.</p>
+                        </div>
+                        <div class="sch-shortcode-app__backend-meta">
+                            <span data-role="backend-count"><?php echo (int) count($backend_navigation_items); ?></span>
+                            <small>modules beschikbaar</small>
+                        </div>
+                    </div>
+                    <div class="sch-shortcode-app__toolbar sch-shortcode-app__backend-toolbar">
+                        <input type="search" data-role="backend-search" placeholder="Zoek op module, categorie of functie…">
+                        <div class="sch-shortcode-app__backend-filters" data-role="backend-filters">
+                            <button type="button" class="is-active" data-filter="all">Alles</button>
+                            <button type="button" data-filter="control center">Control center</button>
+                            <button type="button" data-filter="content operations">Content operations</button>
+                            <button type="button" data-filter="insights">Insights</button>
+                            <button type="button" data-filter="quality">Quality</button>
+                        </div>
+                    </div>
+
+                    <div class="sch-shortcode-app__backend-grid" data-role="backend-grid">
                         <?php foreach ($backend_navigation_items as $item) : ?>
-                            <li>
-                                <a href="<?php echo esc_url(admin_url('admin.php?page=' . $item['slug'])); ?>" target="_blank" rel="noopener noreferrer">
-                                    <?php echo esc_html($item['label']); ?>
-                                </a>
-                            </li>
+                            <?php
+                            $category = (string) ($item['category'] ?? 'Overig');
+                            $description = (string) ($item['description'] ?? '');
+                            $highlight = (string) ($item['highlight'] ?? '');
+                            $search_blob = strtolower(trim($item['label'] . ' ' . $category . ' ' . $description . ' ' . $highlight));
+                            ?>
+                            <article class="sch-shortcode-app__backend-card" data-category="<?php echo esc_attr(strtolower($category)); ?>" data-search="<?php echo esc_attr($search_blob); ?>">
+                                <div class="sch-shortcode-app__backend-card-head">
+                                    <h4><?php echo esc_html($item['label']); ?></h4>
+                                    <span><?php echo esc_html($highlight); ?></span>
+                                </div>
+                                <p><?php echo esc_html($description); ?></p>
+                                <div class="sch-shortcode-app__backend-card-meta">
+                                    <em><?php echo esc_html($category); ?></em>
+                                    <code><?php echo esc_html($item['slug']); ?></code>
+                                </div>
+                                <div class="sch-shortcode-app__backend-card-actions">
+                                    <a href="<?php echo esc_url(admin_url('admin.php?page=' . $item['slug'])); ?>" target="_blank" rel="noopener noreferrer">Open module ↗</a>
+                                    <a href="<?php echo esc_url(admin_url('admin.php?page=' . $item['slug'])); ?>">In deze tab</a>
+                                </div>
+                            </article>
                         <?php endforeach; ?>
-                    </ul>
+                    </div>
+                    <p class="sch-shortcode-app__backend-empty" data-role="backend-empty" hidden>Geen modules gevonden voor deze filter.</p>
                 </div>
             <?php endif; ?>
         </div>

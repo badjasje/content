@@ -144,6 +144,50 @@
         });
     }
 
+    function initBackendDirectory($root) {
+        const $search = $root.find('[data-role="backend-search"]');
+        const $grid = $root.find('[data-role="backend-grid"]');
+        const $cards = $grid.find('.sch-shortcode-app__backend-card');
+        const $filters = $root.find('[data-role="backend-filters"]');
+        const $empty = $root.find('[data-role="backend-empty"]');
+        const $count = $root.find('[data-role="backend-count"]');
+        let activeFilter = 'all';
+
+        if (!$cards.length) {
+            return;
+        }
+
+        function applyBackendFilter() {
+            const searchQuery = String($search.val() || '').toLowerCase().trim();
+            let visible = 0;
+
+            $cards.each(function () {
+                const $card = $(this);
+                const cardCategory = String($card.data('category') || '');
+                const searchBlob = String($card.data('search') || '');
+                const matchesCategory = activeFilter === 'all' || cardCategory === activeFilter;
+                const matchesSearch = !searchQuery || searchBlob.indexOf(searchQuery) !== -1;
+                const show = matchesCategory && matchesSearch;
+                $card.toggleClass('is-hidden', !show);
+                if (show) {
+                    visible += 1;
+                }
+            });
+
+            $count.text(visible);
+            $empty.prop('hidden', visible > 0);
+        }
+
+        $filters.on('click', 'button', function () {
+            activeFilter = String($(this).data('filter') || 'all');
+            $filters.find('button').removeClass('is-active');
+            $(this).addClass('is-active');
+            applyBackendFilter();
+        });
+        $search.on('input', applyBackendFilter);
+        applyBackendFilter();
+    }
+
     $(function () {
         $('.sch-shortcode-app').each(function () {
             const $root = $(this);
@@ -157,6 +201,7 @@
             loadIssues($root);
             loadQueue($root);
             loadSettings($root);
+            initBackendDirectory($root);
         });
     });
 })(jQuery);
