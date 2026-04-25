@@ -5438,9 +5438,11 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
 
         $daily_max = max(1, (int) get_option(self::OPTION_RANDOM_DAILY_MAX, '10'));
+        $today_local_date = current_time('Y-m-d');
         $already_today = (int) $this->db->get_var($this->db->prepare(
-            "SELECT COUNT(*) FROM {$this->table('jobs')} WHERE job_type=%s AND DATE(created_at)=CURDATE()",
-            'random_fresh_content'
+            "SELECT COUNT(*) FROM {$this->table('jobs')} WHERE job_type=%s AND DATE(created_at)=%s",
+            'random_fresh_content',
+            $today_local_date
         ));
 
         $remaining = max(0, $daily_max - $already_today);
@@ -5611,13 +5613,14 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             return [];
         }
 
+        $today_local_date = current_time('Y-m-d');
         $placeholders = implode(', ', array_fill(0, count($site_ids), '%d'));
-        $params = array_merge(['random_fresh_content'], $site_ids);
+        $params = array_merge(['random_fresh_content', $today_local_date], $site_ids);
         $rows = (array) $this->db->get_results($this->db->prepare(
             "SELECT site_id, COUNT(*) AS total
              FROM {$this->table('jobs')}
              WHERE job_type=%s
-               AND DATE(created_at)=CURDATE()
+               AND DATE(created_at)=%s
                AND site_id IN ({$placeholders})
              GROUP BY site_id",
             ...$params
@@ -5639,10 +5642,12 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     }
 
     private function count_random_jobs_for_site_today(int $site_id): int {
+        $today_local_date = current_time('Y-m-d');
         return (int) $this->db->get_var($this->db->prepare(
-            "SELECT COUNT(*) FROM {$this->table('jobs')} WHERE job_type=%s AND site_id=%d AND DATE(created_at)=CURDATE()",
+            "SELECT COUNT(*) FROM {$this->table('jobs')} WHERE job_type=%s AND site_id=%d AND DATE(created_at)=%s",
             'random_fresh_content',
-            $site_id
+            $site_id,
+            $today_local_date
         ));
     }
 
