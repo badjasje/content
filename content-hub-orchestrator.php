@@ -5466,22 +5466,26 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
 
         $duplicate_window_days = max(1, (int) get_option(self::OPTION_RANDOM_DUPLICATE_WINDOW_DAYS, '30'));
+        $site_daily_max = max(1, (int) get_option(self::OPTION_RANDOM_MAX_PER_SITE_PER_DAY, '2'));
+        $site_ids = array_map(static fn($site) => (int) ($site->id ?? 0), $sites);
+        $site_counts = $this->get_random_jobs_today_counts($site_ids);
+        $site_attempt_penalties = [];
         $created = 0;
         $attempts = 0;
         $max_attempts = max(6, $remaining * 6);
 
         while ($created < $remaining && $attempts < $max_attempts) {
             $attempts++;
-            $site = $this->pick_random_machine_site($sites);
+            $site = $this->pick_random_machine_site($sites, $site_counts, $site_attempt_penalties, $site_daily_max);
             if (!$site) {
                 break;
             }
 
-            $site_today_count = $this->count_random_jobs_for_site_today((int) $site->id);
-            $site_daily_max = max(1, (int) get_option(self::OPTION_RANDOM_MAX_PER_SITE_PER_DAY, '2'));
+            $site_id = (int) $site->id;
+            $site_today_count = (int) ($site_counts[$site_id] ?? 0);
             if ($site_today_count >= $site_daily_max) {
                 $this->vlog('random_machine', 'Site overgeslagen door per-site daglimiet', [
-                    'site_id' => (int) $site->id,
+                    'site_id' => $site_id,
                     'site_today_count' => $site_today_count,
                     'site_daily_max' => $site_daily_max,
                 ]);
@@ -5492,19 +5496,25 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 $research = $this->research_random_topic_for_site($site, $duplicate_window_days);
             } catch (Throwable $e) {
                 $this->log('warning', 'random_machine', 'Research stap mislukt voor site', [
-                    'site_id' => (int) $site->id,
+                    'site_id' => $site_id,
                     'error' => $e->getMessage(),
                 ]);
+                $site_attempt_penalties[$site_id] = (int) ($site_attempt_penalties[$site_id] ?? 0) + 1;
                 continue;
             }
 
             if (!$research) {
+                $site_attempt_penalties[$site_id] = (int) ($site_attempt_penalties[$site_id] ?? 0) + 1;
                 continue;
             }
 
             $job_id = $this->create_random_machine_job($site, $research);
             if ($job_id > 0) {
                 $created++;
+                $site_counts[$site_id] = $site_today_count + 1;
+                $site_attempt_penalties[$site_id] = 0;
+            } else {
+                $site_attempt_penalties[$site_id] = (int) ($site_attempt_penalties[$site_id] ?? 0) + 1;
             }
         }
 
@@ -5541,21 +5551,91 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         return (array) $this->db->get_results($sql);
     }
 
-    private function pick_random_machine_site(array $sites): ?object {
+    private function pick_random_machine_site(array $sites, array $site_counts, array $site_attempt_penalties, int $site_daily_max): ?object {
         if (!$sites) {
             return null;
         }
 
-        usort($sites, function ($a, $b) {
-            $a_count = $this->count_random_jobs_for_site_today((int) $a->id);
-            $b_count = $this->count_random_jobs_for_site_today((int) $b->id);
-            if ($a_count === $b_count) {
-                return ((int) $a->publish_priority <=> (int) $b->publish_priority);
+        $eligible_sites = array_values(array_filter($sites, function ($site) use ($site_counts, $site_daily_max) {
+            $site_id = (int) ($site->id ?? 0);
+            return $site_id > 0 && (int) ($site_counts[$site_id] ?? 0) < $site_daily_max;
+        }));
+
+        if (!$eligible_sites) {
+            return null;
+        }
+
+        $min_effective_count = null;
+        foreach ($eligible_sites as $site) {
+            $site_id = (int) $site->id;
+            $effective_count = (int) ($site_counts[$site_id] ?? 0) + (int) ($site_attempt_penalties[$site_id] ?? 0);
+            if ($min_effective_count === null || $effective_count < $min_effective_count) {
+                $min_effective_count = $effective_count;
             }
-            return $a_count <=> $b_count;
+        }
+
+        if ($min_effective_count === null) {
+            return null;
+        }
+
+        $lowest_load_sites = array_values(array_filter($eligible_sites, function ($site) use ($site_counts, $site_attempt_penalties, $min_effective_count) {
+            $site_id = (int) $site->id;
+            $effective_count = (int) ($site_counts[$site_id] ?? 0) + (int) ($site_attempt_penalties[$site_id] ?? 0);
+            return $effective_count === $min_effective_count;
+        }));
+
+        usort($lowest_load_sites, static function ($a, $b) {
+            return ((int) $a->publish_priority <=> (int) $b->publish_priority);
         });
 
-        return $sites[0] ?? null;
+        $top_priority = (int) (($lowest_load_sites[0]->publish_priority ?? 0));
+        $priority_pool = array_values(array_filter($lowest_load_sites, static function ($site) use ($top_priority) {
+            return (int) ($site->publish_priority ?? 0) === $top_priority;
+        }));
+
+        if (!$priority_pool) {
+            return $lowest_load_sites[0] ?? null;
+        }
+
+        if (count($priority_pool) === 1) {
+            return $priority_pool[0];
+        }
+
+        $random_index = random_int(0, count($priority_pool) - 1);
+        return $priority_pool[$random_index] ?? $priority_pool[0];
+    }
+
+    private function get_random_jobs_today_counts(array $site_ids): array {
+        $site_ids = array_values(array_unique(array_filter(array_map('intval', $site_ids), static fn($id) => $id > 0)));
+        if (empty($site_ids)) {
+            return [];
+        }
+
+        $placeholders = implode(', ', array_fill(0, count($site_ids), '%d'));
+        $params = array_merge(['random_fresh_content'], $site_ids);
+        $rows = (array) $this->db->get_results($this->db->prepare(
+            "SELECT site_id, COUNT(*) AS total
+             FROM {$this->table('jobs')}
+             WHERE job_type=%s
+               AND DATE(created_at)=CURDATE()
+               AND site_id IN ({$placeholders})
+             GROUP BY site_id",
+            ...$params
+        ), ARRAY_A);
+
+        $counts = [];
+        foreach ($site_ids as $site_id) {
+            $counts[$site_id] = 0;
+        }
+
+        foreach ($rows as $row) {
+            $site_id = (int) ($row['site_id'] ?? 0);
+            if ($site_id > 0) {
+                $counts[$site_id] = (int) ($row['total'] ?? 0);
+            }
+        }
+
+        return $counts;
     }
 
     private function count_random_jobs_for_site_today(int $site_id): int {
