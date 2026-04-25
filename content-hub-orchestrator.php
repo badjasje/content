@@ -5144,6 +5144,109 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         return is_string($term) ? $term : '';
     }
 
+    private function get_existing_main_keywords_for_client(int $client_id, int $limit = 250): array {
+        if ($client_id <= 0) {
+            return [];
+        }
+
+        $rows = $this->db->get_col($this->db->prepare(
+            "SELECT main_keyword
+             FROM {$this->table('keywords')}
+             WHERE client_id = %d
+               AND lifecycle_status <> 'trash'
+             ORDER BY id DESC
+             LIMIT %d",
+            $client_id,
+            max(1, $limit)
+        ));
+
+        $keywords = [];
+        foreach ((array) $rows as $keyword) {
+            $value = sanitize_text_field((string) $keyword);
+            if ($value !== '') {
+                $keywords[] = $value;
+            }
+        }
+
+        return array_values(array_unique($keywords));
+    }
+
+    private function is_keyword_too_similar_to_list(string $candidate, array $existing_keywords): bool {
+        foreach ($existing_keywords as $existing) {
+            if ($this->keywords_are_too_similar($candidate, (string) $existing)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function keywords_are_too_similar(string $left, string $right): bool {
+        $left_normalized = $this->normalize_keyword_term($left);
+        $right_normalized = $this->normalize_keyword_term($right);
+        if ($left_normalized === '' || $right_normalized === '') {
+            return false;
+        }
+        if ($left_normalized === $right_normalized) {
+            return true;
+        }
+
+        similar_text($left_normalized, $right_normalized, $percent);
+        if ($percent >= 84.0) {
+            return true;
+        }
+
+        $left_tokens = $this->keyword_similarity_tokens($left_normalized);
+        $right_tokens = $this->keyword_similarity_tokens($right_normalized);
+        if (empty($left_tokens) || empty($right_tokens)) {
+            return false;
+        }
+
+        $intersection = array_intersect($left_tokens, $right_tokens);
+        $union = array_unique(array_merge($left_tokens, $right_tokens));
+        $jaccard = count($union) > 0 ? (count($intersection) / count($union)) : 0;
+
+        return $jaccard >= 0.7;
+    }
+
+    private function keyword_similarity_tokens(string $keyword): array {
+        $parts = preg_split('/\s+/u', $keyword) ?: [];
+        $stopwords = [
+            'de', 'het', 'een', 'en', 'of', 'voor', 'van', 'met', 'op', 'in', 'aan', 'bij', 'als', 'naar',
+            'hoe', 'wat', 'waarom', 'welke', 'je', 'jij', 'uw', 'jouw', 'te', 'om', 'tot', 'door',
+        ];
+
+        $tokens = [];
+        foreach ($parts as $part) {
+            $token = trim((string) preg_replace('/[^\p{L}\p{N}]+/u', '', (string) $part));
+            if (mb_strlen($token) < 3 || in_array($token, $stopwords, true)) {
+                continue;
+            }
+            $tokens[] = $token;
+        }
+
+        return array_values(array_unique($tokens));
+    }
+
+    private function build_keyword_variation_guidance(string $main_keyword, array $secondary_keywords): array {
+        $secondary_clean = [];
+        foreach ($secondary_keywords as $term) {
+            $value = sanitize_text_field((string) $term);
+            if ($value !== '' && mb_strtolower($value) !== mb_strtolower($main_keyword)) {
+                $secondary_clean[] = $value;
+            }
+        }
+
+        return [
+            'main_keyword' => sanitize_text_field($main_keyword),
+            'supporting_terms_to_weave_in' => array_values(array_slice(array_unique($secondary_clean), 0, 8)),
+            'writing_rules' => [
+                'Gebruik het hoofdkeyword natuurlijk in titel en intro, maar herhaal het niet geforceerd in elke alinea.',
+                'Varieer met semantisch verwante formuleringen en contextwoorden uit secondary keywords.',
+                'Wissel paragrafen af tussen uitleg, voorbeelden, checklistpunten en praktische valkuilen.',
+            ],
+        ];
+    }
+
     private function log(string $level, string $context, string $message, $payload = null): void {
         $this->db->insert($this->table('logs'), [
             'level'      => $level,
@@ -6356,11 +6459,21 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
 
         $ideas = $this->agent_discover_keywords($client, $research_bundle);
+        $existing_main_keywords = $this->get_existing_main_keywords_for_client((int) $client->id, 500);
+        $accepted_keywords = array_values($existing_main_keywords);
 
         $created = 0;
         foreach ($ideas as $idea) {
             $main_keyword = sanitize_text_field((string) ($idea['main_keyword'] ?? ''));
             if ($main_keyword === '') {
+                continue;
+            }
+
+            if ($this->is_keyword_too_similar_to_list($main_keyword, $accepted_keywords)) {
+                $this->vlog('keyword_discovery', 'Discovery keyword overgeslagen: te vergelijkbaar met bestaand of eerder geselecteerd keyword', [
+                    'client_id' => (int) $client->id,
+                    'keyword' => $main_keyword,
+                ]);
                 continue;
             }
 
@@ -6405,6 +6518,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             if ($inserted) {
                 $keyword_id = (int) $this->db->insert_id;
                 $created_jobs = $this->create_jobs_for_keyword($keyword_id);
+                $accepted_keywords[] = $main_keyword;
                 $created++;
 
                 $this->log('info', 'keyword_discovery', 'Discovery keyword aangemaakt', [
@@ -6432,6 +6546,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
 
     private function agent_discover_keywords(object $client, array $research_bundle): array {
         $max_keywords = max(1, (int) get_option(self::OPTION_MAX_DISCOVERY_KEYWORDS, '10'));
+        $existing_main_keywords = $this->get_existing_main_keywords_for_client((int) $client->id, 250);
 
         $result = $this->openai_json_call(
             'keyword_discovery',
@@ -6444,11 +6559,14 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'website_url' => (string) $client->website_url,
                 'max_keywords' => $max_keywords,
                 'research_bundle' => $research_bundle,
+                'existing_main_keywords' => $existing_main_keywords,
                 'requirements' => [
                     'focus_on_commercially_relevant_informational_keywords' => true,
                     'include_long_tail' => true,
                     'avoid_brand_only_terms' => true,
                     'avoid_obvious_duplicate_variants' => true,
+                    'avoid_near_duplicate_rephrasings_of_existing_keywords' => true,
+                    'prefer_unique_intent_angles_per_keyword' => true,
                 ],
             ],
             [
@@ -6503,6 +6621,10 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             (string) $keyword->main_keyword,
             $secondary_keywords
         );
+        $keyword_variation_guidance = $this->build_keyword_variation_guidance(
+            (string) $keyword->main_keyword,
+            $secondary_keywords
+        );
 
         return [
             'main_keyword'       => (string) $keyword->main_keyword,
@@ -6529,6 +6651,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 ],
             ],
             'contextual_enrichment' => $contextual_enrichment,
+            'keyword_variation_guidance' => $keyword_variation_guidance,
             'previous_variants'  => $previous_variants,
         ];
     }
@@ -6693,6 +6816,9 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                         'use_a_distinct_cta_wording_vs_previous_variants' => true,
                         'include_at_least_one_broader_but_matching_angle' => true,
                         'broader_angle_must_feel_natural_not_forced' => true,
+                        'use_semantic_keyword_variations_naturally' => true,
+                        'avoid_excessive_exact_match_repetition_of_main_keyword' => true,
+                        'vary_sentence_rhythm_examples_and_subheadings' => true,
                     ],
                 ]
             ),
@@ -6771,6 +6897,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     'do_not_repeat_post_title_inside_content' => true,
                     'title_not_semantically_too_close_to_previous_variants' => true,
                     'intro_not_semantically_too_close_to_previous_variants' => true,
+                    'uses_semantic_keyword_variants_not_just_exact_repetition' => true,
                 ],
             ],
             $this->article_schema()
