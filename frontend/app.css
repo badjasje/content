@@ -36,3 +36,18 @@
 .sch-app-chip--info{background:#eff6ff;border-color:#bfdbfe;color:#1d4ed8}
 .sch-app-chip--success{background:#ecfdf5;border-color:#a7f3d0;color:#047857}
 .sch-app-chip--danger{background:#fef2f2;border-color:#fecaca;color:#b91c1c}
+
+.sch-settings{display:grid;gap:14px}
+.sch-settings__header h3{margin:0 0 4px}
+.sch-settings__header p{margin:0;color:#475569;font-size:13px}
+.sch-settings-tabs{display:flex;gap:8px;flex-wrap:wrap;padding-bottom:2px;border-bottom:1px solid #e2e8f0}
+.sch-settings-tabs__trigger{border:1px solid #cbd5e1;background:#fff;border-radius:999px;padding:6px 12px;cursor:pointer}
+.sch-settings-tabs__trigger.is-active{background:#111827;color:#fff;border-color:#111827}
+.sch-settings-panel{display:grid;gap:10px;max-width:520px}
+.sch-settings-panel label{display:grid;gap:6px;font-size:13px;color:#334155}
+.sch-settings-panel input[type='text'],
+.sch-settings-panel input[type='number'],
+.sch-settings-panel input:not([type]){padding:8px;border:1px solid #cbd5e1;border-radius:8px;background:#fff}
+.sch-settings-panel input[type='checkbox']{margin-right:6px}
+.sch-settings__actions{padding-top:4px}
+.sch-settings__actions button{border:1px solid #cbd5e1;background:#fff;border-radius:8px;padding:8px 12px;cursor:pointer}
