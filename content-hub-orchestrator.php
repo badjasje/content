@@ -260,6 +260,9 @@ final class SCH_Orchestrator {
     const OPTION_RANDOM_TRENDS_ENABLED = 'sch_random_trends_enabled';
     const OPTION_RANDOM_TRENDS_GEO = 'sch_random_trends_geo';
     const OPTION_RANDOM_TRENDS_MAX_TOPICS = 'sch_random_trends_max_topics';
+    const RANDOM_TRENDS_REFRESH_CRON_HOOK = 'sch_orchestrator_random_trends_refresh_worker';
+    const TRANSIENT_RANDOM_TRENDS_CACHE = 'sch_random_trends_cache_v1';
+    const RANDOM_TRENDS_REFRESH_INTERVAL = 28800;
     const OPTION_GSC_ENABLED = 'sch_gsc_enabled';
     const OPTION_GSC_CLIENT_ID = 'sch_gsc_client_id';
     const OPTION_GSC_CLIENT_SECRET = 'sch_gsc_client_secret';
@@ -324,6 +327,7 @@ final class SCH_Orchestrator {
         add_action(self::SERP_CRON_HOOK, [$this, 'run_serp_intelligence_worker']);
         add_action(self::GA_CRON_HOOK, [$this, 'run_ga_auto_sync']);
         add_action(self::FEEDBACK_CRON_HOOK, [$this, 'run_feedback_auto_sync']);
+        add_action(self::RANDOM_TRENDS_REFRESH_CRON_HOOK, [$this, 'refresh_random_trends_cache']);
 
         add_action('admin_menu', [$this, 'admin_menu']);
         add_action('admin_post_sch_save_client', [$this, 'handle_save_client']);
@@ -376,6 +380,7 @@ final class SCH_Orchestrator {
         $this->schedule_serp_cron();
         $this->schedule_ga_cron();
         $this->schedule_feedback_cron();
+        $this->schedule_random_trends_cron();
     }
 
     public function activate(): void {
@@ -385,6 +390,7 @@ final class SCH_Orchestrator {
         $this->schedule_serp_cron();
         $this->schedule_ga_cron();
         $this->schedule_feedback_cron();
+        $this->schedule_random_trends_cron();
     }
 
     public function deactivate(): void {
@@ -393,6 +399,7 @@ final class SCH_Orchestrator {
         wp_clear_scheduled_hook(self::SERP_CRON_HOOK);
         wp_clear_scheduled_hook(self::GA_CRON_HOOK);
         wp_clear_scheduled_hook(self::FEEDBACK_CRON_HOOK);
+        wp_clear_scheduled_hook(self::RANDOM_TRENDS_REFRESH_CRON_HOOK);
     }
 
     public function add_cron_schedule(array $schedules): array {
@@ -400,6 +407,12 @@ final class SCH_Orchestrator {
             $schedules['every_minute'] = [
                 'interval' => 60,
                 'display'  => 'Every Minute',
+            ];
+        }
+        if (!isset($schedules['every_eight_hours'])) {
+            $schedules['every_eight_hours'] = [
+                'interval' => self::RANDOM_TRENDS_REFRESH_INTERVAL,
+                'display'  => 'Every 8 Hours',
             ];
         }
         return $schedules;
@@ -539,6 +552,12 @@ final class SCH_Orchestrator {
     private function schedule_feedback_cron(): void {
         if (!wp_next_scheduled(self::FEEDBACK_CRON_HOOK)) {
             wp_schedule_event(time() + HOUR_IN_SECONDS + 600, 'daily', self::FEEDBACK_CRON_HOOK);
+        }
+    }
+
+    private function schedule_random_trends_cron(): void {
+        if (!wp_next_scheduled(self::RANDOM_TRENDS_REFRESH_CRON_HOOK)) {
+            wp_schedule_event(time() + 300, 'every_eight_hours', self::RANDOM_TRENDS_REFRESH_CRON_HOOK);
         }
     }
 
@@ -2986,7 +3005,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     </td></tr>
                     <tr><th>Exclude recent topic duplicates window (dagen)</th><td><input type="number" name="random_duplicate_window_days" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_DUPLICATE_WINDOW_DAYS, '30')); ?>" min="1" max="365"></td></tr>
                     <tr><th>Google Trends input gebruiken</th><td><label><input type="checkbox" name="random_trends_enabled" value="1" <?php checked(get_option(self::OPTION_RANDOM_TRENDS_ENABLED, '0'), '1'); ?>> Gebruik Google Trends Daily feed als extra nieuws-signaal voor random research</label></td></tr>
-                    <tr><th>Google Trends regio</th><td><input type="text" name="random_trends_geo" class="regular-text" maxlength="5" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_TRENDS_GEO, 'NL')); ?>"><p class="description">Landcode voor Trends feed, bijvoorbeeld <code>NL</code>, <code>US</code>, <code>BE</code>.</p></td></tr>
+                    <tr><th>Google Trends regio's (globaal)</th><td><input type="text" name="random_trends_geo" class="regular-text" maxlength="40" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_TRENDS_GEO, 'NL,US,GB,DE,FR,ES,IT,BR,IN,JP')); ?>"><p class="description">Comma-separated landcodes voor wereldwijde trends, bijvoorbeeld <code>NL,US,GB,DE</code>. Cache wordt automatisch 3x per dag ververst.</p></td></tr>
                     <tr><th>Max trends topics per research</th><td><input type="number" name="random_trends_max_topics" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_TRENDS_MAX_TOPICS, '8')); ?>" min="1" max="20"></td></tr>
                 </table>
                 <p>
@@ -4583,8 +4602,10 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         update_option(self::OPTION_RANDOM_ALLOWED_CATEGORIES, wp_json_encode($random_allowed_categories));
         update_option(self::OPTION_RANDOM_DUPLICATE_WINDOW_DAYS, (string) max(1, min(365, (int) ($_POST['random_duplicate_window_days'] ?? 30))));
         update_option(self::OPTION_RANDOM_TRENDS_ENABLED, isset($_POST['random_trends_enabled']) ? '1' : '0');
-        update_option(self::OPTION_RANDOM_TRENDS_GEO, strtoupper(substr(sanitize_text_field((string) ($_POST['random_trends_geo'] ?? 'NL')), 0, 5)));
+        $random_trends_geo = $this->sanitize_random_trends_geo_input((string) ($_POST['random_trends_geo'] ?? 'NL,US,GB,DE,FR,ES,IT,BR,IN,JP'));
+        update_option(self::OPTION_RANDOM_TRENDS_GEO, $random_trends_geo);
         update_option(self::OPTION_RANDOM_TRENDS_MAX_TOPICS, (string) max(1, min(20, (int) ($_POST['random_trends_max_topics'] ?? 8))));
+        delete_transient(self::TRANSIENT_RANDOM_TRENDS_CACHE);
 
         $previous_scoring_weights = $this->get_opportunity_scoring_weights('quick_win');
         $previous_score_config = $this->get_score_config();
@@ -5943,16 +5964,79 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         return $research;
     }
 
+    public function refresh_random_trends_cache(): void {
+        if (get_option(self::OPTION_RANDOM_TRENDS_ENABLED, '0') !== '1') {
+            return;
+        }
+
+        $this->refresh_random_trends_cache_now();
+    }
+
     private function fetch_google_trends_signals(): array {
         if (get_option(self::OPTION_RANDOM_TRENDS_ENABLED, '0') !== '1') {
             return [];
         }
 
-        $geo = strtoupper(sanitize_text_field((string) get_option(self::OPTION_RANDOM_TRENDS_GEO, 'NL')));
-        if ($geo === '') {
-            $geo = 'NL';
-        }
         $max_topics = max(1, min(20, (int) get_option(self::OPTION_RANDOM_TRENDS_MAX_TOPICS, '8')));
+        $cache = get_transient(self::TRANSIENT_RANDOM_TRENDS_CACHE);
+        $cached_signals = is_array($cache) ? array_values(array_filter((array) ($cache['signals'] ?? []), 'is_string')) : [];
+        $cached_at = (int) ($cache['fetched_at'] ?? 0);
+        $cache_is_fresh = $cached_at > 0 && (time() - $cached_at) < self::RANDOM_TRENDS_REFRESH_INTERVAL;
+
+        if (!$cache_is_fresh || empty($cached_signals)) {
+            $fresh_cache = $this->refresh_random_trends_cache_now();
+            if (!empty($fresh_cache['signals']) && is_array($fresh_cache['signals'])) {
+                $cached_signals = array_values(array_filter($fresh_cache['signals'], 'is_string'));
+            }
+        }
+
+        if (empty($cached_signals)) {
+            return [];
+        }
+
+        return array_slice($cached_signals, 0, $max_topics);
+    }
+
+    private function refresh_random_trends_cache_now(): array {
+        $geos = $this->random_trends_geo_list();
+        if (empty($geos)) {
+            return [];
+        }
+
+        $max_topics = max(1, min(20, (int) get_option(self::OPTION_RANDOM_TRENDS_MAX_TOPICS, '8')));
+        $per_geo_limit = max($max_topics, min(20, $max_topics * 2));
+
+        $signals = [];
+        foreach ($geos as $geo) {
+            $geo_signals = $this->fetch_google_trends_signals_for_geo($geo, $per_geo_limit);
+            foreach ($geo_signals as $signal) {
+                $signal_key = mb_strtolower($signal);
+                if (isset($signals[$signal_key])) {
+                    continue;
+                }
+                $signals[$signal_key] = $signal;
+            }
+        }
+
+        $signals = array_slice(array_values($signals), 0, $max_topics * 3);
+        $payload = [
+            'fetched_at' => time(),
+            'geos' => $geos,
+            'signals' => $signals,
+        ];
+        set_transient(self::TRANSIENT_RANDOM_TRENDS_CACHE, $payload, self::RANDOM_TRENDS_REFRESH_INTERVAL + HOUR_IN_SECONDS);
+
+        if (!empty($signals)) {
+            $this->vlog('random_machine', 'Google Trends globale cache vernieuwd', [
+                'geos' => $geos,
+                'count' => count($signals),
+            ]);
+        }
+
+        return $payload;
+    }
+
+    private function fetch_google_trends_signals_for_geo(string $geo, int $limit): array {
         $url = add_query_arg(['geo' => $geo], 'https://trends.google.com/trending/rss');
         $response = wp_remote_get($url, [
             'timeout' => 20,
@@ -5994,19 +6078,38 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 continue;
             }
             $signals[] = $title;
-            if (count($signals) >= $max_topics) {
+            if (count($signals) >= $limit) {
                 break;
             }
         }
 
-        if ($signals) {
-            $this->vlog('random_machine', 'Google Trends signalen geladen', [
-                'geo' => $geo,
-                'count' => count($signals),
-            ]);
-        }
-
         return $signals;
+    }
+
+    private function sanitize_random_trends_geo_input(string $input): string {
+        $parts = preg_split('/[\s,;|]+/', strtoupper($input)) ?: [];
+        $clean = [];
+        foreach ($parts as $part) {
+            $geo = preg_replace('/[^A-Z]/', '', (string) $part);
+            $geo = substr((string) $geo, 0, 5);
+            if ($geo === '') {
+                continue;
+            }
+            $clean[$geo] = $geo;
+            if (count($clean) >= 15) {
+                break;
+            }
+        }
+        if (empty($clean)) {
+            $clean = ['NL' => 'NL', 'US' => 'US', 'GB' => 'GB'];
+        }
+        return implode(',', array_values($clean));
+    }
+
+    private function random_trends_geo_list(): array {
+        $raw = (string) get_option(self::OPTION_RANDOM_TRENDS_GEO, 'NL,US,GB,DE,FR,ES,IT,BR,IN,JP');
+        $sanitized = $this->sanitize_random_trends_geo_input($raw);
+        return array_values(array_filter(array_map('trim', explode(',', $sanitized))));
     }
 
     private function is_random_topic_duplicate(object $site, array $research, int $window_days): bool {
@@ -14790,7 +14893,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'random_machine_enabled' => get_option(self::OPTION_RANDOM_MACHINE_ENABLED, '0') === '1',
             'random_daily_max' => (int) get_option(self::OPTION_RANDOM_DAILY_MAX, '10'),
             'random_trends_enabled' => get_option(self::OPTION_RANDOM_TRENDS_ENABLED, '0') === '1',
-            'random_trends_geo' => (string) get_option(self::OPTION_RANDOM_TRENDS_GEO, 'NL'),
+            'random_trends_geo' => (string) get_option(self::OPTION_RANDOM_TRENDS_GEO, 'NL,US,GB,DE,FR,ES,IT,BR,IN,JP'),
             'random_trends_max_topics' => (int) get_option(self::OPTION_RANDOM_TRENDS_MAX_TOPICS, '8'),
             'serp_provider' => (string) get_option(self::OPTION_SERP_PROVIDER, 'dataforseo'),
         ], 200);
@@ -14831,10 +14934,17 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             update_option(self::OPTION_RANDOM_TRENDS_ENABLED, !empty($payload['random_trends_enabled']) ? '1' : '0');
         }
         if (array_key_exists('random_trends_geo', $payload)) {
-            update_option(self::OPTION_RANDOM_TRENDS_GEO, strtoupper(substr(sanitize_text_field((string) $payload['random_trends_geo']), 0, 5)));
+            update_option(self::OPTION_RANDOM_TRENDS_GEO, $this->sanitize_random_trends_geo_input((string) $payload['random_trends_geo']));
         }
         if (array_key_exists('random_trends_max_topics', $payload)) {
             update_option(self::OPTION_RANDOM_TRENDS_MAX_TOPICS, (string) max(1, min(20, (int) $payload['random_trends_max_topics'])));
+        }
+        if (
+            array_key_exists('random_trends_enabled', $payload) ||
+            array_key_exists('random_trends_geo', $payload) ||
+            array_key_exists('random_trends_max_topics', $payload)
+        ) {
+            delete_transient(self::TRANSIENT_RANDOM_TRENDS_CACHE);
         }
         if (array_key_exists('serp_provider', $payload)) {
             $provider = sanitize_key((string) $payload['serp_provider']);
