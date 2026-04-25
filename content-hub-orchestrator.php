@@ -2929,122 +2929,169 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
     }
 
     public function render_settings(): void {
+        $scoring_weights = $this->get_opportunity_scoring_weights('quick_win');
+        $score_config = $this->get_score_config();
+        $random_allowed_categories = $this->sanitize_blog_categories($this->decode_json_array(get_option(self::OPTION_RANDOM_ALLOWED_CATEGORIES, wp_json_encode([]))));
         ?>
-        <div class="wrap">
+        <div class="wrap sch-settings-page">
             <h1>Instellingen</h1>
             <?php $this->render_admin_notice(); ?>
 
-            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-card">
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="sch-card sch-settings-form">
                 <?php wp_nonce_field('sch_save_settings'); ?>
                 <input type="hidden" name="action" value="sch_save_settings">
-                <table class="form-table">
-                    <tr><th>OpenAI API key</th><td><input type="password" name="openai_api_key" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_OPENAI_API_KEY, '')); ?>"></td></tr>
-                    <tr><th>OpenAI model</th><td><input type="text" name="openai_model" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_OPENAI_MODEL, 'gpt-5.4-mini')); ?>"></td></tr>
-                    <tr><th>Temperature</th><td><input type="number" step="0.1" min="0" max="2" name="openai_temperature" value="<?php echo esc_attr((string) get_option(self::OPTION_OPENAI_TEMPERATURE, '0.6')); ?>"></td></tr>
-                    <tr><th>Unsplash access key</th><td><input type="password" name="unsplash_access_key" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_UNSPLASH_ACCESS_KEY, '')); ?>"></td></tr>
-                    <tr>
-                        <th>Trusted source domein</th>
-                        <td>
-                            <input type="url" name="trusted_source_domain" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_TRUSTED_SOURCE_DOMAIN, 'https://shortcut.nl')); ?>">
-                            <p class="description">De orchestrator stuurt dit domein mee als bron. De receiver plugin moet alleen requests accepteren wanneer dit exact matcht.</p>
-                        </td>
-                    </tr>
-                    <tr><th>Featured images</th><td><label><input type="checkbox" name="enable_featured_images" value="1" <?php checked(get_option(self::OPTION_ENABLE_FEATURED_IMAGES, '1'), '1'); ?>> Inschakelen</label></td></tr>
-                    <tr><th>Supporting content</th><td><label><input type="checkbox" name="enable_supporting" value="1" <?php checked(get_option(self::OPTION_ENABLE_SUPPORTING, '1'), '1'); ?>> Automatisch jobs maken</label></td></tr>
-                    <tr><th>Auto discovery</th><td><label><input type="checkbox" name="enable_auto_discovery" value="1" <?php checked(get_option(self::OPTION_ENABLE_AUTO_DISCOVERY, '0'), '1'); ?>> Laat worker keyword discovery draaien als er geen queued jobs zijn</label></td></tr>
-                    <tr><th>Max research pages</th><td><input type="number" name="max_research_pages" value="<?php echo esc_attr((string) get_option(self::OPTION_MAX_RESEARCH_PAGES, '5')); ?>" min="1" max="20"></td></tr>
-                    <tr><th>Max discovery keywords</th><td><input type="number" name="max_discovery_keywords" value="<?php echo esc_attr((string) get_option(self::OPTION_MAX_DISCOVERY_KEYWORDS, '10')); ?>" min="1" max="50"></td></tr>
-                    <tr><th>Verbose logs</th><td><label><input type="checkbox" name="enable_verbose_logs" value="1" <?php checked(get_option(self::OPTION_ENABLE_VERBOSE_LOGS, '1'), '1'); ?>> Veel extra logregels wegschrijven</label></td></tr>
-                    <tr><th colspan="2"><h2 style="margin:10px 0 0;">Google Search Console</h2></th></tr>
-                    <tr><th>Enable GSC integratie</th><td><label><input type="checkbox" name="gsc_enabled" value="1" <?php checked(get_option(self::OPTION_GSC_ENABLED, '0'), '1'); ?>> Inschakelen</label></td></tr>
-                    <tr><th>Google OAuth client ID</th><td><input type="text" name="gsc_client_id" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_CLIENT_ID, '')); ?>"></td></tr>
-                    <tr><th>Google OAuth client secret</th><td><input type="password" name="gsc_client_secret" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_CLIENT_SECRET, '')); ?>"></td></tr>
-                    <tr><th>Default sync range (dagen)</th><td><select name="gsc_default_sync_range"><option value="7" <?php selected(get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28'), '7'); ?>>7</option><option value="28" <?php selected(get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28'), '28'); ?>>28</option><option value="90" <?php selected(get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28'), '90'); ?>>90</option></select></td></tr>
-                    <tr><th>Default row limit</th><td><input type="number" name="gsc_default_row_limit" min="1" max="25000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_ROW_LIMIT, '250')); ?>"></td></tr>
-                    <tr><th>Default top N op clicks</th><td><input type="number" name="gsc_default_top_n_clicks" min="0" max="25000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_TOP_N_CLICKS, '0')); ?>"><p class="description">0 = uitgeschakeld (alle rows binnen row limit).</p></td></tr>
-                    <tr><th>Default min impressions</th><td><input type="number" name="gsc_default_min_impressions" min="0" max="100000000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_MIN_IMPRESSIONS, '0')); ?>"></td></tr>
-                    <tr><th>Auto sync</th><td><label><input type="checkbox" name="gsc_auto_sync" value="1" <?php checked(get_option(self::OPTION_GSC_AUTO_SYNC, '0'), '1'); ?>> Dagelijks gekoppelde klanten syncen</label></td></tr>
-                    <tr><th colspan="2"><h2 style="margin:10px 0 0;">Google Analytics 4</h2></th></tr>
-                    <tr><th>Enable GA4 integratie</th><td><label><input type="checkbox" name="ga_enabled" value="1" <?php checked(get_option(self::OPTION_GA_ENABLED, '0'), '1'); ?>> Inschakelen</label></td></tr>
-                    <tr><th>Google OAuth client ID</th><td><input type="text" name="ga_client_id" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_GA_CLIENT_ID, '')); ?>"></td></tr>
-                    <tr><th>Google OAuth client secret</th><td><input type="password" name="ga_client_secret" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_GA_CLIENT_SECRET, '')); ?>"></td></tr>
-                    <tr><th>Auto sync GA4</th><td><label><input type="checkbox" name="ga_auto_sync" value="1" <?php checked(get_option(self::OPTION_GA_AUTO_SYNC, '0'), '1'); ?>> Dagelijks GA4 page metrics syncen</label></td></tr>
-                    <tr><th>Auto feedback engine</th><td><label><input type="checkbox" name="feedback_auto_sync" value="1" <?php checked(get_option(self::OPTION_FEEDBACK_AUTO_SYNC, '0'), '1'); ?>> Dagelijks overlay + feedback signalen genereren</label></td></tr>
-                    <tr><th colspan="2"><h2 style="margin:10px 0 0;">Intelligence scoring</h2></th></tr>
-                    <?php $scoring_weights = $this->get_opportunity_scoring_weights('quick_win'); ?>
-                    <?php $score_config = $this->get_score_config(); ?>
-                    <tr>
-                        <th>Scoring gewichten (JSON)</th>
-                        <td>
-                            <textarea name="scoring_weights_json" rows="4" class="large-text code"><?php echo esc_textarea(wp_json_encode($scoring_weights, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)); ?></textarea>
-                            <p class="description">Optioneel. Voorbeeld: <code>{"potential_norm":0.35,"ctr_gap":0.30,"position_factor":0.20,"decline_factor":0.15}</code></p>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th>Losse gewichten</th>
-                        <td>
-                            <label style="display:inline-block; margin-right:12px;">potential_norm <input type="number" step="0.01" min="0" max="1" name="weight_potential_norm" value="<?php echo esc_attr((string) ($scoring_weights['potential_norm'] ?? 0.35)); ?>"></label>
-                            <label style="display:inline-block; margin-right:12px;">ctr_gap <input type="number" step="0.01" min="0" max="1" name="weight_ctr_gap" value="<?php echo esc_attr((string) ($scoring_weights['ctr_gap'] ?? 0.30)); ?>"></label>
-                            <label style="display:inline-block; margin-right:12px;">position_factor <input type="number" step="0.01" min="0" max="1" name="weight_position_factor" value="<?php echo esc_attr((string) ($scoring_weights['position_factor'] ?? 0.20)); ?>"></label>
-                            <label style="display:inline-block; margin-right:12px;">decline_factor <input type="number" step="0.01" min="0" max="1" name="weight_decline_factor" value="<?php echo esc_attr((string) ($scoring_weights['decline_factor'] ?? 0.15)); ?>"></label>
-                            <p class="description">Als de som geen 1.0 is, normaliseren we automatisch naar 1.0.</p>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th>Score config (versie + types)</th>
-                        <td>
-                            <textarea name="score_config_json" rows="8" class="large-text code"><?php echo esc_textarea(wp_json_encode($score_config, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)); ?></textarea>
-                            <p class="description">Bevat versie, guardrails en gewichten per opportunity type. Max delta per release guardrail wordt automatisch afgedwongen.</p>
-                        </td>
-                    </tr>
-                    <tr><th colspan="2"><h2 style="margin:10px 0 0;">SERP Provider</h2></th></tr>
-                    <tr>
-                        <th>SERP provider</th>
-                        <td>
-                            <select name="serp_provider">
-                                <option value="dataforseo" <?php selected((string) get_option(self::OPTION_SERP_PROVIDER, 'dataforseo'), 'dataforseo'); ?>>DataForSEO</option>
-                            </select>
-                        </td>
-                    </tr>
-                    <tr><th>DataForSEO login</th><td><input type="text" name="dataforseo_login" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_DATAFORSEO_LOGIN, '')); ?>"></td></tr>
-                    <tr><th>DataForSEO password</th><td><input type="password" name="dataforseo_password" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_DATAFORSEO_PASSWORD, '')); ?>"></td></tr>
-                    <tr><th>Default country code</th><td><input type="text" name="serp_default_country_code" class="regular-text" maxlength="5" value="<?php echo esc_attr((string) get_option(self::OPTION_SERP_DEFAULT_COUNTRY_CODE, 'us')); ?>"><p class="description">ISO landcode, bijvoorbeeld <code>us</code>, <code>nl</code>.</p></td></tr>
-                    <tr><th>Default language code</th><td><input type="text" name="serp_default_language_code" class="regular-text" maxlength="10" value="<?php echo esc_attr((string) get_option(self::OPTION_SERP_DEFAULT_LANGUAGE_CODE, 'en')); ?>"></td></tr>
-                    <tr><th>Default device</th><td><select name="serp_default_device"><option value="desktop" <?php selected((string) get_option(self::OPTION_SERP_DEFAULT_DEVICE, 'desktop'), 'desktop'); ?>>desktop</option><option value="mobile" <?php selected((string) get_option(self::OPTION_SERP_DEFAULT_DEVICE, 'desktop'), 'mobile'); ?>>mobile</option></select></td></tr>
-                    <tr><th>Results depth</th><td><input type="number" name="serp_results_depth" min="1" max="100" value="<?php echo esc_attr((string) get_option(self::OPTION_SERP_RESULTS_DEPTH, '10')); ?>"></td></tr>
-                    <tr><th>Sync batch size per run</th><td><input type="number" name="serp_sync_batch_size" min="1" max="200" value="<?php echo esc_attr((string) get_option(self::OPTION_SERP_SYNC_BATCH_SIZE, '50')); ?>"></td></tr>
-                    <tr>
-                        <th>OAuth setup hulp</th>
-                        <td>
-                            <p><strong>Exacte GSC redirect URI:</strong> <code><?php echo esc_html($this->gsc_oauth_redirect_uri()); ?></code></p>
-                            <p><strong>Exacte GA4 redirect URI:</strong> <code><?php echo esc_html($this->ga_oauth_redirect_uri()); ?></code></p>
-                            <p><strong>Scopes:</strong> <code>https://www.googleapis.com/auth/webmasters.readonly</code> + <code>https://www.googleapis.com/auth/analytics.readonly</code> + <code>userinfo.email</code></p>
-                            <p class="description">Gebruik bij een OAuth app in testing mode expliciet test users. Alleen die users kunnen verbinden zolang de app niet verified is.</p>
-                        </td>
-                    </tr>
 
-                    <tr><th colspan="2"><h2 style="margin:10px 0 0;">Random Content Machine</h2></th></tr>
-                    <tr><th>Enable random content machine</th><td><label><input type="checkbox" name="random_machine_enabled" value="1" <?php checked(get_option(self::OPTION_RANDOM_MACHINE_ENABLED, '0'), '1'); ?>> Dagelijks automatisch random content jobs genereren</label></td></tr>
-                    <tr><th>Max random articles per day</th><td><input type="number" name="random_daily_max" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_DAILY_MAX, '10')); ?>" min="1" max="100"></td></tr>
-                    <tr><th>Random content status</th><td><select name="random_status"><option value="draft" <?php selected((string) get_option(self::OPTION_RANDOM_STATUS, 'draft'), 'draft'); ?>>draft</option><option value="publish" <?php selected((string) get_option(self::OPTION_RANDOM_STATUS, 'draft'), 'publish'); ?>>publish</option></select></td></tr>
-                    <tr><th>Min word count</th><td><input type="number" name="random_min_words" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_MIN_WORDS, '900')); ?>" min="400" max="5000"></td></tr>
-                    <tr><th>Max word count</th><td><input type="number" name="random_max_words" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_MAX_WORDS, '1400')); ?>" min="500" max="6000"></td></tr>
-                    <tr><th>Max articles per site per day</th><td><input type="number" name="random_max_per_site_per_day" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_MAX_PER_SITE_PER_DAY, '2')); ?>" min="1" max="20"></td></tr>
-                    <tr><th>Only active sites meenemen</th><td><label><input type="checkbox" name="random_only_active_sites" value="1" <?php checked(get_option(self::OPTION_RANDOM_ONLY_ACTIVE_SITES, '1'), '1'); ?>> Alleen actieve blogs gebruiken</label></td></tr>
-                    <tr><th>Allowed categories (optioneel)</th><td>
-                        <?php $random_allowed_categories = $this->sanitize_blog_categories($this->decode_json_array(get_option(self::OPTION_RANDOM_ALLOWED_CATEGORIES, wp_json_encode([])))); ?>
-                        <select name="random_allowed_categories[]" multiple size="8" style="min-width:260px;">
-                            <?php foreach ($this->allowed_blog_categories() as $category) : ?>
-                                <option value="<?php echo esc_attr($category); ?>" <?php selected(in_array($category, $random_allowed_categories, true)); ?>><?php echo esc_html($category); ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                        <p class="description">Leeg laten = geen categorie-filter.</p>
-                    </td></tr>
-                    <tr><th>Exclude recent topic duplicates window (dagen)</th><td><input type="number" name="random_duplicate_window_days" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_DUPLICATE_WINDOW_DAYS, '30')); ?>" min="1" max="365"></td></tr>
-                    <tr><th>Google Trends input gebruiken</th><td><label><input type="checkbox" name="random_trends_enabled" value="1" <?php checked(get_option(self::OPTION_RANDOM_TRENDS_ENABLED, '0'), '1'); ?>> Gebruik Google Trends Daily feed als extra nieuws-signaal voor random research</label></td></tr>
-                    <tr><th>Google Trends regio's (globaal)</th><td><input type="text" name="random_trends_geo" class="regular-text" maxlength="40" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_TRENDS_GEO, 'NL,US,GB,DE,FR,ES,IT,BR,IN,JP')); ?>"><p class="description">Comma-separated landcodes voor wereldwijde trends, bijvoorbeeld <code>NL,US,GB,DE</code>. Cache wordt automatisch 3x per dag ververst.</p></td></tr>
-                    <tr><th>Max trends topics per research</th><td><input type="number" name="random_trends_max_topics" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_TRENDS_MAX_TOPICS, '8')); ?>" min="1" max="20"></td></tr>
-                </table>
+                <div class="nav-tab-wrapper sch-settings-tabs" role="tablist" aria-label="Instellingen secties">
+                    <button type="button" class="nav-tab nav-tab-active" data-settings-tab="general" role="tab" aria-selected="true">Algemeen & AI</button>
+                    <button type="button" class="nav-tab" data-settings-tab="integrations" role="tab" aria-selected="false">Google integraties</button>
+                    <button type="button" class="nav-tab" data-settings-tab="intelligence" role="tab" aria-selected="false">Intelligence</button>
+                    <button type="button" class="nav-tab" data-settings-tab="serp" role="tab" aria-selected="false">SERP</button>
+                    <button type="button" class="nav-tab" data-settings-tab="random" role="tab" aria-selected="false">Random Machine</button>
+                    <button type="button" class="nav-tab" data-settings-tab="oauth" role="tab" aria-selected="false">OAuth hulp</button>
+                </div>
+
+                <div class="sch-settings-tab-panels">
+                    <section class="sch-settings-tab-panel is-active" data-settings-panel="general" role="tabpanel">
+                        <p class="description">Basissettings voor AI, contentgedrag en logging.</p>
+                        <table class="form-table" role="presentation">
+                            <tr><th>OpenAI API key</th><td><input type="password" name="openai_api_key" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_OPENAI_API_KEY, '')); ?>"></td></tr>
+                            <tr><th>OpenAI model</th><td><input type="text" name="openai_model" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_OPENAI_MODEL, 'gpt-5.4-mini')); ?>"></td></tr>
+                            <tr><th>Temperature</th><td><input type="number" step="0.1" min="0" max="2" name="openai_temperature" value="<?php echo esc_attr((string) get_option(self::OPTION_OPENAI_TEMPERATURE, '0.6')); ?>"></td></tr>
+                            <tr><th>Unsplash access key</th><td><input type="password" name="unsplash_access_key" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_UNSPLASH_ACCESS_KEY, '')); ?>"></td></tr>
+                            <tr>
+                                <th>Trusted source domein</th>
+                                <td>
+                                    <input type="url" name="trusted_source_domain" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_TRUSTED_SOURCE_DOMAIN, 'https://shortcut.nl')); ?>">
+                                    <p class="description">De orchestrator stuurt dit domein mee als bron. De receiver plugin moet alleen requests accepteren wanneer dit exact matcht.</p>
+                                </td>
+                            </tr>
+                            <tr><th>Featured images</th><td><label><input type="checkbox" name="enable_featured_images" value="1" <?php checked(get_option(self::OPTION_ENABLE_FEATURED_IMAGES, '1'), '1'); ?>> Inschakelen</label></td></tr>
+                            <tr><th>Supporting content</th><td><label><input type="checkbox" name="enable_supporting" value="1" <?php checked(get_option(self::OPTION_ENABLE_SUPPORTING, '1'), '1'); ?>> Automatisch jobs maken</label></td></tr>
+                            <tr><th>Auto discovery</th><td><label><input type="checkbox" name="enable_auto_discovery" value="1" <?php checked(get_option(self::OPTION_ENABLE_AUTO_DISCOVERY, '0'), '1'); ?>> Laat worker keyword discovery draaien als er geen queued jobs zijn</label></td></tr>
+                            <tr><th>Max research pages</th><td><input type="number" name="max_research_pages" value="<?php echo esc_attr((string) get_option(self::OPTION_MAX_RESEARCH_PAGES, '5')); ?>" min="1" max="20"></td></tr>
+                            <tr><th>Max discovery keywords</th><td><input type="number" name="max_discovery_keywords" value="<?php echo esc_attr((string) get_option(self::OPTION_MAX_DISCOVERY_KEYWORDS, '10')); ?>" min="1" max="50"></td></tr>
+                            <tr><th>Verbose logs</th><td><label><input type="checkbox" name="enable_verbose_logs" value="1" <?php checked(get_option(self::OPTION_ENABLE_VERBOSE_LOGS, '1'), '1'); ?>> Veel extra logregels wegschrijven</label></td></tr>
+                        </table>
+                    </section>
+
+                    <section class="sch-settings-tab-panel" data-settings-panel="integrations" role="tabpanel" hidden>
+                        <p class="description">Beheer Google Search Console en GA4 in één plek.</p>
+                        <h2>Google Search Console</h2>
+                        <table class="form-table" role="presentation">
+                            <tr><th>Enable GSC integratie</th><td><label><input type="checkbox" name="gsc_enabled" value="1" <?php checked(get_option(self::OPTION_GSC_ENABLED, '0'), '1'); ?>> Inschakelen</label></td></tr>
+                            <tr><th>Google OAuth client ID</th><td><input type="text" name="gsc_client_id" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_CLIENT_ID, '')); ?>"></td></tr>
+                            <tr><th>Google OAuth client secret</th><td><input type="password" name="gsc_client_secret" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_CLIENT_SECRET, '')); ?>"></td></tr>
+                            <tr><th>Default sync range (dagen)</th><td><select name="gsc_default_sync_range"><option value="7" <?php selected(get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28'), '7'); ?>>7</option><option value="28" <?php selected(get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28'), '28'); ?>>28</option><option value="90" <?php selected(get_option(self::OPTION_GSC_DEFAULT_SYNC_RANGE, '28'), '90'); ?>>90</option></select></td></tr>
+                            <tr><th>Default row limit</th><td><input type="number" name="gsc_default_row_limit" min="1" max="25000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_ROW_LIMIT, '250')); ?>"></td></tr>
+                            <tr><th>Default top N op clicks</th><td><input type="number" name="gsc_default_top_n_clicks" min="0" max="25000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_TOP_N_CLICKS, '0')); ?>"><p class="description">0 = uitgeschakeld (alle rows binnen row limit).</p></td></tr>
+                            <tr><th>Default min impressions</th><td><input type="number" name="gsc_default_min_impressions" min="0" max="100000000" value="<?php echo esc_attr((string) get_option(self::OPTION_GSC_DEFAULT_MIN_IMPRESSIONS, '0')); ?>"></td></tr>
+                            <tr><th>Auto sync</th><td><label><input type="checkbox" name="gsc_auto_sync" value="1" <?php checked(get_option(self::OPTION_GSC_AUTO_SYNC, '0'), '1'); ?>> Dagelijks gekoppelde klanten syncen</label></td></tr>
+                        </table>
+
+                        <h2>Google Analytics 4</h2>
+                        <table class="form-table" role="presentation">
+                            <tr><th>Enable GA4 integratie</th><td><label><input type="checkbox" name="ga_enabled" value="1" <?php checked(get_option(self::OPTION_GA_ENABLED, '0'), '1'); ?>> Inschakelen</label></td></tr>
+                            <tr><th>Google OAuth client ID</th><td><input type="text" name="ga_client_id" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_GA_CLIENT_ID, '')); ?>"></td></tr>
+                            <tr><th>Google OAuth client secret</th><td><input type="password" name="ga_client_secret" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_GA_CLIENT_SECRET, '')); ?>"></td></tr>
+                            <tr><th>Auto sync GA4</th><td><label><input type="checkbox" name="ga_auto_sync" value="1" <?php checked(get_option(self::OPTION_GA_AUTO_SYNC, '0'), '1'); ?>> Dagelijks GA4 page metrics syncen</label></td></tr>
+                            <tr><th>Auto feedback engine</th><td><label><input type="checkbox" name="feedback_auto_sync" value="1" <?php checked(get_option(self::OPTION_FEEDBACK_AUTO_SYNC, '0'), '1'); ?>> Dagelijks overlay + feedback signalen genereren</label></td></tr>
+                        </table>
+                    </section>
+
+                    <section class="sch-settings-tab-panel" data-settings-panel="intelligence" role="tabpanel" hidden>
+                        <p class="description">Scoremodellen en guardrails voor opportunity-prioritering.</p>
+                        <table class="form-table" role="presentation">
+                            <tr>
+                                <th>Scoring gewichten (JSON)</th>
+                                <td>
+                                    <textarea name="scoring_weights_json" rows="4" class="large-text code"><?php echo esc_textarea(wp_json_encode($scoring_weights, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)); ?></textarea>
+                                    <p class="description">Optioneel. Voorbeeld: <code>{"potential_norm":0.35,"ctr_gap":0.30,"position_factor":0.20,"decline_factor":0.15}</code></p>
+                                </td>
+                            </tr>
+                            <tr>
+                                <th>Losse gewichten</th>
+                                <td>
+                                    <div class="sch-settings-inline-fields">
+                                        <label>potential_norm <input type="number" step="0.01" min="0" max="1" name="weight_potential_norm" value="<?php echo esc_attr((string) ($scoring_weights['potential_norm'] ?? 0.35)); ?>"></label>
+                                        <label>ctr_gap <input type="number" step="0.01" min="0" max="1" name="weight_ctr_gap" value="<?php echo esc_attr((string) ($scoring_weights['ctr_gap'] ?? 0.30)); ?>"></label>
+                                        <label>position_factor <input type="number" step="0.01" min="0" max="1" name="weight_position_factor" value="<?php echo esc_attr((string) ($scoring_weights['position_factor'] ?? 0.20)); ?>"></label>
+                                        <label>decline_factor <input type="number" step="0.01" min="0" max="1" name="weight_decline_factor" value="<?php echo esc_attr((string) ($scoring_weights['decline_factor'] ?? 0.15)); ?>"></label>
+                                    </div>
+                                    <p class="description">Als de som geen 1.0 is, normaliseren we automatisch naar 1.0.</p>
+                                </td>
+                            </tr>
+                            <tr>
+                                <th>Score config (versie + types)</th>
+                                <td>
+                                    <textarea name="score_config_json" rows="8" class="large-text code"><?php echo esc_textarea(wp_json_encode($score_config, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)); ?></textarea>
+                                    <p class="description">Bevat versie, guardrails en gewichten per opportunity type. Max delta per release guardrail wordt automatisch afgedwongen.</p>
+                                </td>
+                            </tr>
+                        </table>
+                    </section>
+
+                    <section class="sch-settings-tab-panel" data-settings-panel="serp" role="tabpanel" hidden>
+                        <p class="description">Instellingen voor SERP provider en synchronisatie.</p>
+                        <table class="form-table" role="presentation">
+                            <tr>
+                                <th>SERP provider</th>
+                                <td>
+                                    <select name="serp_provider">
+                                        <option value="dataforseo" <?php selected((string) get_option(self::OPTION_SERP_PROVIDER, 'dataforseo'), 'dataforseo'); ?>>DataForSEO</option>
+                                    </select>
+                                </td>
+                            </tr>
+                            <tr><th>DataForSEO login</th><td><input type="text" name="dataforseo_login" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_DATAFORSEO_LOGIN, '')); ?>"></td></tr>
+                            <tr><th>DataForSEO password</th><td><input type="password" name="dataforseo_password" class="regular-text" value="<?php echo esc_attr((string) get_option(self::OPTION_DATAFORSEO_PASSWORD, '')); ?>"></td></tr>
+                            <tr><th>Default country code</th><td><input type="text" name="serp_default_country_code" class="regular-text" maxlength="5" value="<?php echo esc_attr((string) get_option(self::OPTION_SERP_DEFAULT_COUNTRY_CODE, 'us')); ?>"><p class="description">ISO landcode, bijvoorbeeld <code>us</code>, <code>nl</code>.</p></td></tr>
+                            <tr><th>Default language code</th><td><input type="text" name="serp_default_language_code" class="regular-text" maxlength="10" value="<?php echo esc_attr((string) get_option(self::OPTION_SERP_DEFAULT_LANGUAGE_CODE, 'en')); ?>"></td></tr>
+                            <tr><th>Default device</th><td><select name="serp_default_device"><option value="desktop" <?php selected((string) get_option(self::OPTION_SERP_DEFAULT_DEVICE, 'desktop'), 'desktop'); ?>>desktop</option><option value="mobile" <?php selected((string) get_option(self::OPTION_SERP_DEFAULT_DEVICE, 'desktop'), 'mobile'); ?>>mobile</option></select></td></tr>
+                            <tr><th>Results depth</th><td><input type="number" name="serp_results_depth" min="1" max="100" value="<?php echo esc_attr((string) get_option(self::OPTION_SERP_RESULTS_DEPTH, '10')); ?>"></td></tr>
+                            <tr><th>Sync batch size per run</th><td><input type="number" name="serp_sync_batch_size" min="1" max="200" value="<?php echo esc_attr((string) get_option(self::OPTION_SERP_SYNC_BATCH_SIZE, '50')); ?>"></td></tr>
+                        </table>
+                    </section>
+
+                    <section class="sch-settings-tab-panel" data-settings-panel="random" role="tabpanel" hidden>
+                        <p class="description">Configuratie voor automatische random contentgeneratie.</p>
+                        <table class="form-table" role="presentation">
+                            <tr><th>Enable random content machine</th><td><label><input type="checkbox" name="random_machine_enabled" value="1" <?php checked(get_option(self::OPTION_RANDOM_MACHINE_ENABLED, '0'), '1'); ?>> Dagelijks automatisch random content jobs genereren</label></td></tr>
+                            <tr><th>Max random articles per day</th><td><input type="number" name="random_daily_max" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_DAILY_MAX, '10')); ?>" min="1" max="100"></td></tr>
+                            <tr><th>Random content status</th><td><select name="random_status"><option value="draft" <?php selected((string) get_option(self::OPTION_RANDOM_STATUS, 'draft'), 'draft'); ?>>draft</option><option value="publish" <?php selected((string) get_option(self::OPTION_RANDOM_STATUS, 'draft'), 'publish'); ?>>publish</option></select></td></tr>
+                            <tr><th>Min word count</th><td><input type="number" name="random_min_words" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_MIN_WORDS, '900')); ?>" min="400" max="5000"></td></tr>
+                            <tr><th>Max word count</th><td><input type="number" name="random_max_words" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_MAX_WORDS, '1400')); ?>" min="500" max="6000"></td></tr>
+                            <tr><th>Max articles per site per day</th><td><input type="number" name="random_max_per_site_per_day" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_MAX_PER_SITE_PER_DAY, '2')); ?>" min="1" max="20"></td></tr>
+                            <tr><th>Only active sites meenemen</th><td><label><input type="checkbox" name="random_only_active_sites" value="1" <?php checked(get_option(self::OPTION_RANDOM_ONLY_ACTIVE_SITES, '1'), '1'); ?>> Alleen actieve blogs gebruiken</label></td></tr>
+                            <tr><th>Allowed categories (optioneel)</th><td>
+                                <select name="random_allowed_categories[]" multiple size="8" style="min-width:260px;">
+                                    <?php foreach ($this->allowed_blog_categories() as $category) : ?>
+                                        <option value="<?php echo esc_attr($category); ?>" <?php selected(in_array($category, $random_allowed_categories, true)); ?>><?php echo esc_html($category); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <p class="description">Leeg laten = geen categorie-filter.</p>
+                            </td></tr>
+                            <tr><th>Exclude recent topic duplicates window (dagen)</th><td><input type="number" name="random_duplicate_window_days" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_DUPLICATE_WINDOW_DAYS, '30')); ?>" min="1" max="365"></td></tr>
+                            <tr><th>Google Trends input gebruiken</th><td><label><input type="checkbox" name="random_trends_enabled" value="1" <?php checked(get_option(self::OPTION_RANDOM_TRENDS_ENABLED, '0'), '1'); ?>> Gebruik Google Trends Daily feed als extra nieuws-signaal voor random research</label></td></tr>
+                            <tr><th>Google Trends regio's (globaal)</th><td><input type="text" name="random_trends_geo" class="regular-text" maxlength="40" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_TRENDS_GEO, 'NL,US,GB,DE,FR,ES,IT,BR,IN,JP')); ?>"><p class="description">Comma-separated landcodes voor wereldwijde trends, bijvoorbeeld <code>NL,US,GB,DE</code>. Cache wordt automatisch 3x per dag ververst.</p></td></tr>
+                            <tr><th>Max trends topics per research</th><td><input type="number" name="random_trends_max_topics" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_TRENDS_MAX_TOPICS, '8')); ?>" min="1" max="20"></td></tr>
+                        </table>
+                    </section>
+
+                    <section class="sch-settings-tab-panel" data-settings-panel="oauth" role="tabpanel" hidden>
+                        <p class="description">Snelle referentie voor OAuth setup in Google Cloud.</p>
+                        <table class="form-table" role="presentation">
+                            <tr>
+                                <th>OAuth setup hulp</th>
+                                <td>
+                                    <p><strong>Exacte GSC redirect URI:</strong> <code><?php echo esc_html($this->gsc_oauth_redirect_uri()); ?></code></p>
+                                    <p><strong>Exacte GA4 redirect URI:</strong> <code><?php echo esc_html($this->ga_oauth_redirect_uri()); ?></code></p>
+                                    <p><strong>Scopes:</strong> <code>https://www.googleapis.com/auth/webmasters.readonly</code> + <code>https://www.googleapis.com/auth/analytics.readonly</code> + <code>userinfo.email</code></p>
+                                    <p class="description">Gebruik bij een OAuth app in testing mode expliciet test users. Alleen die users kunnen verbinden zolang de app niet verified is.</p>
+                                </td>
+                            </tr>
+                        </table>
+                    </section>
+                </div>
+
                 <p>
                     <button class="button button-primary">Instellingen opslaan</button>
                     <button type="submit" name="scoring_reset_defaults" value="1" class="button">Reset scoring defaults</button>
@@ -3052,6 +3099,49 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 <p>Gebruik hier je eigen sleutels. Hardcode ze niet in de plugin.</p>
             </form>
         </div>
+
+        <style>
+            .sch-settings-form { padding: 0; }
+            .sch-settings-tabs { margin: 0; padding: 0 16px; border-bottom: 1px solid #dcdcde; background: #fff; position: sticky; top: 32px; z-index: 20; }
+            .sch-settings-tab-panels { padding: 16px; }
+            .sch-settings-tab-panel { background: #fff; }
+            .sch-settings-tab-panel h2 { margin-top: 8px; }
+            .sch-settings-inline-fields { display: flex; flex-wrap: wrap; gap: 12px; }
+            .sch-settings-inline-fields label { display: inline-flex; align-items: center; gap: 8px; }
+            @media (max-width: 782px) {
+                .sch-settings-tabs { top: 46px; overflow-x: auto; white-space: nowrap; }
+                .sch-settings-inline-fields { flex-direction: column; }
+            }
+        </style>
+        <script>
+            (function () {
+                const tabs = Array.from(document.querySelectorAll('[data-settings-tab]'));
+                const panels = Array.from(document.querySelectorAll('[data-settings-panel]'));
+                if (!tabs.length || !panels.length) {
+                    return;
+                }
+
+                const activateTab = (key) => {
+                    tabs.forEach((tab) => {
+                        const active = tab.getAttribute('data-settings-tab') === key;
+                        tab.classList.toggle('nav-tab-active', active);
+                        tab.setAttribute('aria-selected', active ? 'true' : 'false');
+                    });
+
+                    panels.forEach((panel) => {
+                        const active = panel.getAttribute('data-settings-panel') === key;
+                        panel.classList.toggle('is-active', active);
+                        panel.hidden = !active;
+                    });
+                };
+
+                tabs.forEach((tab) => {
+                    tab.addEventListener('click', () => activateTab(tab.getAttribute('data-settings-tab')));
+                });
+
+                activateTab('general');
+            }());
+        </script>
         <?php
     }
 
