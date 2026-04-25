@@ -367,6 +367,7 @@ final class SCH_Orchestrator {
         add_action('admin_post_sch_seo_update_task_status', [$this, 'handle_seo_update_task_status']);
         add_action('rest_api_init', [$this, 'register_intelligence_rest_routes']);
         add_action('rest_api_init', [$this, 'register_frontend_rest_routes']);
+        add_action('init', [$this, 'register_shortcodes']);
         add_action('admin_post_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
         add_action('admin_post_nopriv_' . self::REGISTRATION_ACTION, [$this, 'handle_register_receiver_blog']);
 
@@ -475,27 +476,40 @@ final class SCH_Orchestrator {
 
         $page = isset($_GET['page']) ? sanitize_key((string) wp_unslash($_GET['page'])) : '';
         if ($page === 'sch-app') {
-            $base_url = plugin_dir_url(__FILE__) . 'frontend/';
-            wp_enqueue_style(
-                'sch-frontend-app',
-                $base_url . 'app.css',
-                [],
-                self::VERSION
-            );
-            wp_enqueue_script(
-                'sch-frontend-app',
-                $base_url . 'app.js',
-                [],
-                self::VERSION,
-                true
-            );
-            wp_script_add_data('sch-frontend-app', 'type', 'module');
-            wp_localize_script('sch-frontend-app', 'SCH_APP_CONFIG', [
-                'restBase' => esc_url_raw(rest_url('sch/v1/app')),
-                'restNonce' => wp_create_nonce('wp_rest'),
-                'adminUrl' => esc_url_raw(admin_url()),
-            ]);
+            $this->enqueue_frontend_shortcode_assets();
         }
+    }
+
+    public function register_shortcodes(): void {
+        add_shortcode('sch_content_hub_app', [$this, 'render_frontend_shortcode']);
+    }
+
+    private function enqueue_frontend_shortcode_assets(): void {
+        $base_url = plugin_dir_url(__FILE__) . 'frontend/';
+        wp_enqueue_style(
+            'sch-frontend-shortcode',
+            $base_url . 'shortcode.css',
+            [],
+            self::VERSION
+        );
+        wp_enqueue_script(
+            'sch-frontend-shortcode',
+            $base_url . 'shortcode.js',
+            ['jquery'],
+            self::VERSION,
+            true
+        );
+        wp_localize_script('sch-frontend-shortcode', 'SCH_SHORTCODE_CONFIG', [
+            'restBase' => esc_url_raw(rest_url('sch/v1/app')),
+            'restNonce' => wp_create_nonce('wp_rest'),
+            'canManage' => current_user_can('manage_options'),
+            'i18n' => [
+                'loading' => 'Laden…',
+                'save' => 'Opslaan',
+                'saved' => 'Instellingen opgeslagen.',
+                'error' => 'Er ging iets mis. Probeer opnieuw.',
+            ],
+        ]);
     }
 
     private function schedule_cron(): void {
@@ -1660,10 +1674,102 @@ final class SCH_Orchestrator {
         <div class="wrap">
             <h1>Content Hub App</h1>
             <?php $this->render_admin_notice(); ?>
-            <div id="sch-frontend-app-root"></div>
+            <?php echo do_shortcode('[sch_content_hub_app context="admin"]'); ?>
             <noscript>Deze app vereist JavaScript om te laden.</noscript>
         </div>
         <?php
+    }
+
+    public function render_frontend_shortcode(array $atts = []): string {
+        $atts = shortcode_atts([
+            'context' => 'frontend',
+        ], $atts, 'sch_content_hub_app');
+        $context = sanitize_key((string) ($atts['context'] ?? 'frontend'));
+        $root_id = 'sch-frontend-shortcode-' . wp_generate_uuid4();
+        $this->enqueue_frontend_shortcode_assets();
+
+        ob_start();
+        ?>
+        <div class="sch-shortcode-app" id="<?php echo esc_attr($root_id); ?>" data-context="<?php echo esc_attr($context); ?>">
+            <?php if (!current_user_can('manage_options')) : ?>
+                <div class="sch-shortcode-app__notice">
+                    Deze Content Hub app is alleen zichtbaar voor gebruikers met beheertoegang.
+                </div>
+            <?php else : ?>
+                <div class="sch-shortcode-app__tabs" role="tablist" aria-label="Content Hub onderdelen">
+                    <button type="button" class="is-active" data-tab="overview">Overzicht</button>
+                    <button type="button" data-tab="keywords">Keywords</button>
+                    <button type="button" data-tab="issues">Issues</button>
+                    <button type="button" data-tab="queue">Queue</button>
+                    <button type="button" data-tab="settings">Instellingen</button>
+                </div>
+
+                <div class="sch-shortcode-app__panel is-active" data-panel="overview">
+                    <div class="sch-shortcode-app__metrics"></div>
+                    <div class="sch-shortcode-app__integrations"></div>
+                </div>
+
+                <div class="sch-shortcode-app__panel" data-panel="keywords">
+                    <div class="sch-shortcode-app__toolbar">
+                        <input type="search" data-role="keyword-search" placeholder="Zoek keyword of klant…">
+                        <button type="button" data-role="keywords-refresh">Verversen</button>
+                    </div>
+                    <div class="sch-shortcode-app__table-wrap">
+                        <table class="sch-shortcode-app__table">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Klant</th>
+                                    <th>Keyword</th>
+                                    <th>Status</th>
+                                    <th>Lifecycle</th>
+                                </tr>
+                            </thead>
+                            <tbody data-role="keywords-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="sch-shortcode-app__panel" data-panel="issues">
+                    <div class="sch-shortcode-app__toolbar">
+                        <select data-role="issue-type">
+                            <option value="">Alles</option>
+                            <option value="feedback">Feedback</option>
+                            <option value="serp">SERP</option>
+                        </select>
+                        <button type="button" data-role="issues-refresh">Verversen</button>
+                    </div>
+                    <ul class="sch-shortcode-app__list" data-role="issues-list"></ul>
+                </div>
+
+                <div class="sch-shortcode-app__panel" data-panel="queue">
+                    <div class="sch-shortcode-app__toolbar">
+                        <button type="button" data-role="run-worker">Worker starten</button>
+                        <button type="button" data-role="queue-refresh">Verversen</button>
+                    </div>
+                    <ul class="sch-shortcode-app__list" data-role="queue-list"></ul>
+                </div>
+
+                <div class="sch-shortcode-app__panel" data-panel="settings">
+                    <form data-role="settings-form">
+                        <label>OpenAI model
+                            <input type="text" name="openai_model" placeholder="gpt-5.4-mini">
+                        </label>
+                        <label>Temperature
+                            <input type="number" name="openai_temperature" min="0" max="2" step="0.1">
+                        </label>
+                        <label class="sch-shortcode-app__checkbox">
+                            <input type="checkbox" name="enable_auto_discovery" value="1">
+                            Auto discovery
+                        </label>
+                        <button type="submit">Opslaan</button>
+                    </form>
+                    <div class="sch-shortcode-app__feedback" data-role="settings-feedback" aria-live="polite"></div>
+                </div>
+            <?php endif; ?>
+        </div>
+        <?php
+        return (string) ob_get_clean();
     }
 
     public function render_clients(): void {
