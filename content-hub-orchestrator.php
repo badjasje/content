@@ -430,6 +430,7 @@ final class SCH_Orchestrator {
         .sch-badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600}
         .sch-badge-open{background:#fff8e5;color:#8a4b00}
         .sch-badge-done{background:#edfaef;color:#0a5b1e}
+        .sch-checkbox-actions{margin-bottom:8px}
         @media (max-width:1100px){.sch-two-col{grid-template-columns:1fr}.sch-grid-stats{grid-template-columns:1fr 1fr}}
         ';
         wp_register_style('sch-admin-inline', false);
@@ -440,6 +441,7 @@ final class SCH_Orchestrator {
         document.addEventListener("click",function(e){
             const addBtn=e.target.closest("[data-sch-add-row]");
             const removeBtn=e.target.closest("[data-sch-remove-row]");
+            const selectAllBtn=e.target.closest("[data-sch-select-all]");
             if(addBtn){
                 e.preventDefault();
                 const target=document.querySelector(addBtn.getAttribute("data-sch-add-row"));
@@ -453,6 +455,17 @@ final class SCH_Orchestrator {
                 e.preventDefault();
                 const row=removeBtn.closest(".sch-repeater-row");
                 if(row)row.remove();
+                return;
+            }
+            if(selectAllBtn){
+                e.preventDefault();
+                const selector=selectAllBtn.getAttribute("data-sch-select-all");
+                if(!selector)return;
+                document.querySelectorAll(selector).forEach((checkbox)=>{
+                    if(checkbox instanceof HTMLInputElement && checkbox.type==="checkbox"){
+                        checkbox.checked=true;
+                    }
+                });
             }
         });
         ';
@@ -2125,6 +2138,9 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     <tr>
                         <th>Filter op blog-categorie</th>
                         <td>
+                            <div class="sch-checkbox-actions">
+                                <button class="button button-secondary" type="button" data-sch-select-all='input[name="target_site_categories[]"]'>Selecteer alles</button>
+                            </div>
                             <?php foreach ($this->allowed_blog_categories() as $category) : ?>
                                 <label style="display:block;margin-bottom:6px;">
                                     <input type="checkbox" name="target_site_categories[]" value="<?php echo esc_attr($category); ?>" <?php checked(in_array($category, $selected_site_categories, true)); ?>>
@@ -2134,7 +2150,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                             <p class="description">Optioneel: als je categorieën selecteert, worden alleen jobs aangemaakt voor blogs in deze categorieën.</p>
                         </td>
                     </tr>
-                    <tr><th>Doelblogs</th><td><?php foreach ($sites as $site) : ?><label style="display:block;margin-bottom:6px;"><input type="checkbox" name="target_site_ids[]" value="<?php echo (int) $site->id; ?>" <?php checked(in_array((int) $site->id, array_map('intval', $selected_site_ids), true)); ?>> <?php echo esc_html($site->name); ?> <span class="sch-muted">(<?php echo esc_html($site->default_category ?: 'onbekend'); ?>)</span></label><?php endforeach; ?></td></tr>
+                    <tr><th>Doelblogs</th><td><div class="sch-checkbox-actions"><button class="button button-secondary" type="button" data-sch-select-all='input[name="target_site_ids[]"]'>Selecteer alles</button></div><?php foreach ($sites as $site) : ?><label style="display:block;margin-bottom:6px;"><input type="checkbox" name="target_site_ids[]" value="<?php echo (int) $site->id; ?>" <?php checked(in_array((int) $site->id, array_map('intval', $selected_site_ids), true)); ?>> <?php echo esc_html($site->name); ?> <span class="sch-muted">(<?php echo esc_html($site->default_category ?: 'onbekend'); ?>)</span></label><?php endforeach; ?></td></tr>
                 </table>
                 <p><button class="button button-primary"><?php echo $edit ? 'Keyword bijwerken' : 'Keyword opslaan'; ?></button></p>
             </form>
