@@ -141,3 +141,30 @@
     margin-top: 10px;
     font-size: 13px;
 }
+
+.sch-shortcode-app__backend-links {
+    margin: 12px 0 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px;
+}
+
+.sch-shortcode-app__backend-links a {
+    display: block;
+    border: 1px solid #d0d5dd;
+    background: #f8fafc;
+    border-radius: 8px;
+    padding: 10px;
+    color: #0f172a;
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.sch-shortcode-app__backend-links a:hover,
+.sch-shortcode-app__backend-links a:focus {
+    border-color: #0f172a;
+    background: #eef2ff;
+    outline: none;
+}

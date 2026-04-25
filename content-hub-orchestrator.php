@@ -1680,12 +1680,38 @@ final class SCH_Orchestrator {
         <?php
     }
 
+    private function get_shortcode_backend_navigation_items(): array {
+        return [
+            ['slug' => 'sch-content-hub', 'label' => 'Dashboard'],
+            ['slug' => 'sch-app', 'label' => 'App'],
+            ['slug' => 'sch-clients', 'label' => 'Klanten'],
+            ['slug' => 'sch-sites', 'label' => 'Blogs'],
+            ['slug' => 'sch-keywords', 'label' => 'Keywords'],
+            ['slug' => 'sch-jobs', 'label' => 'Jobs'],
+            ['slug' => 'sch-conflicts', 'label' => 'Conflicten'],
+            ['slug' => 'sch-editorial', 'label' => 'Redactie'],
+            ['slug' => 'sch-reporting', 'label' => 'Rapportage'],
+            ['slug' => 'sch-performance', 'label' => 'Performance'],
+            ['slug' => 'sch-intelligence', 'label' => 'Intelligence'],
+            ['slug' => 'sch-page-intelligence', 'label' => 'Page Intelligence'],
+            ['slug' => 'sch-serp-intelligence', 'label' => 'SERP Intelligence'],
+            ['slug' => 'sch-serp-signals', 'label' => 'SERP Signals'],
+            ['slug' => 'sch-entity-coverage', 'label' => 'Entity Coverage'],
+            ['slug' => 'sch-serp-recommendations', 'label' => 'SERP Recommendations'],
+            ['slug' => 'sch-feedback', 'label' => 'Feedback'],
+            ['slug' => 'sch-refresh-queue', 'label' => 'Refresh Queue'],
+            ['slug' => 'sch-logs', 'label' => 'Logs'],
+            ['slug' => 'sch-settings', 'label' => 'Instellingen'],
+        ];
+    }
+
     public function render_frontend_shortcode(array $atts = []): string {
         $atts = shortcode_atts([
             'context' => 'frontend',
         ], $atts, 'sch_content_hub_app');
         $context = sanitize_key((string) ($atts['context'] ?? 'frontend'));
         $root_id = 'sch-frontend-shortcode-' . wp_generate_uuid4();
+        $backend_navigation_items = $this->get_shortcode_backend_navigation_items();
         $this->enqueue_frontend_shortcode_assets();
 
         ob_start();
@@ -1702,6 +1728,7 @@ final class SCH_Orchestrator {
                     <button type="button" data-tab="issues">Issues</button>
                     <button type="button" data-tab="queue">Queue</button>
                     <button type="button" data-tab="settings">Instellingen</button>
+                    <button type="button" data-tab="backend">WP-Admin</button>
                 </div>
 
                 <div class="sch-shortcode-app__panel is-active" data-panel="overview">
@@ -1765,6 +1792,19 @@ final class SCH_Orchestrator {
                         <button type="submit">Opslaan</button>
                     </form>
                     <div class="sch-shortcode-app__feedback" data-role="settings-feedback" aria-live="polite"></div>
+                </div>
+
+                <div class="sch-shortcode-app__panel" data-panel="backend">
+                    <p>Alle onderdelen uit de wp-admin backend van de SEO orchestrator zijn hieronder direct beschikbaar:</p>
+                    <ul class="sch-shortcode-app__backend-links">
+                        <?php foreach ($backend_navigation_items as $item) : ?>
+                            <li>
+                                <a href="<?php echo esc_url(admin_url('admin.php?page=' . $item['slug'])); ?>" target="_blank" rel="noopener noreferrer">
+                                    <?php echo esc_html($item['label']); ?>
+                                </a>
+                            </li>
+                        <?php endforeach; ?>
+                    </ul>
                 </div>
             <?php endif; ?>
         </div>
