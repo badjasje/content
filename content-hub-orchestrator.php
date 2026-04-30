@@ -260,6 +260,9 @@ final class SCH_Orchestrator {
     const OPTION_RANDOM_TRENDS_ENABLED = 'sch_random_trends_enabled';
     const OPTION_RANDOM_TRENDS_GEO = 'sch_random_trends_geo';
     const OPTION_RANDOM_TRENDS_MAX_TOPICS = 'sch_random_trends_max_topics';
+    const OPTION_RANDOM_SOURCE_MODE = 'sch_random_source_mode';
+    const OPTION_RANDOM_RSS_FEEDS = 'sch_random_rss_feeds';
+    const OPTION_RANDOM_RSS_MAX_TOPICS = 'sch_random_rss_max_topics';
     const RANDOM_TRENDS_REFRESH_CRON_HOOK = 'sch_orchestrator_random_trends_refresh_worker';
     const TRANSIENT_RANDOM_TRENDS_CACHE = 'sch_random_trends_cache_v1';
     const RANDOM_TRENDS_REFRESH_INTERVAL = 28800;
@@ -6007,7 +6010,9 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             ];
         }
 
+        $source_mode = $this->get_random_source_mode();
         $trends_signals = $this->fetch_google_trends_signals();
+        $rss_signals = $this->fetch_random_rss_signals();
 
         $result = $this->openai_json_call(
             'random_topic_research',
@@ -6025,7 +6030,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     'homepage_text_excerpt' => (string) mb_substr((string) ($site_page['text'] ?? ''), 0, 4000),
                 ],
                 'recent_topics' => $recent_topics,
-                'google_trends_signals' => $trends_signals,
+                'google_trends_signals' => $source_mode === 'rss' ? [] : $trends_signals,
+                'rss_signals' => $source_mode === 'trends' ? [] : $rss_signals,
                 'requirements' => [
                     'language' => 'nl',
                     'must_fit_existing_blog_niche' => true,
@@ -6034,6 +6040,8 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                     'secondary_keywords_min' => 3,
                     'secondary_keywords_max' => 8,
                     'avoid_overlap_with_recent_topics' => true,
+                    'content_source_mode' => $source_mode,
+                    'avoid_topics_already_present_in_rss_signals' => true,
                 ],
             ],
             [
@@ -6211,6 +6219,75 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
 
         return $signals;
+    }
+
+    private function get_random_source_mode(): string {
+        $mode = sanitize_key((string) get_option(self::OPTION_RANDOM_SOURCE_MODE, 'hybrid'));
+        if (!in_array($mode, ['hybrid', 'trends', 'rss'], true)) {
+            $mode = 'hybrid';
+        }
+        return $mode;
+    }
+
+    private function random_rss_feed_urls(): array {
+        $raw = (string) get_option(self::OPTION_RANDOM_RSS_FEEDS, '');
+        $lines = preg_split('/[\r\n,;]+/', $raw) ?: [];
+        $urls = [];
+        foreach ($lines as $line) {
+            $url = esc_url_raw(trim((string) $line));
+            if ($url === '' || !preg_match('#^https?://#i', $url)) {
+                continue;
+            }
+            $urls[$url] = $url;
+            if (count($urls) >= 25) {
+                break;
+            }
+        }
+        return array_values($urls);
+    }
+
+    private function fetch_random_rss_signals(): array {
+        $feeds = $this->random_rss_feed_urls();
+        if (empty($feeds)) {
+            return [];
+        }
+
+        $limit = max(1, min(30, (int) get_option(self::OPTION_RANDOM_RSS_MAX_TOPICS, '12')));
+        $signals = [];
+
+        foreach ($feeds as $feed_url) {
+            $response = wp_remote_get($feed_url, ['timeout' => 20, 'redirection' => 3]);
+            if (is_wp_error($response)) {
+                continue;
+            }
+            $status = (int) wp_remote_retrieve_response_code($response);
+            if ($status < 200 || $status >= 300) {
+                continue;
+            }
+            $body = (string) wp_remote_retrieve_body($response);
+            if ($body === '') {
+                continue;
+            }
+            $xml = simplexml_load_string($body);
+            if (!$xml || !isset($xml->channel->item)) {
+                continue;
+            }
+            foreach ($xml->channel->item as $item) {
+                $title = sanitize_text_field((string) ($item->title ?? ''));
+                if ($title === '') {
+                    continue;
+                }
+                $key = mb_strtolower($title);
+                if (!isset($signals[$key])) {
+                    $signals[$key] = $title;
+                }
+                if (count($signals) >= $limit) {
+                    break 2;
+                }
+            }
+        }
+
+        return array_values($signals);
     }
 
     private function sanitize_random_trends_geo_input(string $input): string {
@@ -6465,6 +6542,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                 'main_keyword' => (string) $keyword->main_keyword,
                 'secondary_keywords' => $this->get_secondary_keywords_list($keyword),
                 'target_word_count' => (int) $keyword->target_word_count,
+                'source_mode' => $this->get_random_source_mode(),
                 'requirements' => [
                     'language' => 'nl',
                     'html_content' => true,
@@ -15022,6 +15100,9 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
             'random_trends_enabled' => get_option(self::OPTION_RANDOM_TRENDS_ENABLED, '0') === '1',
             'random_trends_geo' => (string) get_option(self::OPTION_RANDOM_TRENDS_GEO, 'NL,US,GB,DE,FR,ES,IT,BR,IN,JP'),
             'random_trends_max_topics' => (int) get_option(self::OPTION_RANDOM_TRENDS_MAX_TOPICS, '8'),
+            'random_source_mode' => $this->get_random_source_mode(),
+            'random_rss_feeds' => (string) get_option(self::OPTION_RANDOM_RSS_FEEDS, ''),
+            'random_rss_max_topics' => (int) get_option(self::OPTION_RANDOM_RSS_MAX_TOPICS, '12'),
             'serp_provider' => (string) get_option(self::OPTION_SERP_PROVIDER, 'dataforseo'),
         ], 200);
     }
@@ -15065,6 +15146,19 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         }
         if (array_key_exists('random_trends_max_topics', $payload)) {
             update_option(self::OPTION_RANDOM_TRENDS_MAX_TOPICS, (string) max(1, min(20, (int) $payload['random_trends_max_topics'])));
+        }
+        if (array_key_exists('random_source_mode', $payload)) {
+            $mode = sanitize_key((string) $payload['random_source_mode']);
+            if (!in_array($mode, ['hybrid', 'trends', 'rss'], true)) {
+                $mode = 'hybrid';
+            }
+            update_option(self::OPTION_RANDOM_SOURCE_MODE, $mode);
+        }
+        if (array_key_exists('random_rss_feeds', $payload)) {
+            update_option(self::OPTION_RANDOM_RSS_FEEDS, sanitize_textarea_field((string) $payload['random_rss_feeds']));
+        }
+        if (array_key_exists('random_rss_max_topics', $payload)) {
+            update_option(self::OPTION_RANDOM_RSS_MAX_TOPICS, (string) max(1, min(30, (int) $payload['random_rss_max_topics'])));
         }
         if (
             array_key_exists('random_trends_enabled', $payload) ||
