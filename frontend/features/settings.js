@@ -70,8 +70,19 @@ export async function renderSettings(container, toast) {
           <label><input type="checkbox" name="random_machine_enabled" ${data.random_machine_enabled ? 'checked' : ''}> Random machine</label>
           <label>Random daily max <input type="number" min="1" max="100" name="random_daily_max" value="${data.random_daily_max || 10}"></label>
           <label><input type="checkbox" name="random_trends_enabled" ${data.random_trends_enabled ? 'checked' : ''}> Random machine + Google Trends</label>
-          <label>Trends geo <input name="random_trends_geo" maxlength="5" value="${data.random_trends_geo || 'NL'}"></label>
+          <label>Trends geo <input name="random_trends_geo" maxlength="40" value="${data.random_trends_geo || 'NL,US,GB'}"></label>
           <label>Max trends topics <input type="number" min="1" max="20" name="random_trends_max_topics" value="${data.random_trends_max_topics || 8}"></label>
+          <label>Bron voor onderwerpen
+            <select name="random_source_mode">
+              <option value="hybrid" ${data.random_source_mode === 'hybrid' ? 'selected' : ''}>Hybrid (Trends + RSS)</option>
+              <option value="trends" ${data.random_source_mode === 'trends' ? 'selected' : ''}>Alleen Google Trends</option>
+              <option value="rss" ${data.random_source_mode === 'rss' ? 'selected' : ''}>Alleen RSS feeds</option>
+            </select>
+          </label>
+          <label>RSS feeds (één URL per regel)
+            <textarea name="random_rss_feeds" rows="4" placeholder="https://example.com/feed">${data.random_rss_feeds || ''}</textarea>
+          </label>
+          <label>Max RSS topics <input type="number" min="1" max="30" name="random_rss_max_topics" value="${data.random_rss_max_topics || 12}"></label>
         </section>
 
         <div class="sch-settings__actions">
