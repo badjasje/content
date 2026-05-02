@@ -6024,6 +6024,17 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
         $source_mode = $this->get_random_source_mode();
         $trends_signals = $this->fetch_google_trends_signals();
         $rss_signals = $this->fetch_random_rss_signals();
+        $trends_used = $source_mode === 'rss' ? [] : $trends_signals;
+        $rss_used = $source_mode === 'trends' ? [] : $rss_signals;
+
+        $this->log('info', 'random_machine', 'Research input signalen verzameld', [
+            'site_id' => (int) $site->id,
+            'source_mode' => $source_mode,
+            'google_trends_count' => count($trends_used),
+            'google_trends_topics' => array_slice($trends_used, 0, 10),
+            'rss_count' => count($rss_used),
+            'rss_topics' => array_slice($rss_used, 0, 10),
+        ]);
 
         $result = $this->openai_json_call(
             'random_topic_research',
@@ -6041,8 +6052,8 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
                     'homepage_text_excerpt' => (string) mb_substr((string) ($site_page['text'] ?? ''), 0, 4000),
                 ],
                 'recent_topics' => $recent_topics,
-                'google_trends_signals' => $source_mode === 'rss' ? [] : $trends_signals,
-                'rss_signals' => $source_mode === 'trends' ? [] : $rss_signals,
+                'google_trends_signals' => $trends_used,
+                'rss_signals' => $rss_used,
                 'requirements' => [
                     'language' => 'nl',
                     'must_fit_existing_blog_niche' => true,
@@ -6103,8 +6114,11 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
 
         $this->log('info', 'random_machine', 'OpenAI research geslaagd', [
             'site_id' => (int) $site->id,
+            'source_mode' => $source_mode,
             'primary_keyword' => $research['primary_keyword'],
             'topic_angle' => $research['topic_angle'],
+            'google_trends_topics' => array_slice($trends_used, 0, 5),
+            'rss_topics' => array_slice($rss_used, 0, 5),
         ]);
 
         return $research;
