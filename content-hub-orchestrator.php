@@ -3073,9 +3073,13 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                                 <p class="description">Leeg laten = geen categorie-filter.</p>
                             </td></tr>
                             <tr><th>Exclude recent topic duplicates window (dagen)</th><td><input type="number" name="random_duplicate_window_days" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_DUPLICATE_WINDOW_DAYS, '30')); ?>" min="1" max="365"></td></tr>
+                            <tr><th>Research source mode</th><td><select name="random_source_mode"><option value="hybrid" <?php selected((string) get_option(self::OPTION_RANDOM_SOURCE_MODE, 'hybrid'), 'hybrid'); ?>>hybrid (trends + rss)</option><option value="trends" <?php selected((string) get_option(self::OPTION_RANDOM_SOURCE_MODE, 'hybrid'), 'trends'); ?>>trends only</option><option value="rss" <?php selected((string) get_option(self::OPTION_RANDOM_SOURCE_MODE, 'hybrid'), 'rss'); ?>>rss only</option></select><p class="description">Bepaalt welke externe signalen gebruikt worden voor random topic research.</p></td></tr>
                             <tr><th>Google Trends input gebruiken</th><td><label><input type="checkbox" name="random_trends_enabled" value="1" <?php checked(get_option(self::OPTION_RANDOM_TRENDS_ENABLED, '0'), '1'); ?>> Gebruik Google Trends Daily feed als extra nieuws-signaal voor random research</label></td></tr>
                             <tr><th>Google Trends regio's (globaal)</th><td><input type="text" name="random_trends_geo" class="regular-text" maxlength="40" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_TRENDS_GEO, 'NL,US,GB,DE,FR,ES,IT,BR,IN,JP')); ?>"><p class="description">Comma-separated landcodes voor wereldwijde trends, bijvoorbeeld <code>NL,US,GB,DE</code>. Cache wordt automatisch 3x per dag ververst.</p></td></tr>
                             <tr><th>Max trends topics per research</th><td><input type="number" name="random_trends_max_topics" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_TRENDS_MAX_TOPICS, '8')); ?>" min="1" max="20"></td></tr>
+                            <tr><th>RSS feed URLs</th><td><textarea name="random_rss_feeds" rows="6" class="large-text code" placeholder="https://example.com/feed
+https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::OPTION_RANDOM_RSS_FEEDS, '')); ?></textarea><p class="description">Eén URL per regel (of gescheiden met komma/semicolon). Alleen <code>http(s)</code> feeds worden gebruikt.</p></td></tr>
+                            <tr><th>Max RSS topics per research</th><td><input type="number" name="random_rss_max_topics" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_RSS_MAX_TOPICS, '12')); ?>" min="1" max="30"></td></tr>
                         </table>
                     </section>
 
@@ -4731,10 +4735,17 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
         $random_allowed_categories = $this->sanitize_blog_categories((array) ($_POST['random_allowed_categories'] ?? []));
         update_option(self::OPTION_RANDOM_ALLOWED_CATEGORIES, wp_json_encode($random_allowed_categories));
         update_option(self::OPTION_RANDOM_DUPLICATE_WINDOW_DAYS, (string) max(1, min(365, (int) ($_POST['random_duplicate_window_days'] ?? 30))));
+        $random_source_mode = sanitize_key((string) ($_POST['random_source_mode'] ?? 'hybrid'));
+        if (!in_array($random_source_mode, ['hybrid', 'trends', 'rss'], true)) {
+            $random_source_mode = 'hybrid';
+        }
+        update_option(self::OPTION_RANDOM_SOURCE_MODE, $random_source_mode);
         update_option(self::OPTION_RANDOM_TRENDS_ENABLED, isset($_POST['random_trends_enabled']) ? '1' : '0');
         $random_trends_geo = $this->sanitize_random_trends_geo_input((string) ($_POST['random_trends_geo'] ?? 'NL,US,GB,DE,FR,ES,IT,BR,IN,JP'));
         update_option(self::OPTION_RANDOM_TRENDS_GEO, $random_trends_geo);
         update_option(self::OPTION_RANDOM_TRENDS_MAX_TOPICS, (string) max(1, min(20, (int) ($_POST['random_trends_max_topics'] ?? 8))));
+        update_option(self::OPTION_RANDOM_RSS_FEEDS, sanitize_textarea_field((string) ($_POST['random_rss_feeds'] ?? '')));
+        update_option(self::OPTION_RANDOM_RSS_MAX_TOPICS, (string) max(1, min(30, (int) ($_POST['random_rss_max_topics'] ?? 12))));
         delete_transient(self::TRANSIENT_RANDOM_TRENDS_CACHE);
 
         $previous_scoring_weights = $this->get_opportunity_scoring_weights('quick_win');
