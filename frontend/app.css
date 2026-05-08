@@ -47,7 +47,11 @@
 .sch-settings-panel label{display:grid;gap:6px;font-size:13px;color:#334155}
 .sch-settings-panel input[type='text'],
 .sch-settings-panel input[type='number'],
-.sch-settings-panel input:not([type]){padding:8px;border:1px solid #cbd5e1;border-radius:8px;background:#fff}
+.sch-settings-panel input:not([type]),
+.sch-settings-panel textarea,
+.sch-settings-panel select{padding:8px;border:1px solid #cbd5e1;border-radius:8px;background:#fff}
 .sch-settings-panel input[type='checkbox']{margin-right:6px}
+.sch-settings-panel textarea{min-height:120px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
+.sch-settings-help{color:#64748b;font-size:12px}
 .sch-settings__actions{padding-top:4px}
 .sch-settings__actions button{border:1px solid #cbd5e1;background:#fff;border-radius:8px;padding:8px 12px;cursor:pointer}

@@ -263,6 +263,7 @@ final class SCH_Orchestrator {
     const OPTION_RANDOM_SOURCE_MODE = 'sch_random_source_mode';
     const OPTION_RANDOM_RSS_FEEDS = 'sch_random_rss_feeds';
     const OPTION_RANDOM_RSS_MAX_TOPICS = 'sch_random_rss_max_topics';
+    const RANDOM_RSS_MAX_FEEDS = 50;
     const RANDOM_TRENDS_REFRESH_CRON_HOOK = 'sch_orchestrator_random_trends_refresh_worker';
     const TRANSIENT_RANDOM_TRENDS_CACHE = 'sch_random_trends_cache_v1';
     const RANDOM_TRENDS_REFRESH_INTERVAL = 28800;
@@ -1811,6 +1812,24 @@ final class SCH_Orchestrator {
                             <input type="checkbox" name="enable_auto_discovery" value="1">
                             Auto discovery
                         </label>
+                        <label class="sch-shortcode-app__checkbox">
+                            <input type="checkbox" name="random_machine_enabled" value="1">
+                            Random content machine
+                        </label>
+                        <label>Bron voor random onderwerpen
+                            <select name="random_source_mode">
+                                <option value="hybrid">Hybrid (Trends + RSS)</option>
+                                <option value="trends">Alleen Google Trends</option>
+                                <option value="rss">Alleen RSS feeds</option>
+                            </select>
+                        </label>
+                        <label>RSS feeds voor random content
+                            <textarea name="random_rss_feeds" rows="6" placeholder="https://example.com/feed&#10;https://news.example.org/rss"></textarea>
+                            <span class="sch-shortcode-app__help" data-role="rss-feed-count">0 feeds ingesteld. Eén URL per regel; komma's en puntkomma's mogen ook.</span>
+                        </label>
+                        <label>Max RSS topics
+                            <input type="number" name="random_rss_max_topics" min="1" max="30">
+                        </label>
                         <button type="submit">Opslaan</button>
                     </form>
                     <div class="sch-shortcode-app__feedback" data-role="settings-feedback" aria-live="polite"></div>
@@ -3078,7 +3097,7 @@ Legacy regels met een secret als extra veld worden ook nog gelezen, maar dat vel
                             <tr><th>Google Trends regio's (globaal)</th><td><input type="text" name="random_trends_geo" class="regular-text" maxlength="40" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_TRENDS_GEO, 'NL,US,GB,DE,FR,ES,IT,BR,IN,JP')); ?>"><p class="description">Comma-separated landcodes voor wereldwijde trends, bijvoorbeeld <code>NL,US,GB,DE</code>. Cache wordt automatisch 3x per dag ververst.</p></td></tr>
                             <tr><th>Max trends topics per research</th><td><input type="number" name="random_trends_max_topics" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_TRENDS_MAX_TOPICS, '8')); ?>" min="1" max="20"></td></tr>
                             <tr><th>RSS feed URLs</th><td><textarea name="random_rss_feeds" rows="6" class="large-text code" placeholder="https://example.com/feed
-https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::OPTION_RANDOM_RSS_FEEDS, '')); ?></textarea><p class="description">Eén URL per regel (of gescheiden met komma/semicolon). Alleen <code>http(s)</code> feeds worden gebruikt.</p></td></tr>
+https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::OPTION_RANDOM_RSS_FEEDS, '')); ?></textarea><p class="description">Eén URL per regel (of gescheiden met komma/semicolon). Alleen <code>http(s)</code> feeds worden gebruikt; maximaal 50 feeds.</p></td></tr>
                             <tr><th>Max RSS topics per research</th><td><input type="number" name="random_rss_max_topics" value="<?php echo esc_attr((string) get_option(self::OPTION_RANDOM_RSS_MAX_TOPICS, '12')); ?>" min="1" max="30"></td></tr>
                         </table>
                     </section>
@@ -4744,7 +4763,7 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
         $random_trends_geo = $this->sanitize_random_trends_geo_input((string) ($_POST['random_trends_geo'] ?? 'NL,US,GB,DE,FR,ES,IT,BR,IN,JP'));
         update_option(self::OPTION_RANDOM_TRENDS_GEO, $random_trends_geo);
         update_option(self::OPTION_RANDOM_TRENDS_MAX_TOPICS, (string) max(1, min(20, (int) ($_POST['random_trends_max_topics'] ?? 8))));
-        update_option(self::OPTION_RANDOM_RSS_FEEDS, sanitize_textarea_field((string) ($_POST['random_rss_feeds'] ?? '')));
+        update_option(self::OPTION_RANDOM_RSS_FEEDS, $this->sanitize_random_rss_feeds_input((string) ($_POST['random_rss_feeds'] ?? '')));
         update_option(self::OPTION_RANDOM_RSS_MAX_TOPICS, (string) max(1, min(30, (int) ($_POST['random_rss_max_topics'] ?? 12))));
         delete_transient(self::TRANSIENT_RANDOM_TRENDS_CACHE);
 
@@ -6054,6 +6073,7 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
                 'recent_topics' => $recent_topics,
                 'google_trends_signals' => $trends_used,
                 'rss_signals' => $rss_used,
+                'rss_feed_count' => count($this->random_rss_feed_urls()),
                 'requirements' => [
                     'language' => 'nl',
                     'must_fit_existing_blog_niche' => true,
@@ -6254,17 +6274,24 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
         return $mode;
     }
 
+    private function sanitize_random_rss_feeds_input(string $input): string {
+        return implode("\n", $this->parse_random_rss_feed_urls($input));
+    }
+
     private function random_rss_feed_urls(): array {
-        $raw = (string) get_option(self::OPTION_RANDOM_RSS_FEEDS, '');
-        $lines = preg_split('/[\r\n,;]+/', $raw) ?: [];
+        return $this->parse_random_rss_feed_urls((string) get_option(self::OPTION_RANDOM_RSS_FEEDS, ''));
+    }
+
+    private function parse_random_rss_feed_urls(string $input): array {
+        $parts = preg_split('/[\r\n,;]+/', $input) ?: [];
         $urls = [];
-        foreach ($lines as $line) {
-            $url = esc_url_raw(trim((string) $line));
+        foreach ($parts as $part) {
+            $url = esc_url_raw(trim((string) $part));
             if ($url === '' || !preg_match('#^https?://#i', $url)) {
                 continue;
             }
             $urls[$url] = $url;
-            if (count($urls) >= 25) {
+            if (count($urls) >= self::RANDOM_RSS_MAX_FEEDS) {
                 break;
             }
         }
@@ -6279,29 +6306,47 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
 
         $limit = max(1, min(30, (int) get_option(self::OPTION_RANDOM_RSS_MAX_TOPICS, '12')));
         $signals = [];
+        $feed_items = [];
 
         foreach ($feeds as $feed_url) {
-            $response = wp_remote_get($feed_url, ['timeout' => 20, 'redirection' => 3]);
+            $response = wp_remote_get($feed_url, [
+                'timeout' => 20,
+                'redirection' => 3,
+                'user-agent' => 'SCH-Orchestrator/' . (string) self::VERSION . '; ' . home_url('/'),
+            ]);
             if (is_wp_error($response)) {
+                $this->vlog('random_machine', 'RSS feed ophalen mislukt', [
+                    'feed_url' => $feed_url,
+                    'error' => $response->get_error_message(),
+                ]);
                 continue;
             }
             $status = (int) wp_remote_retrieve_response_code($response);
             if ($status < 200 || $status >= 300) {
+                $this->vlog('random_machine', 'RSS feed gaf onverwachte status', [
+                    'feed_url' => $feed_url,
+                    'status' => $status,
+                ]);
                 continue;
             }
             $body = (string) wp_remote_retrieve_body($response);
             if ($body === '') {
                 continue;
             }
-            $xml = simplexml_load_string($body);
-            if (!$xml || !isset($xml->channel->item)) {
+            $items = $this->extract_random_feed_titles($body);
+            if (empty($items)) {
                 continue;
             }
-            foreach ($xml->channel->item as $item) {
-                $title = sanitize_text_field((string) ($item->title ?? ''));
-                if ($title === '') {
+            $feed_items[] = $items;
+        }
+
+        $max_per_feed = 10;
+        for ($i = 0; $i < $max_per_feed && count($signals) < $limit; $i++) {
+            foreach ($feed_items as $items) {
+                if (empty($items[$i])) {
                     continue;
                 }
+                $title = $items[$i];
                 $key = mb_strtolower($title);
                 if (!isset($signals[$key])) {
                     $signals[$key] = $title;
@@ -6313,6 +6358,33 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
         }
 
         return array_values($signals);
+    }
+
+    private function extract_random_feed_titles(string $body): array {
+        $previous = libxml_use_internal_errors(true);
+        $xml = simplexml_load_string($body);
+        libxml_clear_errors();
+        libxml_use_internal_errors($previous);
+        if (!$xml) {
+            return [];
+        }
+
+        $items = [];
+        if (isset($xml->channel->item)) {
+            foreach ($xml->channel->item as $item) {
+                $items[] = sanitize_text_field((string) ($item->title ?? ''));
+            }
+        } elseif (isset($xml->entry)) {
+            foreach ($xml->entry as $entry) {
+                $items[] = sanitize_text_field((string) ($entry->title ?? ''));
+            }
+        }
+
+        $items = array_values(array_filter($items, static function ($title) {
+            return is_string($title) && $title !== '';
+        }));
+
+        return array_slice($items, 0, 10);
     }
 
     private function sanitize_random_trends_geo_input(string $input): string {
@@ -15140,7 +15212,8 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
             'random_trends_geo' => (string) get_option(self::OPTION_RANDOM_TRENDS_GEO, 'NL,US,GB,DE,FR,ES,IT,BR,IN,JP'),
             'random_trends_max_topics' => (int) get_option(self::OPTION_RANDOM_TRENDS_MAX_TOPICS, '8'),
             'random_source_mode' => $this->get_random_source_mode(),
-            'random_rss_feeds' => (string) get_option(self::OPTION_RANDOM_RSS_FEEDS, ''),
+            'random_rss_feeds' => implode("\n", $this->random_rss_feed_urls()),
+            'random_rss_feed_count' => count($this->random_rss_feed_urls()),
             'random_rss_max_topics' => (int) get_option(self::OPTION_RANDOM_RSS_MAX_TOPICS, '12'),
             'serp_provider' => (string) get_option(self::OPTION_SERP_PROVIDER, 'dataforseo'),
         ], 200);
@@ -15194,7 +15267,7 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
             update_option(self::OPTION_RANDOM_SOURCE_MODE, $mode);
         }
         if (array_key_exists('random_rss_feeds', $payload)) {
-            update_option(self::OPTION_RANDOM_RSS_FEEDS, sanitize_textarea_field((string) $payload['random_rss_feeds']));
+            update_option(self::OPTION_RANDOM_RSS_FEEDS, $this->sanitize_random_rss_feeds_input((string) $payload['random_rss_feeds']));
         }
         if (array_key_exists('random_rss_max_topics', $payload)) {
             update_option(self::OPTION_RANDOM_RSS_MAX_TOPICS, (string) max(1, min(30, (int) $payload['random_rss_max_topics'])));

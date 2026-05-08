@@ -1,5 +1,17 @@
 import { api } from '../services/api.js';
 
+const escapeHtml = (value = '') => String(value)
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
+
+const countRssFeeds = (value = '') => String(value)
+  .split(/[\r\n,;]+/)
+  .map((url) => url.trim())
+  .filter((url) => /^https?:\/\//i.test(url)).length;
+
 const SETTINGS_TABS = [
   { id: 'ai', label: 'AI & content' },
   { id: 'integrations', label: 'Integraties' },
@@ -10,6 +22,9 @@ export async function renderSettings(container, toast) {
   container.innerHTML = '<div class="sch-app-state">Loading settings…</div>';
   try {
     const data = await api.getSettings();
+    const rssFeedCount = Number.isFinite(data.random_rss_feed_count)
+      ? data.random_rss_feed_count
+      : countRssFeeds(data.random_rss_feeds || '');
     container.innerHTML = `
       <form class="sch-app-card sch-settings" id="sch-settings-form">
         <div class="sch-settings__header">
@@ -40,8 +55,8 @@ export async function renderSettings(container, toast) {
           aria-labelledby="sch-settings-tab-ai"
           data-tab-panel="ai"
         >
-          <label>OpenAI model <input name="openai_model" value="${data.openai_model || ''}"></label>
-          <label>Temperature <input type="number" step="0.1" min="0" max="2" name="openai_temperature" value="${data.openai_temperature || '0.6'}"></label>
+          <label>OpenAI model <input name="openai_model" value="${escapeHtml(data.openai_model || '')}"></label>
+          <label>Temperature <input type="number" step="0.1" min="0" max="2" name="openai_temperature" value="${escapeHtml(data.openai_temperature || '0.6')}"></label>
           <label><input type="checkbox" name="enable_featured_images" ${data.enable_featured_images ? 'checked' : ''}> Featured images</label>
           <label><input type="checkbox" name="enable_supporting" ${data.enable_supporting ? 'checked' : ''}> Supporting content</label>
           <label><input type="checkbox" name="enable_auto_discovery" ${data.enable_auto_discovery ? 'checked' : ''}> Auto discovery</label>
@@ -70,7 +85,7 @@ export async function renderSettings(container, toast) {
           <label><input type="checkbox" name="random_machine_enabled" ${data.random_machine_enabled ? 'checked' : ''}> Random machine</label>
           <label>Random daily max <input type="number" min="1" max="100" name="random_daily_max" value="${data.random_daily_max || 10}"></label>
           <label><input type="checkbox" name="random_trends_enabled" ${data.random_trends_enabled ? 'checked' : ''}> Random machine + Google Trends</label>
-          <label>Trends geo <input name="random_trends_geo" maxlength="40" value="${data.random_trends_geo || 'NL,US,GB'}"></label>
+          <label>Trends geo <input name="random_trends_geo" maxlength="40" value="${escapeHtml(data.random_trends_geo || 'NL,US,GB')}"></label>
           <label>Max trends topics <input type="number" min="1" max="20" name="random_trends_max_topics" value="${data.random_trends_max_topics || 8}"></label>
           <label>Bron voor onderwerpen
             <select name="random_source_mode">
@@ -80,7 +95,8 @@ export async function renderSettings(container, toast) {
             </select>
           </label>
           <label>RSS feeds (één URL per regel)
-            <textarea name="random_rss_feeds" rows="4" placeholder="https://example.com/feed">${data.random_rss_feeds || ''}</textarea>
+            <textarea name="random_rss_feeds" rows="6" placeholder="https://example.com/feed&#10;https://news.example.org/rss">${escapeHtml(data.random_rss_feeds || '')}</textarea>
+            <span class="sch-settings-help" data-role="rss-feed-count">${rssFeedCount} feed${rssFeedCount === 1 ? '' : 's'} ingesteld. Komma's en puntkomma's mogen ook.</span>
           </label>
           <label>Max RSS topics <input type="number" min="1" max="30" name="random_rss_max_topics" value="${data.random_rss_max_topics || 12}"></label>
         </section>
@@ -93,6 +109,8 @@ export async function renderSettings(container, toast) {
 
     const form = container.querySelector('#sch-settings-form');
     const tabButtons = [...container.querySelectorAll('[data-tab-target]')];
+    const rssFeedsInput = form?.querySelector('[name="random_rss_feeds"]');
+    const rssFeedCountLabel = form?.querySelector('[data-role="rss-feed-count"]');
     const tabPanels = [...container.querySelectorAll('[data-tab-panel]')];
 
     const setActiveTab = (tabId) => {
@@ -111,6 +129,13 @@ export async function renderSettings(container, toast) {
 
     tabButtons.forEach((button) => {
       button.addEventListener('click', () => setActiveTab(button.dataset.tabTarget));
+    });
+
+    rssFeedsInput?.addEventListener('input', () => {
+      const count = countRssFeeds(rssFeedsInput.value);
+      if (rssFeedCountLabel) {
+        rssFeedCountLabel.textContent = `${count} feed${count === 1 ? '' : 's'} ingesteld. Komma's en puntkomma's mogen ook.`;
+      }
     });
 
     form?.addEventListener('submit', async (event) => {
