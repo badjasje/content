@@ -72,7 +72,8 @@
 .sch-shortcode-app input[type="search"],
 .sch-shortcode-app input[type="text"],
 .sch-shortcode-app input[type="number"],
-.sch-shortcode-app select {
+.sch-shortcode-app select,
+.sch-shortcode-app textarea {
     border: 1px solid #cbd5e1;
     border-radius: 6px;
     padding: 7px 10px;
@@ -128,13 +129,23 @@
 .sch-shortcode-app [data-role="settings-form"] {
     display: grid;
     gap: 10px;
-    max-width: 320px;
+    max-width: 520px;
 }
 
 .sch-shortcode-app__checkbox {
     display: flex;
     align-items: center;
     gap: 8px;
+}
+
+.sch-shortcode-app textarea {
+    min-height: 120px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.sch-shortcode-app__help {
+    color: #64748b;
+    font-size: 12px;
 }
 
 .sch-shortcode-app__feedback {

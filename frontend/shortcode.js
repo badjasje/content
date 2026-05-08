@@ -91,12 +91,30 @@
         });
     }
 
+    function countRssFeeds(value) {
+        return String(value || '')
+            .split(/[\r\n,;]+/)
+            .map(function (url) { return url.trim(); })
+            .filter(function (url) { return /^https?:\/\//i.test(url); }).length;
+    }
+
+    function updateRssFeedCount($root) {
+        const value = $root.find('[name="random_rss_feeds"]').val() || '';
+        const count = countRssFeeds(value);
+        $root.find('[data-role="rss-feed-count"]').text(count + ' feed' + (count === 1 ? '' : 's') + " ingesteld. Eén URL per regel; komma's en puntkomma's mogen ook.");
+    }
+
     function loadSettings($root) {
         apiRequest('/settings').done(function (payload) {
             const $form = $root.find('[data-role="settings-form"]');
             $form.find('[name="openai_model"]').val(payload.openai_model || '');
             $form.find('[name="openai_temperature"]').val(payload.openai_temperature || '0.6');
             $form.find('[name="enable_auto_discovery"]').prop('checked', !!payload.enable_auto_discovery);
+            $form.find('[name="random_machine_enabled"]').prop('checked', !!payload.random_machine_enabled);
+            $form.find('[name="random_source_mode"]').val(payload.random_source_mode || 'hybrid');
+            $form.find('[name="random_rss_feeds"]').val(payload.random_rss_feeds || '');
+            $form.find('[name="random_rss_max_topics"]').val(payload.random_rss_max_topics || '12');
+            updateRssFeedCount($root);
         });
     }
 
@@ -105,7 +123,11 @@
         const data = {
             openai_model: $form.find('[name="openai_model"]').val(),
             openai_temperature: $form.find('[name="openai_temperature"]').val(),
-            enable_auto_discovery: $form.find('[name="enable_auto_discovery"]').is(':checked')
+            enable_auto_discovery: $form.find('[name="enable_auto_discovery"]').is(':checked'),
+            random_machine_enabled: $form.find('[name="random_machine_enabled"]').is(':checked'),
+            random_source_mode: $form.find('[name="random_source_mode"]').val(),
+            random_rss_feeds: $form.find('[name="random_rss_feeds"]').val(),
+            random_rss_max_topics: $form.find('[name="random_rss_max_topics"]').val()
         };
 
         apiRequest('/settings', {
@@ -138,6 +160,10 @@
                 loadBootstrap($root);
             });
         });
+        $root.on('input', '[name="random_rss_feeds"]', function () {
+            updateRssFeedCount($root);
+        });
+
         $root.on('submit', '[data-role="settings-form"]', function (event) {
             event.preventDefault();
             saveSettings($root);
