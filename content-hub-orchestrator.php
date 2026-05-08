@@ -6501,7 +6501,8 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
         ]);
 
         $article = $this->generate_random_article($site, $keyword, $research);
-        $article_id = $this->store_article($job, $keyword, $client, $site, $article, null, false);
+        $featured_image = $this->ensure_publish_featured_image(null, $keyword, $client, $article);
+        $article_id = $this->store_article($job, $keyword, $client, $site, $article, $featured_image, false);
 
         $publish_status = sanitize_key((string) ($payload['publish_status'] ?? get_option(self::OPTION_RANDOM_STATUS, 'draft')));
         if (!in_array($publish_status, ['draft', 'publish'], true)) {
@@ -6520,7 +6521,7 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
             'backlinks' => [],
         ];
 
-        $publish_result = $this->publish_to_remote_site($site, $publishable_article, null, $job, $keyword, $client, $article_id, $target_category, $publish_status);
+        $publish_result = $this->publish_to_remote_site($site, $publishable_article, $featured_image, $job, $keyword, $client, $article_id, $target_category, $publish_status);
 
         $this->db->update($this->table('articles'), [
             'remote_post_id' => sanitize_text_field((string) ($publish_result['remote_post_id'] ?? '')),
@@ -6763,6 +6764,7 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
                 $featured_image = $decoded_image;
             }
         }
+        $featured_image = $this->ensure_publish_featured_image($featured_image, $keyword, $client, $publishable_article, (int) $article->id);
 
         $publish_result = $this->publish_to_remote_site($site, $publishable_article, $featured_image, $job, $keyword, $client, (int) $article->id);
 
@@ -7925,6 +7927,76 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
             'caption' => (string) ('Photo via Unsplash - ' . (!empty($photo['photographer']) ? $photo['photographer'] : '')),
             'unsplash_id' => (string) ($photo['id'] ?? ''),
         ];
+    }
+
+    private function has_valid_featured_image_payload(?array $featured_image): bool {
+        if (!$featured_image) {
+            return false;
+        }
+
+        $image_url = esc_url_raw((string) ($featured_image['image_url'] ?? ''));
+        return $image_url !== '';
+    }
+
+    private function ensure_publish_featured_image(?array $featured_image, object $keyword, object $client, array $article, int $article_id = 0): ?array {
+        if ($this->has_valid_featured_image_payload($featured_image)) {
+            return $featured_image;
+        }
+
+        if (get_option(self::OPTION_ENABLE_FEATURED_IMAGES, '1') !== '1') {
+            $this->log('info', 'featured_image', 'Featured image controle overgeslagen omdat featured images uit staan.', [
+                'article_id' => $article_id,
+                'keyword_id' => (int) $keyword->id,
+            ]);
+            return null;
+        }
+
+        $this->log('warning', 'featured_image', 'Artikel mist featured image; automatische herstelpoging gestart.', [
+            'article_id' => $article_id,
+            'keyword_id' => (int) $keyword->id,
+            'keyword' => (string) $keyword->main_keyword,
+        ]);
+
+        try {
+            $featured_image = $this->generate_featured_image_payload($keyword, $client, $article);
+        } catch (Throwable $e) {
+            $this->log('error', 'featured_image', 'Featured image herstel mislukt.', [
+                'article_id' => $article_id,
+                'keyword_id' => (int) $keyword->id,
+                'error' => $e->getMessage(),
+            ]);
+            throw new RuntimeException('Artikel heeft geen featured image en kon niet automatisch worden hersteld: ' . $e->getMessage());
+        }
+
+        if (!$this->has_valid_featured_image_payload($featured_image)) {
+            $this->log('error', 'featured_image', 'Featured image herstel leverde geen bruikbare afbeelding op.', [
+                'article_id' => $article_id,
+                'keyword_id' => (int) $keyword->id,
+            ]);
+            throw new RuntimeException('Artikel heeft geen featured image en kon niet automatisch worden hersteld. Controleer de Unsplash API key en featured image instellingen.');
+        }
+
+        if ($article_id > 0) {
+            $updated = $this->db->update($this->table('articles'), [
+                'featured_image_data' => wp_json_encode($featured_image),
+                'updated_at' => $this->now(),
+            ], ['id' => $article_id]);
+
+            if ($updated === false) {
+                $this->log('warning', 'featured_image', 'Herstelde featured image kon niet worden opgeslagen bij artikel.', [
+                    'article_id' => $article_id,
+                    'db_error' => $this->db->last_error,
+                ]);
+            }
+        }
+
+        $this->log('info', 'featured_image', 'Ontbrekende featured image automatisch hersteld.', [
+            'article_id' => $article_id,
+            'keyword_id' => (int) $keyword->id,
+            'image_url' => (string) ($featured_image['image_url'] ?? ''),
+        ]);
+
+        return $featured_image;
     }
 
     private function derive_unsplash_search_term_via_openai(string $term_name, string $description): string {
