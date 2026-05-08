@@ -6501,7 +6501,21 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
         ]);
 
         $article = $this->generate_random_article($site, $keyword, $research);
-        $article_id = $this->store_article($job, $keyword, $client, $site, $article, null, false);
+
+        $featured_image = null;
+        if (get_option(self::OPTION_ENABLE_FEATURED_IMAGES, '1') === '1') {
+            try {
+                $featured_image = $this->generate_featured_image_payload($keyword, $client, $article);
+            } catch (Throwable $e) {
+                $this->log('warning', 'featured_image', 'Featured image stap overgeslagen voor random artikel', [
+                    'job_id' => (int) $job->id,
+                    'site_id' => (int) $site->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        $article_id = $this->store_article($job, $keyword, $client, $site, $article, $featured_image, false);
 
         $publish_status = sanitize_key((string) ($payload['publish_status'] ?? get_option(self::OPTION_RANDOM_STATUS, 'draft')));
         if (!in_array($publish_status, ['draft', 'publish'], true)) {
@@ -6520,7 +6534,7 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
             'backlinks' => [],
         ];
 
-        $publish_result = $this->publish_to_remote_site($site, $publishable_article, null, $job, $keyword, $client, $article_id, $target_category, $publish_status);
+        $publish_result = $this->publish_to_remote_site($site, $publishable_article, $featured_image, $job, $keyword, $client, $article_id, $target_category, $publish_status);
 
         $this->db->update($this->table('articles'), [
             'remote_post_id' => sanitize_text_field((string) ($publish_result['remote_post_id'] ?? '')),
