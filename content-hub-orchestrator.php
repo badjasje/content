@@ -6011,20 +6011,9 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
             'site_name' => (string) $site->name,
         ]);
 
-        $site_page = [];
-        try {
-            $site_page = $this->fetch_and_extract_page((string) $site->base_url);
-        } catch (Throwable $e) {
-            $this->vlog('random_machine', 'Site homepage analyse overgeslagen', [
-                'site_id' => (int) $site->id,
-                'error' => $e->getMessage(),
-            ]);
-        }
-
         $recent_rows = $this->db->get_results($this->db->prepare(
-            "SELECT a.title, a.meta_description, a.created_at, k.main_keyword
+            "SELECT a.title, a.meta_description, a.created_at
              FROM {$this->table('articles')} a
-             LEFT JOIN {$this->table('keywords')} k ON k.id = a.keyword_id
              WHERE a.site_id=%d
              ORDER BY a.id DESC
              LIMIT 14",
@@ -6035,7 +6024,6 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
         foreach ((array) $recent_rows as $row) {
             $recent_topics[] = [
                 'title' => sanitize_text_field((string) ($row->title ?? '')),
-                'main_keyword' => sanitize_text_field((string) ($row->main_keyword ?? '')),
                 'created_at' => sanitize_text_field((string) ($row->created_at ?? '')),
             ];
         }
@@ -6059,7 +6047,7 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
             'random_topic_research',
             [
                 'role' => 'Je bent een Nederlandse content researcher voor blogs.',
-                'goal' => 'Bepaal één vers, niche-passend onderwerp met keywordset en intent voor een linkloos artikel. Gebruik trends-signalen als nieuwsinput wanneer die zijn meegegeven. Geef alleen JSON terug.',
+                'goal' => 'Bepaal één vers, niche-passend onderwerp met keywordset en intent voor een linkloos artikel. Gebruik trends- en RSS-signalen als enige topicbron wanneer die zijn meegegeven; put nooit uit keywords van websites of klanten. Geef alleen JSON terug.',
             ],
             [
                 'site' => [
@@ -6067,8 +6055,6 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
                     'name' => (string) $site->name,
                     'base_url' => (string) $site->base_url,
                     'default_category' => (string) $site->default_category,
-                    'homepage_title' => (string) ($site_page['title'] ?? ''),
-                    'homepage_text_excerpt' => (string) mb_substr((string) ($site_page['text'] ?? ''), 0, 4000),
                 ],
                 'recent_topics' => $recent_topics,
                 'google_trends_signals' => $trends_used,
@@ -6082,6 +6068,8 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
                     'secondary_keywords_min' => 3,
                     'secondary_keywords_max' => 8,
                     'avoid_overlap_with_recent_topics' => true,
+                    'do_not_use_client_or_website_keywords' => true,
+                    'ignore_any_customer_keyword_sets' => true,
                     'content_source_mode' => $source_mode,
                     'avoid_topics_already_present_in_rss_signals' => true,
                 ],
@@ -6655,6 +6643,8 @@ https://news.example.org/rss"><?php echo esc_textarea((string) get_option(self::
                     'no_h1_in_content' => true,
                     'seo_but_natural' => true,
                     'non_generic_site_specific_angle' => true,
+                    'do_not_use_client_or_website_keywords' => true,
+                    'use_only_random_machine_research_keywords' => true,
                 ],
             ],
             [
